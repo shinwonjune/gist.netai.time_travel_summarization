@@ -61,7 +61,10 @@ modules = [
     "pyarrow",
     "minio",
     "psutil",
-    "carb"
+    "carb",
+    "imageio",
+    "imageio-ffmpeg",
+    "pillow",         # B2 overlay composer
 ]
 
 use_online_index = true

@@ -79,6 +79,15 @@ class VLMClientWindow:
                     ui.Label("Status:", width=50, style={"font_size": 16})
                     self._status_label = ui.Label("Ready", style={"color": 0xFF00AA00, "font_size": 16})
 
+                with ui.HStack(height=28, spacing=8):
+                    ui.Label("Capture:", width=60, style={"font_size": 15, "font_weight": "bold"})
+                    self._a1_capture_button = ui.Button("A1 (baseline)", width=0)
+                    self._a1_capture_button.set_clicked_fn(self._on_a1_capture_clicked)
+                    self._a1_status_label = ui.Label("Idle", style={"color": 0xFF888888, "font_size": 14})
+                    self._a2_capture_button = ui.Button("A2 (realtime)", width=0)
+                    self._a2_capture_button.set_clicked_fn(self._on_a2_capture_clicked)
+                    self._a2_status_label = ui.Label("Idle", style={"color": 0xFF888888, "font_size": 14})
+
     def _on_upload_clicked(self):
         """Handle Upload button click."""
         video_filename = self._video_filename_field.model.get_value_as_string()
@@ -201,6 +210,76 @@ class VLMClientWindow:
             return
 
         self._update_status("Generation failed. Check console for details.", is_error=True)
+
+    def _on_a1_capture_clicked(self):
+        self._a1_capture_button.enabled = False
+        self._a1_status_label.text = "Capturing (A1)..."
+
+        def _worker():
+            try:
+                from datetime import datetime as _dt
+                from pathlib import Path as _P
+
+                from ..app.paths import ExtensionPaths
+                from ..video_capture import CaptureRequest, MovieCaptureRunner
+
+                paths = ExtensionPaths(_P(__file__).resolve().parent.parent)
+                ts = _dt.now().strftime("%Y%m%dT%H%M%S")
+                out = (paths.videos_dir / f"a1_{ts}.mp4").resolve().as_uri()
+                req = CaptureRequest(duration_s=10.0, output_uri=out, label="ui_button")
+                runner = MovieCaptureRunner()
+                res = runner.capture(req)
+                msg = (
+                    f"A1 OK {res.wall_clock_s:.1f}s {res.output_size_bytes // 1024}KB"
+                    if res.success
+                    else f"A1 FAIL {res.error}"
+                )
+            except Exception as exc:
+                msg = f"A1 ERROR {exc!r}"
+
+            self._ui_dispatcher.submit(
+                lambda: (
+                    setattr(self._a1_status_label, "text", msg),
+                    setattr(self._a1_capture_button, "enabled", True),
+                )
+            )
+
+        threading.Thread(target=_worker, daemon=True).start()
+
+    def _on_a2_capture_clicked(self):
+        self._a2_capture_button.enabled = False
+        self._a2_status_label.text = "Capturing (A2)..."
+
+        def _worker():
+            try:
+                from datetime import datetime as _dt
+                from pathlib import Path as _P
+
+                from ..app.paths import ExtensionPaths
+                from ..extension import get_active_core
+                from ..video_capture import CaptureRequest, RealtimeCaptureRunner
+
+                paths = ExtensionPaths(_P(__file__).resolve().parent.parent)
+                ts = _dt.now().strftime("%Y%m%dT%H%M%S")
+                out = (paths.videos_dir / f"a2_{ts}.mp4").resolve().as_uri()
+                req = CaptureRequest(duration_s=10.0, output_uri=out, label="ui_button")
+                runner = RealtimeCaptureRunner(core=get_active_core())
+                res = runner.capture(req)
+                if res.success:
+                    msg = f"A2 OK {res.wall_clock_s:.1f}s {res.output_size_bytes // 1024}KB drop={res.dropped_frames}"
+                else:
+                    msg = f"A2 FAIL {res.error}"
+            except Exception as exc:
+                msg = f"A2 ERROR {exc!r}"
+
+            self._ui_dispatcher.submit(
+                lambda: (
+                    setattr(self._a2_status_label, "text", msg),
+                    setattr(self._a2_capture_button, "enabled", True),
+                )
+            )
+
+        threading.Thread(target=_worker, daemon=True).start()
     
     def destroy(self):
         """Clean up the window."""

@@ -1,16 +1,18 @@
 import json
 from pathlib import Path
-from typing import Dict, List, Tuple
+from typing import Dict, List, Optional, Tuple
 
 from ..app.paths import ExtensionPaths
+from ..storage import from_uri
 
 
 class EventSummaryService:
-    def __init__(self, module_dir: Path, repository):
+    def __init__(self, module_dir: Path, repository, output_root_uri: Optional[str] = None):
         self._module_dir = module_dir
         self._repository = repository
         self._event_positions: Dict[str, Tuple[float, float, float]] = {}
         self._paths = ExtensionPaths(module_dir)
+        self._output_root_uri = output_root_uri
 
     def get_event_position(self, timestamp: str):
         return self._event_positions.get(timestamp)
@@ -56,18 +58,37 @@ class EventSummaryService:
         vlm_data = load_json(str(source_path))
         events = consolidate_events(vlm_data, base_date="2025-01-01")
 
-        output_jsonl = self._paths.intermediate_results_dir / f"{source_path.stem}_intermediate.jsonl"
-        save_jsonl(events, str(output_jsonl))
+        output_jsonl_uri = self._resolve_output_uri(
+            "intermediate_results",
+            f"{source_path.stem}_intermediate.jsonl",
+        )
+        serialized_events = "".join(
+            json.dumps({timestamp: events[timestamp]}, ensure_ascii=False) + "\n"
+            for timestamp in sorted(events.keys())
+        )
+        from_uri(output_jsonl_uri).put_bytes(
+            output_jsonl_uri,
+            serialized_events.encode("utf-8"),
+            content_type="application/x-ndjson",
+        )
 
         event_list = self._generate_event_list(events)
         if not event_list:
             return False
 
-        output_eventlist = self._paths.event_list_dir / f"{source_path.stem}_eventlist.jsonl"
-
-        with open(output_eventlist, "w", encoding="utf-8") as file:
-            for entry in event_list:
-                file.write(json.dumps(entry, ensure_ascii=False) + "\n")
+        output_eventlist_uri = self._resolve_output_uri(
+            "event_list",
+            f"{source_path.stem}_eventlist.jsonl",
+        )
+        serialized_event_list = "".join(
+            json.dumps(entry, ensure_ascii=False) + "\n"
+            for entry in event_list
+        )
+        from_uri(output_eventlist_uri).put_bytes(
+            output_eventlist_uri,
+            serialized_event_list.encode("utf-8"),
+            content_type="application/x-ndjson",
+        )
 
         self._event_positions = {
             entry["timestamp"]: (
@@ -78,6 +99,19 @@ class EventSummaryService:
             for entry in event_list
         }
         return True
+
+    def _resolve_output_uri(self, subdir: str, filename: str) -> str:
+        """Return URI for writing an artifact. Falls back to local Path's file:// URI."""
+        if self._output_root_uri:
+            root = self._output_root_uri.rstrip("/")
+            return f"{root}/{subdir}/{filename}"
+        if subdir == "intermediate_results":
+            base = self._paths.intermediate_results_dir
+        elif subdir == "event_list":
+            base = self._paths.event_list_dir
+        else:
+            base = self._paths.artifacts_dir / subdir
+        return (base / filename).resolve().as_uri()
 
     def _generate_event_list(self, events: Dict[str, List[List[str]]]) -> List[Dict]:
         position_data = []

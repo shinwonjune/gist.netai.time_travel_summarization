@@ -1,5 +1,6 @@
 import csv
 import datetime
+import io
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
@@ -14,18 +15,41 @@ class TrajectoryRepository:
         self._data_start_time: Optional[datetime.datetime] = None
         self._data_end_time: Optional[datetime.datetime] = None
 
-    def load_csv(self, csv_path: Path) -> bool:
-        self.clear()
+    def load_from_uri(self, uri: str) -> bool:
+        """Load trajectory data from any URI scheme supported by storage.from_uri.
 
-        with open(csv_path, "r", encoding="utf-8") as file:
-            reader = csv.DictReader(file)
-            for row in reader:
-                timestamp = row["timestamp"]
-                self._data.setdefault(timestamp, {})[row["objid"]] = (
-                    float(row["x"]),
-                    float(row["y"]),
-                    float(row["z"]),
-                )
+        Supports:
+          - file:// or local path -> existing CSV behavior (.csv) or Parquet (.parquet)
+          - s3://bucket/key       -> via MinioAdapter, read bytes then parse same as above
+
+        Detection: by URI extension (case-insensitive).
+        """
+        from ..storage import from_uri
+
+        self.clear()
+        lower_uri = uri.lower()
+        if not lower_uri.endswith((".csv", ".parquet")):
+            return False
+
+        adapter = from_uri(uri)
+        with adapter.open_read(uri) as stream:
+            if lower_uri.endswith(".csv"):
+                text = stream.read().decode("utf-8")
+                reader = csv.DictReader(io.StringIO(text))
+                rows = reader
+            else:
+                import pyarrow.parquet as pq
+
+                table = pq.read_table(io.BytesIO(stream.read()))
+                rows = table.to_pylist()
+
+        for row in rows:
+            timestamp = row["timestamp"]
+            self._data.setdefault(timestamp, {})[row["objid"]] = (
+                float(row["x"]),
+                float(row["y"]),
+                float(row["z"]),
+            )
 
         self._timestamps = list(self._data.keys())
         if self._timestamps:
@@ -33,6 +57,9 @@ class TrajectoryRepository:
             self._data_end_time = self.parse_timestamp(self._timestamps[-1])
 
         return bool(self._timestamps)
+
+    def load_csv(self, csv_path: Path) -> bool:
+        return self.load_from_uri(Path(csv_path).resolve().as_uri())
 
     @property
     def timestamps(self) -> List[str]:

@@ -1,35 +1,39 @@
 # SPDX-FileCopyrightText: Copyright (c) 2024 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: LicenseRef-NvidiaProprietary
 
-import omni.ext
-import omni.ui as ui
-import omni.usd
-from pxr import Usd, UsdGeom, Gf
-import carb
 import os
 from pathlib import Path
-from .ui.main_window import TimeTravelWindow
-from .app.facade import TimeTravelCore
-from .event_processing.window import EventProcessingWindow
-from .vlm_client.core import VLMClientCore
-from .vlm_client.window import VLMClientWindow
 
-# Optional imports for overlay (with error handling)
+_INSTANCE_REGISTRY = {}
+
+
+def get_active_core():
+    """Return the active TimeTravelCore instance, or None if extension not started."""
+    return _INSTANCE_REGISTRY.get("core")
+
+
+# Kit이 extension을 인식하려면 omni.ext.IExt를 상속해야 함.
+# headless(WSL) 환경에선 omni.ext 부재 → object로 폴백해서 module import만 가능하게.
 try:
-    from .overlay.core import ViewOverlay
-    from .overlay.window import OverlayControlWindow
-    from omni.kit.viewport.utility import get_active_viewport_window
-    OVERLAY_AVAILABLE = True
-except Exception as e:
-    carb.log_warn(f"[TimeTravel] Overlay components not available: {e}")
-    OVERLAY_AVAILABLE = False
+    import omni.ext as _omni_ext  # noqa: WPS433
+    _IExtBase = _omni_ext.IExt
+except ImportError:
+    _IExtBase = object
 
 
-class NetAITimetravelDreamAI(omni.ext.IExt):
+class NetAITimetravelDreamAI(_IExtBase):
     """Time Travel Extension for visualizing object movements over time."""
     
     def on_startup(self, ext_id):
         """Initialize the extension."""
+        import carb
+
+        from .app.facade import TimeTravelCore
+        from .event_processing.window import EventProcessingWindow
+        from .ui.main_window import TimeTravelWindow
+        from .vlm_client.core import VLMClientCore
+        from .vlm_client.window import VLMClientWindow
+
         print("[netai.timetravel_dreamai] Extension startup")
         
         # Print current working directory and extension path
@@ -39,6 +43,7 @@ class NetAITimetravelDreamAI(omni.ext.IExt):
         
         # Initialize core logic
         self._core = TimeTravelCore() 
+        _INSTANCE_REGISTRY["core"] = self._core
         
         # Load configuration
         config_path = extension_dir / "config.json"
@@ -66,7 +71,17 @@ class NetAITimetravelDreamAI(omni.ext.IExt):
         self._overlay = None
         self._overlay_control = None
         
-        if OVERLAY_AVAILABLE:
+        try:
+            from .overlay.core import ViewOverlay
+            from .overlay.window import OverlayControlWindow
+            from omni.kit.viewport.utility import get_active_viewport_window
+
+            overlay_available = True
+        except Exception as e:
+            carb.log_warn(f"[TimeTravel] Overlay components not available: {e}")
+            overlay_available = False
+
+        if overlay_available:
             try:
                 # Get active viewport window
                 viewport_window = get_active_viewport_window()
@@ -118,6 +133,8 @@ class NetAITimetravelDreamAI(omni.ext.IExt):
     
     def on_shutdown(self):
         """Clean up the extension."""
+        import carb
+
         print("[netai.timetravel_dreamai] Extension shutdown")
         
         # Clean up subscription
@@ -175,4 +192,5 @@ class NetAITimetravelDreamAI(omni.ext.IExt):
                 carb.log_info("[Extension] TimeTravel objects cleared")
             except Exception as e:
                 carb.log_error(f"[Extension] Error clearing TimeTravel objects: {e}")
+            _INSTANCE_REGISTRY.pop("core", None)
             self._core = None

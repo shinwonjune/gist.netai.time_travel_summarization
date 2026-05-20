@@ -43,6 +43,21 @@ class ExtensionConfig:
     def config_dir(self) -> Path:
         return self.config_path.parent
 
+    @property
+    def data_uri(self) -> str:
+        """Return data_path as a URI.
+
+        Existing URI values are returned unchanged. Local paths are resolved against
+        the config directory before conversion to file:// URIs.
+        """
+        raw = self.data_path
+        if "://" in raw:
+            return raw
+        path = Path(raw)
+        if not path.is_absolute():
+            path = (self.config_dir / raw.lstrip("./")).resolve()
+        return path.resolve().as_uri()
+
     @classmethod
     def from_file(cls, config_path: str) -> "ExtensionConfig":
         path = Path(config_path)
@@ -66,7 +81,18 @@ class ExtensionConfig:
         return self.config_dir / value.lstrip("./")
 
     def resolve_data_path(self, module_dir: Path) -> Path:
-        path = Path(self.data_path)
+        raw = self.data_path
+        if "://" in raw:
+            from urllib.parse import urlparse
+
+            parsed = urlparse(raw)
+            if parsed.scheme == "file":
+                return Path(parsed.path)
+            raise ValueError(
+                f"resolve_data_path() returns a Path and cannot handle scheme {parsed.scheme!r}; "
+                f"use ExtensionConfig.data_uri or TrajectoryRepository.load_from_uri instead."
+            )
+        path = Path(raw)
         if path.is_absolute():
             return path
-        return module_dir / self.data_path.lstrip("./")
+        return module_dir / raw.lstrip("./")

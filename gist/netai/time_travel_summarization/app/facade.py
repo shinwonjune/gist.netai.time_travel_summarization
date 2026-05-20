@@ -50,14 +50,14 @@ class TimeTravelCore:
                 carb.log_error("[TimeTravel] Config must be loaded before data")
                 return False
 
-            path = self._config.resolve_data_path(self._module_dir)
-            carb.log_info(f"[TimeTravel] Looking for data file at: {path}")
+            uri = self._config.data_uri
+            carb.log_info(f"[TimeTravel] Looking for data at URI: {uri}")
 
-            if not path.exists():
-                carb.log_error(f"[TimeTravel] Data file not found: {path}")
+            loaded = self._repository.load_from_uri(uri)
+            if not loaded:
+                carb.log_error(f"[TimeTravel] Data load failed for URI: {uri}")
                 return False
 
-            loaded = self._repository.load_csv(path)
             self._playback.configure_data_range(
                 self._repository.data_start_time,
                 self._repository.data_end_time,
@@ -66,7 +66,7 @@ class TimeTravelCore:
                 f"[TimeTravel] Data loaded: {len(self._repository.timestamps)} timestamps, "
                 f"{self._repository.data_start_time} to {self._repository.data_end_time}"
             )
-            return loaded
+            return True
         except Exception as e:
             carb.log_error(f"[TimeTravel] Failed to load data: {e}")
             return False
