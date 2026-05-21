@@ -115,6 +115,13 @@ class TimeTravelWindow:
                     self._physics_mode_button = ui.Button("Physics", width=90)
                     self._physics_mode_button.set_clicked_fn(self._on_physics_mode_clicked)
                     self._mode_label = ui.Label("", style={"color": 0xFF888888})
+
+                with ui.HStack(height=28, spacing=8):
+                    self._move_button = ui.Button("Move", width=0)
+                    self._move_button.set_clicked_fn(self._on_move_toggle)
+                    self._trace_button = ui.Button("Trace", width=0)
+                    self._trace_button.set_clicked_fn(self._on_trace_toggle)
+                    self._trace_status = ui.Label("Idle", style={"color": 0xFF888888})
                 
                 # Separator
                 ui.Spacer(height=5)
@@ -182,8 +189,29 @@ class TimeTravelWindow:
     def _on_physics_mode_clicked(self):
         """Switch to PhysX wandering mode."""
         self._core.set_physics_mode()
+        if self._core.is_wandering():
+            self._core.stop_wander()
         self._update_mode_controls()
+        self._update_move_trace_controls()
         self._update_play_button()
+
+    def _on_move_toggle(self):
+        if self._core.is_wandering():
+            self._core.stop_wander()
+            self._move_button.text = "Move"
+        else:
+            if self._core.start_wander():
+                self._move_button.text = "Stop Move"
+
+    def _on_trace_toggle(self):
+        if self._core.is_tracing():
+            out = self._core.stop_trace()
+            self._trace_button.text = "Trace"
+            self._trace_status.text = f"Saved: {out}"
+        else:
+            self._core.start_trace()
+            self._trace_button.text = "Stop Trace"
+            self._trace_status.text = "Recording..."
     
     def _on_slider_changed(self, model):
         """Handle slider value change."""
@@ -255,6 +283,15 @@ class TimeTravelWindow:
         self._mode_label.text = mode.capitalize()
         self._playback_mode_button.enabled = mode != "playback"
         self._physics_mode_button.enabled = mode != "physics"
+
+    def _update_move_trace_controls(self):
+        """Update Move and Trace controls from facade state."""
+        self._move_button.text = "Stop Move" if self._core.is_wandering() else "Move"
+        if self._core.is_tracing():
+            self._trace_button.text = "Stop Trace"
+            self._trace_status.text = "Recording..."
+        else:
+            self._trace_button.text = "Trace"
     
     def _update_goto_fields(self):
         """Update goto time fields with current time."""
@@ -286,6 +323,7 @@ class TimeTravelWindow:
         # Update play button
         self._update_play_button()
         self._update_mode_controls()
+        self._update_move_trace_controls()
     
     def destroy(self):
         """Clean up the window."""

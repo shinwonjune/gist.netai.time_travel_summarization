@@ -27,7 +27,12 @@ def _default_proxy_translate(stage, shape: str, radius: float, height: float):
     from pxr import Gf, UsdGeom
 
     up_axis = UsdGeom.GetStageUpAxis(stage)
-    offset = radius if shape == "sphere" else height / 2.0 + radius
+    if shape == "sphere":
+        offset = radius
+    elif shape == "cylinder":
+        offset = height / 2.0
+    else:
+        offset = height / 2.0 + radius
     if up_axis == UsdGeom.Tokens.y:
         return Gf.Vec3d(0.0, offset, 0.0)
     return Gf.Vec3d(0.0, 0.0, offset)
@@ -50,7 +55,7 @@ def _bind_physics_material(stage, target_prim, proxy_prim, restitution: float) -
 def wrap_with_collision_proxy(
     stage,
     target_prim,
-    shape: str = "capsule",
+    shape: str = "cylinder",
     radius: float = 0.4,
     height: float = 1.7,
     mass: float = 80.0,
@@ -67,7 +72,7 @@ def wrap_with_collision_proxy(
     height_units = height * m_to_units
 
     bbox_cache = UsdGeom.BBoxCache(0, [UsdGeom.Tokens.default_, UsdGeom.Tokens.render], useExtentsHint=True)
-    bbox = bbox_cache.ComputeLocalBound(target_prim)
+    bbox = bbox_cache.ComputeWorldBound(target_prim)
     range_ = bbox.ComputeAlignedRange()
     bb_min = range_.GetMin()
     bb_max = range_.GetMax()
@@ -95,17 +100,16 @@ def wrap_with_collision_proxy(
         carb.log_warn(f"[Physics] prim transform diag failed for {target_prim.GetPath()}: {_diag_err!r}")
     bbox_valid = not range_.IsEmpty() and _is_finite_vec(bb_min) and _is_finite_vec(bb_max)
 
-    capsule_radius = radius_units
-    capsule_height = height_units
+    proxy_radius = radius_units
+    proxy_height = height_units
     local_translate = _default_proxy_translate(stage, shape, radius_units, height_units)
     up_axis = UsdGeom.GetStageUpAxis(stage)
     is_y_up = up_axis == UsdGeom.Tokens.y
     world_up = Gf.Vec3d(0, 1, 0) if is_y_up else Gf.Vec3d(0, 0, 1)
     local_up = world_up
     axis_name = "Y" if is_y_up else "Z"
-    if shape == "capsule" and bbox_valid:
+    if shape in ("capsule", "cylinder") and bbox_valid:
         inv_xform = prim_world_xform.GetInverse()
-        local_translate = inv_xform.Transform(bb_center)
 
         rotation = prim_world_xform.ExtractRotation()
         inv_rotation = rotation.GetInverse()
@@ -116,9 +120,17 @@ def wrap_with_collision_proxy(
 
         sizes = [abs(bb_size[0]), abs(bb_size[1]), abs(bb_size[2])]
         world_up_idx = 1 if is_y_up else 2
-        capsule_height = max(sizes[world_up_idx] * 0.9, 0.1 * m_to_units)
+        height_scale = 0.45 if shape == "cylinder" else 0.9
+        proxy_height = max(sizes[world_up_idx] * height_scale, 0.1 * m_to_units)
         other_dims = [sizes[i] for i in range(3) if i != world_up_idx]
-        capsule_radius = max(min(other_dims) * 0.45, 0.05 * m_to_units)
+        proxy_radius = max(min(other_dims) * 0.45, 0.05 * m_to_units)
+
+        if shape == "cylinder":
+            world_target = [bb_center[0], bb_center[1], bb_center[2]]
+            world_target[world_up_idx] = bb_min[world_up_idx] + proxy_height / 2.0
+            local_translate = inv_xform.Transform(Gf.Vec3d(world_target[0], world_target[1], world_target[2]))
+        else:
+            local_translate = inv_xform.Transform(bb_center)
 
     carb.log_warn(
         f"[Physics] proxy for {target_prim.GetPath()}: "
@@ -126,11 +138,11 @@ def wrap_with_collision_proxy(
         f"bbox_size={tuple(bb_size)} bbox_center={tuple(bb_center)} "
         f"local_translate(in-prim-local)={tuple(local_translate)} "
         f"world_up_in_prim_local={tuple(local_up)} "
-        f"capsule axis={axis_name} height={capsule_height:.2f} radius={capsule_radius:.2f} (stage units)"
+        f"shape={shape} axis={axis_name} height={proxy_height:.2f} radius={proxy_radius:.2f} (stage units)"
     )
 
-    if shape not in ("sphere", "capsule"):
-        raise ValueError("shape must be 'sphere' or 'capsule'")
+    if shape not in ("sphere", "capsule", "cylinder"):
+        raise ValueError("shape must be 'sphere', 'capsule', or 'cylinder'")
 
     proxy_path = target_prim.GetPath().AppendChild(_PROXY_NAME)
     proxy_prim = stage.GetPrimAtPath(proxy_path)
@@ -140,21 +152,51 @@ def wrap_with_collision_proxy(
             proxy_geom.CreateRadiusAttr().Set(radius_units)
             proxy_prim = proxy_geom.GetPrim()
         else:
-            proxy_geom = UsdGeom.Capsule.Define(stage, proxy_path)
-            proxy_geom.CreateRadiusAttr().Set(capsule_radius)
-            proxy_geom.CreateHeightAttr().Set(capsule_height)
-            if hasattr(proxy_geom, "CreateAxisAttr"):
-                proxy_geom.CreateAxisAttr().Set(axis_name)
+            if shape == "cylinder":
+                try:
+                    proxy_geom = UsdGeom.Cylinder.Define(stage, str(proxy_path))
+                    proxy_geom.CreateRadiusAttr().Set(proxy_radius)
+                    proxy_geom.CreateHeightAttr().Set(proxy_height)
+                    if hasattr(proxy_geom, "CreateAxisAttr"):
+                        proxy_geom.CreateAxisAttr().Set(axis_name)
+                except Exception as exc:
+                    carb.log_warn(f"[Physics] Cylinder unsupported, falling back to Capsule: {exc}")
+                    proxy_geom = UsdGeom.Capsule.Define(stage, str(proxy_path))
+                    proxy_geom.CreateRadiusAttr().Set(proxy_radius)
+                    proxy_geom.CreateHeightAttr().Set(proxy_height)
+                    if hasattr(proxy_geom, "CreateAxisAttr"):
+                        proxy_geom.CreateAxisAttr().Set(axis_name)
+            else:
+                proxy_geom = UsdGeom.Capsule.Define(stage, proxy_path)
+                proxy_geom.CreateRadiusAttr().Set(proxy_radius)
+                proxy_geom.CreateHeightAttr().Set(proxy_height)
+                if hasattr(proxy_geom, "CreateAxisAttr"):
+                    proxy_geom.CreateAxisAttr().Set(axis_name)
             proxy_prim = proxy_geom.GetPrim()
     elif shape == "sphere":
         proxy_geom = UsdGeom.Sphere(proxy_prim)
         proxy_geom.CreateRadiusAttr().Set(radius_units)
     else:
-        proxy_geom = UsdGeom.Capsule(proxy_prim)
-        proxy_geom.CreateRadiusAttr().Set(capsule_radius)
-        proxy_geom.CreateHeightAttr().Set(capsule_height)
-        if hasattr(proxy_geom, "CreateAxisAttr"):
-            proxy_geom.CreateAxisAttr().Set(axis_name)
+        if shape == "cylinder":
+            try:
+                proxy_geom = UsdGeom.Cylinder.Define(stage, str(proxy_path))
+                proxy_geom.CreateRadiusAttr().Set(proxy_radius)
+                proxy_geom.CreateHeightAttr().Set(proxy_height)
+                if hasattr(proxy_geom, "CreateAxisAttr"):
+                    proxy_geom.CreateAxisAttr().Set(axis_name)
+            except Exception as exc:
+                carb.log_warn(f"[Physics] Cylinder unsupported, falling back to Capsule: {exc}")
+                proxy_geom = UsdGeom.Capsule(proxy_prim)
+                proxy_geom.CreateRadiusAttr().Set(proxy_radius)
+                proxy_geom.CreateHeightAttr().Set(proxy_height)
+                if hasattr(proxy_geom, "CreateAxisAttr"):
+                    proxy_geom.CreateAxisAttr().Set(axis_name)
+        else:
+            proxy_geom = UsdGeom.Capsule(proxy_prim)
+            proxy_geom.CreateRadiusAttr().Set(proxy_radius)
+            proxy_geom.CreateHeightAttr().Set(proxy_height)
+            if hasattr(proxy_geom, "CreateAxisAttr"):
+                proxy_geom.CreateAxisAttr().Set(axis_name)
 
     _set_proxy_transform(proxy_prim, local_translate)
     imageable = UsdGeom.Imageable(proxy_prim)
@@ -170,6 +212,8 @@ def wrap_with_collision_proxy(
     rigid_body.CreateRigidBodyEnabledAttr().Set(True)
     mass_api = _ensure_api(UsdPhysics.MassAPI, target_prim)
     mass_api.CreateMassAttr().Set(mass)
+    # PhysxContactReportAPI: 이 Kit 버전에서 어디에 붙여도 startup PhysX abort 발생.
+    # WanderController의 position-displacement stuck detection이 충돌 트리거를 cover.
     _bind_physics_material(stage, target_prim, proxy_prim, restitution)
     return target_prim
 

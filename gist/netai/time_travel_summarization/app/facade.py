@@ -27,6 +27,7 @@ class TimeTravelCore:
         self._stage_objects = StageObjectController()
         self._events = EventSummaryService(self._module_dir, self._repository)
         self._wander = None
+        self._trace = None
         self._stage_objects.ensure_summarization_camera()
 
     def load_config(self, config_path: str) -> bool:
@@ -120,6 +121,77 @@ class TimeTravelCore:
 
     def update(self, dt: float):
         self._playback.update(dt, self._parse_timestamp, self.set_current_time, self._on_event_requested)
+        if self._trace and self._trace.active:
+            try:
+                self._trace.tick()
+            except Exception as e:
+                carb.log_warn(f"[Trace] tick failed: {e}")
+
+    def start_wander(self) -> bool:
+        """Start PhysX wandering when Physics mode has created a controller."""
+        if not self._wander:
+            carb.log_warn("[TimeTravel] start_wander: Physics mode is not active")
+            return False
+        self._wander.start()
+        return True
+
+    def set_velocity_mode(self, mode: str) -> bool:
+        """콘솔에서 velocity 모드 즉시 토글 (per_tick / on_enter)."""
+        if not self._wander:
+            carb.log_warn("[TimeTravel] set_velocity_mode: Physics 모드 아님")
+            return False
+        return self._wander.set_velocity_mode(mode)
+
+    def stop_wander(self) -> bool:
+        if not self._wander:
+            return False
+        self._wander.stop()
+        return True
+
+    def is_wandering(self) -> bool:
+        return bool(self._wander and getattr(self._wander, "is_active", lambda: False)())
+
+    def start_trace(self, output_path: Optional[str] = None) -> str:
+        """Start streaming current astronaut coordinates to a trajectory CSV."""
+        from datetime import datetime as _dt
+
+        import omni.usd
+
+        from ..physics import TraceRecorder
+
+        if self._trace and self._trace.active:
+            carb.log_warn("[TimeTravel] trace already active")
+            return str(self._trace.output_path)
+
+        if output_path is None:
+            ts = _dt.now().strftime("%Y%m%dT%H%M%S")
+            output_path = str(self._module_dir / "data" / f"physics_trace_{ts}.csv")
+
+        resolved = {}
+        stage = omni.usd.get_context().get_stage()
+        if stage:
+            for objid, prim_path in self._prim_map.items():
+                prim = stage.GetPrimAtPath(prim_path)
+                if prim and prim.IsValid():
+                    resolved[objid] = prim
+        else:
+            carb.log_warn("[Trace] recording without an active stage")
+
+        self._trace = TraceRecorder(resolved, output_path)
+        self._trace.start()
+        carb.log_warn(f"[Trace] recording started -> {output_path}")
+        return output_path
+
+    def stop_trace(self) -> Optional[str]:
+        if not self._trace or not self._trace.active:
+            return None
+        out = self._trace.stop()
+        rows = self._trace.row_count
+        carb.log_warn(f"[Trace] saved {rows} rows to {out}")
+        return str(out)
+
+    def is_tracing(self) -> bool:
+        return bool(self._trace and self._trace.active)
 
     def set_physics_mode(self) -> None:
         """Enable PhysX-driven wandering for the configured astronaut prims."""
@@ -156,9 +228,9 @@ class TimeTravelCore:
             cx = (mins[0] + maxs[0]) / 2.0
             cy = (mins[1] + maxs[1]) / 2.0
             cz = (mins[2] + maxs[2]) / 2.0
-            ext_x = (maxs[0] - mins[0]) + 2 * margin
-            ext_y = (maxs[1] - mins[1]) + 2 * margin
-            ext_z = (maxs[2] - mins[2]) + 2 * margin
+            ext_x = (maxs[0] - mins[0])
+            ext_y = (maxs[1] - mins[1])
+            ext_z = (maxs[2] - mins[2])
             if is_y_up:
                 # horizontal = X·Z, vertical = Y
                 width, depth = ext_x, ext_z
@@ -203,10 +275,10 @@ class TimeTravelCore:
                 )
             except Exception as e:
                 carb.log_warn(f"[Physics] failed to log world_pos for objid={objid}: {e}")
-            rigid_prims.append(wrap_with_collision_proxy(stage, prim, shape="capsule", visible=True))
+            rigid_prims.append(wrap_with_collision_proxy(stage, prim, shape="cylinder", visible=True))
 
+        # wander는 사용자가 Move 버튼으로 명시 시작. 여기서는 인스턴스만 생성.
         self._wander = WanderController(rigid_prims)
-        self._wander.start()
 
         try:
             import omni.timeline

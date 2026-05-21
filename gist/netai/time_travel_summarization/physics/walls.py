@@ -92,3 +92,4 @@ def create_bounding_box(
         cube.CreateDisplayOpacityAttr().Set([opacity_val])
         UsdGeom.Imageable(wall_prim).MakeVisible()
         _ensure_api(UsdPhysics.CollisionAPI, wall_prim)
+        # wall은 static collider (RigidBodyAPI 없음). PhysxContactReportAPI는 RigidBody 쪽(우주인)에 붙어 있어 wall 충돌도 자동 수신됨.

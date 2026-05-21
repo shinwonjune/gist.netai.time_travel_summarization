@@ -1,0 +1,56 @@
+import csv
+import datetime
+import tempfile
+import unittest
+from pathlib import Path
+
+from gist.netai.time_travel_summarization.physics import TraceRecorder
+
+
+class _FakePrim:
+    """USD prim test double; position extraction is monkeypatched in the test."""
+
+    def __init__(self, path):
+        self._path = path
+
+
+class TraceRecorderTest(unittest.TestCase):
+    def test_module_import(self):
+        self.assertTrue(callable(TraceRecorder))
+
+    def test_start_stop_writes_header_only_if_no_tick(self):
+        with tempfile.TemporaryDirectory() as td:
+            out = Path(td) / "trace.csv"
+            rec = TraceRecorder(prim_map={}, output_path=out)
+
+            rec.start()
+            rec.stop()
+
+            self.assertTrue(out.exists())
+            with open(out) as f:
+                rows = list(csv.reader(f))
+            self.assertEqual(rows[0], ["timestamp", "objid", "x", "y", "z"])
+            self.assertEqual(len(rows), 1)
+
+    def test_tick_writes_rows(self):
+        with tempfile.TemporaryDirectory() as td:
+            out = Path(td) / "trace.csv"
+            prims = {"obj001": _FakePrim("/W/obj001"), "obj002": _FakePrim("/W/obj002")}
+            rec = TraceRecorder(prim_map=prims, output_path=out, subsample_fps=1000)
+            rec._world_position = staticmethod(lambda p: (1.0, 2.0, 3.0))
+
+            rec.start()
+            for _ in range(3):
+                rec.tick(datetime.datetime(2025, 1, 1, 0, 0, 0))
+                rec._last_tick = None
+            rec.stop()
+
+            with open(out) as f:
+                rows = list(csv.reader(f))
+            self.assertEqual(len(rows), 1 + 3 * 2)
+            self.assertEqual(rows[1][1], "obj001")
+            self.assertEqual(rows[1][2], "1.000")
+
+
+if __name__ == "__main__":
+    unittest.main()
