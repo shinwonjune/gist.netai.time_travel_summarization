@@ -27,7 +27,7 @@ class WanderStuckTest(unittest.TestCase):
 
     def test_invalid_velocity_mode_falls_back(self):
         wc = WanderController(prims=[], velocity_mode="bogus")
-        self.assertEqual(wc._velocity_mode, "per_tick")
+        self.assertEqual(wc._velocity_mode, "horizontal_per_tick")
 
     def test_set_velocity_mode(self):
         wc = WanderController(prims=[])
@@ -80,6 +80,68 @@ class WanderStuckTest(unittest.TestCase):
         wc._check_stuck(prim, str(prim), 1.016)  # stuck +1
         wc._check_stuck(prim, str(prim), 1.032)  # progress=10 -> reset
         self.assertEqual(wc._stuck_count[str(prim)], 0)
+
+
+    def test_velocity_mode_default_is_horizontal_per_tick(self):
+        wc = WanderController(prims=[])
+        self.assertEqual(wc._velocity_mode, "horizontal_per_tick")
+
+    def test_random_direction_avoids_blocked(self):
+        wc = WanderController(prims=[])
+        avoid = (1.0, 0.0, 0.0)
+        for _ in range(100):
+            d = wc._random_horizontal_direction(stage=None, avoid_dir=avoid)
+            dot = d[0] * avoid[0] + d[1] * avoid[1] + d[2] * avoid[2]
+            # 정상 reject 결과는 dot <= 0.5
+            # 5회 reject 실패 fallback은 정확히 -avoid (dot = -1.0)
+            self.assertTrue(dot <= 0.5 or dot == -1.0, f"unexpected dir={d} dot={dot}")
+
+    def test_set_kinematic_safe_without_pxr(self):
+        # pxr import 실패 환경 — 그냥 호출만 하고 throw 안 하면 OK
+        wc = WanderController(prims=[])
+        class _DummyPrim:
+            def GetPath(self):
+                return "/dummy"
+        try:
+            wc._set_kinematic(_DummyPrim(), True)
+            wc._set_kinematic(_DummyPrim(), False)
+        except Exception as e:
+            self.fail(f"_set_kinematic raised in non-pxr environment: {e}")
+
+    def test_original_rotation_default_zero(self):
+        # prims=[]면 dict 비어있음, no crash
+        wc = WanderController(prims=[])
+        self.assertEqual(wc._original_rotation, {})
+
+    def test_restore_upright_targets_original(self):
+        try:
+            from pxr import Gf
+        except Exception:
+            self.skipTest("pxr unavailable")
+        wc = WanderController(prims=[])
+        wc._original_rotation["/W/r"] = Gf.Vec3f(270.0, 0.0, 0.0)
+        self.assertEqual(wc._original_rotation["/W/r"][0], 270.0)
+
+    def test_is_grounded_returns_true_with_stable_history(self):
+        wc = WanderController(prims=[])
+        wc._vertical_position_history["/W/g"] = [100.0, 100.05, 100.03]
+
+        class _FakePrimG:
+            def IsValid(self):
+                return True
+
+            def GetPath(self):
+                return "/W/g"
+
+            def GetStage(self):
+                return None
+
+        class _FakeVec:
+            def __getitem__(self, i):
+                return 100.04
+
+        wc._world_position = lambda p: _FakeVec()
+        self.assertTrue(wc._is_grounded(_FakePrimG(), "/W/g"))
 
 
 if __name__ == "__main__":

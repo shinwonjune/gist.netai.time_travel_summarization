@@ -1,3 +1,4 @@
+import bisect
 import csv
 import datetime
 import io
@@ -51,7 +52,8 @@ class TrajectoryRepository:
                 float(row["z"]),
             )
 
-        self._timestamps = list(self._data.keys())
+        # bisect 사용을 위해 정렬 보장. CSV가 시간순이라도 안전 차원에서 명시 정렬.
+        self._timestamps = sorted(self._data.keys())
         if self._timestamps:
             self._data_start_time = self.parse_timestamp(self._timestamps[0])
             self._data_end_time = self.parse_timestamp(self._timestamps[-1])
@@ -99,20 +101,14 @@ class TrajectoryRepository:
         return self._get_last_known_value(timestamp_str)
 
     def _get_last_known_value(self, timestamp_str: str) -> Dict[str, Tuple[float, float, float]]:
+        """target ≤ timestamp_str인 최대 timestamp의 데이터 반환 (floor lookup, O(log N))."""
         if not self._timestamps:
             return {}
-
-        previous_timestamp = None
-        for current in self._timestamps:
-            if current <= timestamp_str:
-                previous_timestamp = current
-            else:
-                break
-
-        if previous_timestamp:
-            return self._data[previous_timestamp]
-
-        return self._data[self._timestamps[0]]
+        idx = bisect.bisect_right(self._timestamps, timestamp_str) - 1
+        if idx < 0:
+            # target이 모든 데이터보다 앞 → 첫 데이터로 fallback (기존 동작과 동일)
+            return self._data[self._timestamps[0]]
+        return self._data[self._timestamps[idx]]
 
     @staticmethod
     def parse_timestamp(timestamp_str: str) -> datetime.datetime:

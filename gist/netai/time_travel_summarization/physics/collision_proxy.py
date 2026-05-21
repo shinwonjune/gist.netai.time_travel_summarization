@@ -212,6 +212,13 @@ def wrap_with_collision_proxy(
     rigid_body.CreateRigidBodyEnabledAttr().Set(True)
     mass_api = _ensure_api(UsdPhysics.MassAPI, target_prim)
     mass_api.CreateMassAttr().Set(mass)
+    try:
+        from pxr import PhysxSchema
+        physx_api = PhysxSchema.PhysxRigidBodyAPI.Apply(target_prim)
+        physx_api.CreateLinearDampingAttr().Set(0.1)
+        physx_api.CreateAngularDampingAttr().Set(0.3)
+    except Exception as exc:
+        carb.log_warn(f"[Physics] PhysxRigidBodyAPI damping setup failed: {exc}")
     # PhysxContactReportAPI: 이 Kit 버전에서 어디에 붙여도 startup PhysX abort 발생.
     # WanderController의 position-displacement stuck detection이 충돌 트리거를 cover.
     _bind_physics_material(stage, target_prim, proxy_prim, restitution)

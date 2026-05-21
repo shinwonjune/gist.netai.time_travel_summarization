@@ -16,5 +16,12 @@ def ensure_physics_scene(stage, scene_path: str = "/World/PhysicsScene"):
         gravity_direction = Gf.Vec3f(0.0, 0.0, -1.0)
 
     scene.CreateGravityDirectionAttr().Set(gravity_direction)
-    scene.CreateGravityMagnitudeAttr().Set(9.81)
+    meters_per_unit = UsdGeom.GetStageMetersPerUnit(stage) or 1.0
+    gravity_magnitude = 9.81 / meters_per_unit
+    scene.CreateGravityMagnitudeAttr().Set(gravity_magnitude)
+    try:
+        import carb
+        carb.log_warn(f"[Physics] gravity magnitude={gravity_magnitude:.2f} units/s^2 (metersPerUnit={meters_per_unit})")
+    except Exception:
+        pass
     return scene_prim
