@@ -1,6 +1,5 @@
 # window.py - UI for Time Travel Extension
 
-import omni.ui as ui
 import datetime
 import carb
 
@@ -10,6 +9,8 @@ class TimeTravelWindow:
     
     def __init__(self, core):
         """Initialize the Time Travel window."""
+        import omni.ui as ui
+
         self._core = core
         self._updating_slider = False  # Flag to prevent infinite loops
         
@@ -106,6 +107,14 @@ class TimeTravelWindow:
                     self._speed_field.model.set_value(self._core.get_playback_speed())
                     self._speed_field.model.add_end_edit_fn(self._on_speed_changed)
                     ui.Label("x", width=20)
+
+                with ui.HStack(height=30, spacing=8):
+                    ui.Label("Mode:", width=50)
+                    self._playback_mode_button = ui.Button("Playback", width=90)
+                    self._playback_mode_button.set_clicked_fn(self._on_playback_mode_clicked)
+                    self._physics_mode_button = ui.Button("Physics", width=90)
+                    self._physics_mode_button.set_clicked_fn(self._on_physics_mode_clicked)
+                    self._mode_label = ui.Label("", style={"color": 0xFF888888})
                 
                 # Separator
                 ui.Spacer(height=5)
@@ -162,6 +171,18 @@ class TimeTravelWindow:
     def _on_play_clicked(self):
         """Handle Play/Pause button click."""
         self._core.toggle_playback()
+        self._update_play_button()
+
+    def _on_playback_mode_clicked(self):
+        """Switch back to trajectory playback mode."""
+        self._core.set_playback_mode()
+        self._update_mode_controls()
+        self._update_play_button()
+
+    def _on_physics_mode_clicked(self):
+        """Switch to PhysX wandering mode."""
+        self._core.set_physics_mode()
+        self._update_mode_controls()
         self._update_play_button()
     
     def _on_slider_changed(self, model):
@@ -227,6 +248,13 @@ class TimeTravelWindow:
             self._play_button.text = "Pause"
         else:
             self._play_button.text = "Play"
+
+    def _update_mode_controls(self):
+        """Update current mode label and button enabled states."""
+        mode = self._core.get_mode()
+        self._mode_label.text = mode.capitalize()
+        self._playback_mode_button.enabled = mode != "playback"
+        self._physics_mode_button.enabled = mode != "physics"
     
     def _update_goto_fields(self):
         """Update goto time fields with current time."""
@@ -257,6 +285,7 @@ class TimeTravelWindow:
         
         # Update play button
         self._update_play_button()
+        self._update_mode_controls()
     
     def destroy(self):
         """Clean up the window."""

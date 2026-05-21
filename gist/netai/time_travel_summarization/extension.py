@@ -14,14 +14,16 @@ def get_active_core():
 
 # Kit이 extension을 인식하려면 omni.ext.IExt를 상속해야 함.
 # headless(WSL) 환경에선 omni.ext 부재 → object로 폴백해서 module import만 가능하게.
-try:
-    import omni.ext as _omni_ext  # noqa: WPS433
-    _IExtBase = _omni_ext.IExt
-except ImportError:
-    _IExtBase = object
+def _get_i_ext_base():
+    try:
+        import omni.ext as omni_ext
+
+        return omni_ext.IExt
+    except ImportError:
+        return object
 
 
-class NetAITimetravelDreamAI(_IExtBase):
+class NetAITimetravelDreamAI(_get_i_ext_base()):
     """Time Travel Extension for visualizing object movements over time."""
     
     def on_startup(self, ext_id):
@@ -188,6 +190,8 @@ class NetAITimetravelDreamAI(_IExtBase):
         # Clean up core
         if hasattr(self, '_core') and self._core:
             try:
+                if hasattr(self._core, "_wander") and self._core._wander:
+                    self._core._wander.stop()
                 self._core.clear_timetravel_objects()
                 carb.log_info("[Extension] TimeTravel objects cleared")
             except Exception as e:

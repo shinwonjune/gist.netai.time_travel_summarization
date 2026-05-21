@@ -17,6 +17,7 @@ class PlaybackController:
         self._current_event_index = 0
         self._event_playback_start_time: Optional[datetime.datetime] = None
         self._event_playback_duration = 1.0
+        self._mode = "playback"
 
     def configure_data_range(
         self,
@@ -67,10 +68,23 @@ class PlaybackController:
         return min(1.0, max(0.0, current / duration))
 
     def toggle_playback(self):
+        if self._mode != "playback":
+            return
         self._is_playing = not self._is_playing
         self._accumulated_time = 0.0
         if self._is_playing and self._use_event_summary:
             self._event_playback_start_time = None
+
+    def set_mode(self, mode: str) -> None:
+        if mode not in ("playback", "physics"):
+            raise ValueError("mode must be 'playback' or 'physics'")
+        self._mode = mode
+        if mode == "physics":
+            self._is_playing = False
+            self._accumulated_time = 0.0
+
+    def get_mode(self) -> str:
+        return self._mode
 
     def update(
         self,
@@ -79,6 +93,8 @@ class PlaybackController:
         on_time_changed: Callable[[datetime.datetime], None],
         on_event_requested: Callable[[str], None],
     ):
+        if self._mode != "playback":
+            return
         if not self._is_playing or not self._current_time:
             return
 
@@ -183,7 +199,7 @@ class PlaybackController:
         return self._current_time
 
     def is_playing(self) -> bool:
-        return self._is_playing
+        return self._mode == "playback" and self._is_playing
 
     def get_playback_speed(self) -> float:
         return self._playback_speed

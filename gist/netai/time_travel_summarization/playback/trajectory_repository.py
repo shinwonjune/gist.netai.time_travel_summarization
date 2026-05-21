@@ -76,6 +76,21 @@ class TrajectoryRepository:
     def has_data(self) -> bool:
         return bool(self._timestamps)
 
+    def get_coord_range(self) -> Optional[Tuple[Tuple[float, float, float], Tuple[float, float, float]]]:
+        """모든 시점·모든 객체의 (x,y,z) min/max 반환. 데이터 없으면 None."""
+        if not self._data:
+            return None
+        mins = [float("inf")] * 3
+        maxs = [float("-inf")] * 3
+        for ts_data in self._data.values():
+            for xyz in ts_data.values():
+                for i in range(3):
+                    if xyz[i] < mins[i]:
+                        mins[i] = xyz[i]
+                    if xyz[i] > maxs[i]:
+                        maxs[i] = xyz[i]
+        return (tuple(mins), tuple(maxs))
+
     def get_data_at_time(self, timestamp: datetime.datetime) -> Dict[str, Tuple[float, float, float]]:
         normalized_time = timestamp.replace(microsecond=(timestamp.microsecond // 1000) * 1000)
         timestamp_str = self.format_timestamp(normalized_time)

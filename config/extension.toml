@@ -29,6 +29,8 @@ repository = ""  # URL of the extension source repository
 "omni.ui" = {}
 "omni.ui.scene" = {}
 "omni.timeline" = {}
+"omni.physx" = {}
+"omni.physx.bundle" = {}
 "omni.kit.pip_archive" = {}
 "omni.kit.pipapi" = {} 
 
