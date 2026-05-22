@@ -6,7 +6,7 @@ import time
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
-from .lookup_benchmark import LkvForwardBisectHybrid, LkvInvalidate
+from .lookup_benchmark import LkvBidirectional, LkvForwardBisectHybrid, LkvInvalidate
 
 
 class TrajectoryRepository:
@@ -22,6 +22,7 @@ class TrajectoryRepository:
         self._lookup_mode: str = "linear"
         self._hybrid = LkvForwardBisectHybrid()
         self._invalidate = LkvInvalidate()
+        self._bidirectional = LkvBidirectional()
         # benchmark instrumentation
         self._bench_active: bool = False
         self._bench_call_count: int = 0
@@ -72,6 +73,7 @@ class TrajectoryRepository:
 
         self._hybrid.reset()
         self._invalidate.reset()
+        self._bidirectional.reset()
         return bool(self._timestamps)
 
     def load_csv(self, csv_path: Path) -> bool:
@@ -108,13 +110,14 @@ class TrajectoryRepository:
         return (tuple(mins), tuple(maxs))
 
     def set_lookup_mode(self, mode: str) -> None:
-        valid = ("linear", "bisect", "hybrid", "invalidate")
+        valid = ("linear", "bisect", "hybrid", "invalidate", "bidirectional")
         if mode not in valid:
             raise ValueError(f"mode must be one of {valid}, got {mode!r}")
         self._lookup_mode = mode
         # cache state 초기화 — 모드 전환 시 stale 방지
         self._hybrid.reset()
         self._invalidate.reset()
+        self._bidirectional.reset()
 
     def get_lookup_mode(self) -> str:
         return self._lookup_mode
@@ -150,6 +153,8 @@ class TrajectoryRepository:
             ts = self._hybrid.query(self._timestamps, timestamp_str)
         elif self._lookup_mode == "invalidate":
             ts = self._invalidate.query(self._timestamps, timestamp_str)
+        elif self._lookup_mode == "bidirectional":
+            ts = self._bidirectional.query(self._timestamps, timestamp_str)
         else:
             return self._lookup_linear(timestamp_str)
         if ts is None:

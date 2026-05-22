@@ -441,7 +441,7 @@ class TimeTravelCore:
         return bool(self._config and self._config.auto_generate)
 
     def set_lookup_mode(self, mode: str) -> bool:
-        """Lookup 알고리즘 모드 변경. 'linear' | 'bisect' | 'hybrid' | 'invalidate'."""
+        """Lookup 알고리즘 모드 변경. 'linear' | 'bisect' | 'hybrid' | 'invalidate' | 'bidirectional'."""
         try:
             self._repository.set_lookup_mode(mode)
             carb.log_warn(f"[Lookup] mode set to {mode}")
