@@ -440,5 +440,101 @@ class TimeTravelCore:
     def should_auto_generate(self) -> bool:
         return bool(self._config and self._config.auto_generate)
 
+    def set_lookup_mode(self, mode: str) -> bool:
+        """Lookup 알고리즘 모드 변경. 'linear' | 'bisect' | 'hybrid' | 'invalidate'."""
+        try:
+            self._repository.set_lookup_mode(mode)
+            carb.log_warn(f"[Lookup] mode set to {mode}")
+            return True
+        except ValueError as e:
+            carb.log_warn(f"[Lookup] invalid mode: {e}")
+            return False
+
+    def get_lookup_mode(self) -> str:
+        return self._repository.get_lookup_mode()
+
+    def start_lookup_benchmark(self, mode: str, pattern: str) -> bool:
+        """Live lookup benchmark 시작.
+
+        mode: 'linear' | 'bisect' | 'hybrid' | 'invalidate'
+        pattern: 자유 라벨 (예: 'forward', 'backward', 'random_seek')
+        """
+        try:
+            self._repository.set_lookup_mode(mode)
+        except ValueError as e:
+            carb.log_warn(f"[Benchmark] invalid mode: {e}")
+            return False
+        self._repository.start_benchmark(pattern)
+        carb.log_warn(f"[Benchmark] started mode={mode} pattern={pattern}")
+        return True
+
+    def stop_lookup_benchmark(self) -> dict:
+        """Live lookup benchmark 종료. 결과 표 + CSV 저장."""
+        result = self._repository.stop_benchmark()
+        carb.log_warn(
+            f"[Benchmark] mode={result['mode']:12s} pattern={result['pattern']:12s} "
+            f"calls={result['call_count']:6d} total={result['total_seconds']*1000:.3f}ms "
+            f"per_call={result['per_call_us']:.3f}us"
+        )
+        try:
+            out_dir = self._module_dir / "data"
+            out_dir.mkdir(parents=True, exist_ok=True)
+            csv_path = out_dir / "lookup_runtime_benchmark.csv"
+            is_new = not csv_path.exists()
+            with open(csv_path, "a", encoding="utf-8", newline="") as f:
+                import csv as _csv_local
+                writer = _csv_local.writer(f)
+                if is_new:
+                    writer.writerow(["timestamp", "mode", "pattern", "call_count",
+                                     "total_seconds", "per_call_us"])
+                from datetime import datetime as _dt_local
+                writer.writerow([_dt_local.now().isoformat(), result["mode"],
+                                 result["pattern"], result["call_count"],
+                                 result["total_seconds"], result["per_call_us"]])
+            carb.log_warn(f"[Benchmark] CSV appended: {csv_path}")
+        except Exception as e:
+            carb.log_warn(f"[Benchmark] CSV write failed: {e}")
+        return result
+
+    def run_lookup_benchmark_suite(self, duration_s: float = 5.0, fps: int = 60) -> list:
+        """3 lookup modes × forward/backward = 6 runs 자동 측정.
+
+        각 run 전 timeline을 안전한 시작점으로 reset.
+        """
+        n_ticks = int(duration_s * fps)
+        dt = 1.0 / fps
+        runs = [
+            ("bisect", "forward", 1.0),
+            ("hybrid", "forward", 1.0),
+            ("invalidate", "forward", 1.0),
+            ("bisect", "backward", -1.0),
+            ("hybrid", "backward", -1.0),
+            ("invalidate", "backward", -1.0),
+        ]
+        results = []
+        for mode, pattern, speed in runs:
+            # 1) Reset timeline to a safe starting point
+            if speed > 0:
+                self.set_to_earliest_time()
+            else:
+                end = self._repository.data_end_time
+                if end:
+                    self.set_current_time(end)
+            # 2) Ensure not playing before start
+            if self._playback.is_playing():
+                self._playback.toggle_playback()
+            # 3) Start benchmark + play
+            self.start_lookup_benchmark(mode, pattern)
+            self._playback.set_playback_speed(speed)
+            self._playback.toggle_playback()
+            # 4) Drive updates manually (Kit main thread blocked here)
+            for _ in range(n_ticks):
+                self.update(dt)
+            # 5) Stop play + benchmark
+            if self._playback.is_playing():
+                self._playback.toggle_playback()
+            results.append(self.stop_lookup_benchmark())
+        return results
+
     def _on_event_requested(self, timestamp: str):
         self._stage_objects.move_camera_to_event(self._events.get_event_position(timestamp))

@@ -99,7 +99,7 @@ class PlaybackController:
             return
 
         self._accumulated_time += dt * self._playback_speed
-        if self._accumulated_time < 0.1:
+        if abs(self._accumulated_time) < 0.1:
             return
 
         seconds_to_add = self._accumulated_time
@@ -112,12 +112,15 @@ class PlaybackController:
         self._advance_time(seconds_to_add, on_time_changed)
 
     def _advance_time(self, seconds_to_add: float, on_time_changed: Callable[[datetime.datetime], None]):
-        if not self._current_time or not self._range_end_time:
+        if not self._current_time or not self._range_end_time or not self._range_start_time:
             return
 
         next_time = self._current_time + datetime.timedelta(seconds=seconds_to_add)
-        if next_time >= self._range_end_time:
+        if seconds_to_add > 0 and next_time >= self._range_end_time:
             next_time = self._range_end_time
+            self._is_playing = False
+        elif seconds_to_add < 0 and next_time <= self._range_start_time:
+            next_time = self._range_start_time
             self._is_playing = False
 
         self._current_time = next_time
@@ -205,4 +208,7 @@ class PlaybackController:
         return self._playback_speed
 
     def set_playback_speed(self, speed: float):
-        self._playback_speed = max(0.1, speed)
+        """음수 허용 → backward 재생. 0은 차단(정지는 toggle_playback 사용)."""
+        if -0.001 < speed < 0.001:
+            speed = 1.0  # 0 차단
+        self._playback_speed = max(-10.0, min(10.0, speed))

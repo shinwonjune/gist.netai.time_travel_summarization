@@ -83,6 +83,29 @@ class LkvInvalidate:
         return self._last
 
 
+class LkvForwardBisectHybrid:
+    """forward 시 cache (O(1)), backward 감지 시 bisect fallback (O(log N))."""
+
+    def __init__(self) -> None:
+        self.reset()
+
+    def reset(self) -> None:
+        self._last: Optional[str] = None
+        self._ts_set: Optional[set] = None
+
+    def query(self, timestamps: List[str], target: str) -> Optional[str]:
+        if self._ts_set is None:
+            self._ts_set = set(timestamps)
+        # exact grid hit (forward O(1) fast path)
+        if target in self._ts_set:
+            self._last = target
+            return self._last
+        # miss (off-grid or backward) → bisect fallback (O(log N), always correct)
+        idx = bisect.bisect_right(timestamps, target) - 1
+        self._last = timestamps[idx] if idx >= 0 else None
+        return self._last
+
+
 class LkvBidirectional:
     """사용자 안. target이 data grid에 정확히 일치할 때만 cache update, 그 외에는 cache 그대로 반환.
 
@@ -119,6 +142,7 @@ ALGORITHMS = {
     "lkv_forward": LkvForward,
     "lkv_invalidate": LkvInvalidate,
     "lkv_bidirectional": LkvBidirectional,
+    "hybrid": LkvForwardBisectHybrid,
 }
 
 

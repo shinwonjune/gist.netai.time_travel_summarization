@@ -2,8 +2,11 @@ import bisect
 import csv
 import datetime
 import io
+import time
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
+
+from .lookup_benchmark import LkvForwardBisectHybrid, LkvInvalidate
 
 
 class TrajectoryRepository:
@@ -15,6 +18,15 @@ class TrajectoryRepository:
         self._timestamps: List[str] = []
         self._data_start_time: Optional[datetime.datetime] = None
         self._data_end_time: Optional[datetime.datetime] = None
+        # lookup mode
+        self._lookup_mode: str = "linear"
+        self._hybrid = LkvForwardBisectHybrid()
+        self._invalidate = LkvInvalidate()
+        # benchmark instrumentation
+        self._bench_active: bool = False
+        self._bench_call_count: int = 0
+        self._bench_total_seconds: float = 0.0
+        self._bench_pattern: str = ""
 
     def load_from_uri(self, uri: str) -> bool:
         """Load trajectory data from any URI scheme supported by storage.from_uri.
@@ -58,6 +70,8 @@ class TrajectoryRepository:
             self._data_start_time = self.parse_timestamp(self._timestamps[0])
             self._data_end_time = self.parse_timestamp(self._timestamps[-1])
 
+        self._hybrid.reset()
+        self._invalidate.reset()
         return bool(self._timestamps)
 
     def load_csv(self, csv_path: Path) -> bool:
@@ -93,22 +107,89 @@ class TrajectoryRepository:
                         maxs[i] = xyz[i]
         return (tuple(mins), tuple(maxs))
 
+    def set_lookup_mode(self, mode: str) -> None:
+        valid = ("linear", "bisect", "hybrid", "invalidate")
+        if mode not in valid:
+            raise ValueError(f"mode must be one of {valid}, got {mode!r}")
+        self._lookup_mode = mode
+        # cache state 초기화 — 모드 전환 시 stale 방지
+        self._hybrid.reset()
+        self._invalidate.reset()
+
+    def get_lookup_mode(self) -> str:
+        return self._lookup_mode
+
     def get_data_at_time(self, timestamp: datetime.datetime) -> Dict[str, Tuple[float, float, float]]:
+        if not self._bench_active:
+            normalized_time = timestamp.replace(microsecond=(timestamp.microsecond // 1000) * 1000)
+            timestamp_str = self.format_timestamp(normalized_time)
+            if timestamp_str in self._data:
+                return self._data[timestamp_str]
+            return self._get_last_known_value(timestamp_str)
+        # benchmark mode: timing 누적
+        t0 = time.perf_counter()
         normalized_time = timestamp.replace(microsecond=(timestamp.microsecond // 1000) * 1000)
         timestamp_str = self.format_timestamp(normalized_time)
         if timestamp_str in self._data:
-            return self._data[timestamp_str]
-        return self._get_last_known_value(timestamp_str)
+            result = self._data[timestamp_str]
+        else:
+            result = self._get_last_known_value(timestamp_str)
+        self._bench_total_seconds += time.perf_counter() - t0
+        self._bench_call_count += 1
+        return result
 
     def _get_last_known_value(self, timestamp_str: str) -> Dict[str, Tuple[float, float, float]]:
-        """target ≤ timestamp_str인 최대 timestamp의 데이터 반환 (floor lookup, O(log N))."""
+        """target ≤ timestamp_str인 최대 timestamp의 데이터 반환 (floor lookup)."""
         if not self._timestamps:
             return {}
+        if self._lookup_mode == "linear":
+            return self._lookup_linear(timestamp_str)
+        if self._lookup_mode == "bisect":
+            return self._lookup_bisect(timestamp_str)
+        elif self._lookup_mode == "hybrid":
+            ts = self._hybrid.query(self._timestamps, timestamp_str)
+        elif self._lookup_mode == "invalidate":
+            ts = self._invalidate.query(self._timestamps, timestamp_str)
+        else:
+            return self._lookup_linear(timestamp_str)
+        if ts is None:
+            return self._data[self._timestamps[0]]
+        return self._data[ts]
+
+    def _lookup_linear(self, timestamp_str: str) -> Dict[str, Tuple[float, float, float]]:
+        """원본 선형 floor lookup. O(N), 정렬 가정 + 이른 break로 평균 O(N/2)."""
+        previous_timestamp = None
+        for current in self._timestamps:
+            if current <= timestamp_str:
+                previous_timestamp = current
+            else:
+                break
+        if previous_timestamp:
+            return self._data[previous_timestamp]
+        return self._data[self._timestamps[0]]
+
+    def _lookup_bisect(self, timestamp_str: str) -> Dict[str, Tuple[float, float, float]]:
         idx = bisect.bisect_right(self._timestamps, timestamp_str) - 1
         if idx < 0:
-            # target이 모든 데이터보다 앞 → 첫 데이터로 fallback (기존 동작과 동일)
             return self._data[self._timestamps[0]]
         return self._data[self._timestamps[idx]]
+
+    def start_benchmark(self, pattern: str) -> None:
+        self._bench_active = True
+        self._bench_call_count = 0
+        self._bench_total_seconds = 0.0
+        self._bench_pattern = pattern
+
+    def stop_benchmark(self) -> dict:
+        self._bench_active = False
+        n = self._bench_call_count
+        return {
+            "mode": self._lookup_mode,
+            "pattern": self._bench_pattern,
+            "call_count": n,
+            "total_seconds": self._bench_total_seconds,
+            "per_call_us": (self._bench_total_seconds / n * 1e6) if n > 0 else 0.0,
+        }
 
     @staticmethod
     def parse_timestamp(timestamp_str: str) -> datetime.datetime:
