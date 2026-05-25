@@ -42,11 +42,31 @@ class OverlayControlWindow:
                     self._time_checkbox.model.add_value_changed_fn(self._on_time_visibility_changed)
                     ui.Label("Timestamp", style={"font_size": 18})
                 
+                # Visual Complexity section
+                ui.Spacer(height=5)
+                ui.Label("Visual Complexity", style={"font_size": 20, "font_weight": "bold"})
+                with ui.HStack(height=25, spacing=4):
+                    for level in ["Full", "Simplified", "Abstract"]:
+                        btn = ui.Button(level, width=70)
+                        btn.set_clicked_fn(lambda _l=level: self._on_complexity_clicked(_l))
+
                 # Push everything to top
                 ui.Spacer()
-        
+
         carb.log_info("[OverlayControl] Control window created")
-    
+
+    def _get_core(self):
+        try:
+            from ..extension import get_active_core
+            return get_active_core()
+        except Exception:
+            return None
+
+    def _on_complexity_clicked(self, level: str):
+        core = self._get_core()
+        if core:
+            core.set_visual_complexity(level)
+
     def _on_labels_visibility_changed(self, model):
         """Handle object ID labels checkbox change."""
         visible = model.get_value_as_bool()

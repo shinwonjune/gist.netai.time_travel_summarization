@@ -1,9 +1,25 @@
 {
-  "data_path": "./data/living_trajectory_1min_0.2s.csv",
+  "data_path": "${DATA_PATH}",
 
   "auto_generate": true,
 
   "astronaut_usd": "${ASTRONAUT_USD_PATH}",
 
-  "prim_map": {}
+  "prim_map": {},
+
+  "visibility_groups": {
+    "Furniture": ["/World/Furniture"],
+    "Equipment": ["/World/Equipment"],
+    "Ground": ["/World/Ground"],
+    "A_Exterior": ["/World/A_Exterior"],
+    "TimeTravel_Objects": ["/World/TimeTravel_Objects"]
+  },
+
+  "complexity_levels": {
+    "Full": [],
+    "Simplified": ["Furniture", "Equipment"],
+    "Abstract": ["Furniture", "Equipment", "Ground", "A_Exterior", "TimeTravel_Objects"]
+  },
+
+  "video_output_dir": "data/video"
 }

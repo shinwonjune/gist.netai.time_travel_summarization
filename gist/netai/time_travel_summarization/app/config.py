@@ -38,6 +38,9 @@ class ExtensionConfig:
     astronaut_usd: str = ""
     prim_map: Dict[str, str] = field(default_factory=dict)
     event_summary: List[str] = field(default_factory=list)
+    visibility_groups: Dict[str, List[str]] = field(default_factory=dict)
+    complexity_levels: Dict[str, List[str]] = field(default_factory=dict)
+    video_output_dir: str = "data/video"
 
     @property
     def config_dir(self) -> Path:
@@ -72,6 +75,9 @@ class ExtensionConfig:
             astronaut_usd=_expand_env(raw.get("astronaut_usd", "")),
             prim_map=dict(raw.get("prim_map", {})),
             event_summary=list(raw.get("event_summary", [])),
+            visibility_groups=dict(raw.get("visibility_groups", {})),
+            complexity_levels=dict(raw.get("complexity_levels", {})),
+            video_output_dir=_expand_env(raw.get("video_output_dir", "data/video")),
         )
 
     def resolve_from_config(self, value: str) -> Path:

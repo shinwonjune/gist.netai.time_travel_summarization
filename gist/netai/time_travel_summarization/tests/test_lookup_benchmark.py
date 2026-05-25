@@ -2,8 +2,8 @@ import datetime
 import unittest
 
 from gist.netai.time_travel_summarization.playback.lookup_benchmark import (
+    LkvCache,
     LkvForwardBisectHybrid,
-    LkvInvalidate,
     lkv_linear,
     synthesize_forward_queries,
     synthesize_random_queries,
@@ -50,28 +50,22 @@ class RepositoryLookupModeTest(unittest.TestCase):
 
     def test_set_lookup_mode_validates(self):
         repo = self._build_repo()
-        repo.set_lookup_mode("bisect")
-        self.assertEqual(repo.get_lookup_mode(), "bisect")
-        repo.set_lookup_mode("hybrid")
-        self.assertEqual(repo.get_lookup_mode(), "hybrid")
-        repo.set_lookup_mode("invalidate")
-        self.assertEqual(repo.get_lookup_mode(), "invalidate")
-        repo.set_lookup_mode("linear")
-        self.assertEqual(repo.get_lookup_mode(), "linear")
+        for mode in ("linear", "bisect", "hybrid", "lkv_cache"):
+            repo.set_lookup_mode(mode)
+            self.assertEqual(repo.get_lookup_mode(), mode)
         with self.assertRaises(ValueError):
             repo.set_lookup_mode("bogus")
 
-    def test_all_modes_return_same_result(self):
+    def test_exact_modes_return_same_result(self):
         repo = self._build_repo()
         target = datetime.datetime(2025, 1, 1, 0, 0, 5, 500000)
         results = []
-        for mode in ("linear", "bisect", "hybrid", "invalidate"):
+        for mode in ("linear", "bisect", "hybrid"):
             repo.set_lookup_mode(mode)
             results.append(repo.get_data_at_time(target))
-        # 모두 같은 결과 (5초 직전 ts = 5.000)
+        # 정확 알고리즘 3종 — 모두 같은 결과 (floor of 5.5 = 5.000)
         self.assertEqual(results[0], results[1])
         self.assertEqual(results[1], results[2])
-        self.assertEqual(results[2], results[3])
 
     def test_benchmark_lifecycle(self):
         repo = self._build_repo()

@@ -1,4 +1,4 @@
-from typing import Dict, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import carb
 import omni.usd
@@ -118,6 +118,41 @@ class StageObjectController:
         for prim in stage.Traverse():
             if prim.IsA(UsdGeom.Camera):
                 UsdGeom.Imageable(prim).MakeInvisible()
+
+    def set_visual_complexity(
+        self,
+        level: str,
+        visibility_groups: Dict[str, List[str]],
+        complexity_levels: Dict[str, List[str]],
+    ) -> bool:
+        """level별로 group의 prim들을 visible/invisible 토글."""
+        import omni.usd
+        from pxr import UsdGeom
+
+        stage = omni.usd.get_context().get_stage()
+        if not stage:
+            carb.log_warn("[Complexity] no stage")
+            return False
+
+        if level not in complexity_levels:
+            carb.log_warn(f"[Complexity] unknown level: {level}")
+            return False
+
+        invisible_groups = set(complexity_levels[level])
+        for group_name, prim_paths in visibility_groups.items():
+            should_hide = group_name in invisible_groups
+            for path in prim_paths:
+                prim = stage.GetPrimAtPath(path)
+                if not prim or not prim.IsValid():
+                    carb.log_warn(f"[Complexity] prim not found: {path}")
+                    continue
+                imageable = UsdGeom.Imageable(prim)
+                if should_hide:
+                    imageable.MakeInvisible()
+                else:
+                    imageable.MakeVisible()
+        carb.log_warn(f"[Complexity] level={level}, hidden_groups={invisible_groups}")
+        return True
 
     def move_camera_to_event(self, event_position: Optional[Tuple[float, float, float]]):
         if not event_position:

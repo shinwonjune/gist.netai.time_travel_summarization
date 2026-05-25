@@ -1,15 +1,14 @@
-"""LKV(last-known-value) lookup 알고리즘 5종 벤치마크.
+"""Floor lookup 알고리즘 4종 벤치마크.
 
 목적: timestamp 기반 인덱싱 자료구조는 동일하게 두고, miss 시 가장 가까운
-이전(또는 근처) timestamp를 찾는 **알고리즘**만 5가지로 바꿔 성능·정확성 비교.
+이전 timestamp를 찾는 **알고리즘**만 4가지로 바꿔 성능·정확성 비교.
 
 알고리즘:
 - linear: timestamps list를 처음부터 순차 비교. O(N). 정확.
 - bisect: sorted timestamps + bisect_right. O(log N). 정확.
-- lkv_forward: 단일 변수 cache, 단조증가 가정. backward seek에서 stale 반환.
-- lkv_invalidate: backward 감지 시 cursor reset 후 재구축. 정확. worst O(N).
-- lkv_bidirectional: forward/backward 모두 한 칸씩 cursor 이동, _last 그대로 반환.
-  forward 정확, backward 한 grid 밀림 (의도적 trade-off로 모든 query O(1)).
+- hybrid: grid 일치 시 O(1) hash 반환, miss 시 bisect fallback. 정확.
+- lkv_cache: grid 일치 시점에만 cache 갱신, miss 시 cache 그대로 반환.
+  O(1) 보장, 정확성은 워크로드의 grid hit 빈도에 의존.
 """
 
 from __future__ import annotations
@@ -44,45 +43,6 @@ def lkv_bisect(sorted_timestamps: List[str], target: str) -> Optional[str]:
 
 # ---------- stateful caches ----------
 
-class LkvForward:
-    """단조증가 가정 cache. backward에서는 stale 값 반환 (부정확)."""
-
-    def __init__(self) -> None:
-        self.reset()
-
-    def reset(self) -> None:
-        self._last: Optional[str] = None
-        self._cursor: int = 0
-
-    def query(self, timestamps: List[str], target: str) -> Optional[str]:
-        # 전진만. cursor부터 앞으로 진행하며 target 이하 ts를 _last로 갱신.
-        while self._cursor < len(timestamps) and timestamps[self._cursor] <= target:
-            self._last = timestamps[self._cursor]
-            self._cursor += 1
-        return self._last
-
-
-class LkvInvalidate:
-    """backward seek 감지 시 cursor reset 후 다시 forward 재구축. 정확. worst O(N)."""
-
-    def __init__(self) -> None:
-        self.reset()
-
-    def reset(self) -> None:
-        self._last: Optional[str] = None
-        self._cursor: int = 0
-
-    def query(self, timestamps: List[str], target: str) -> Optional[str]:
-        if self._last is not None and target < self._last:
-            # backward → cache 무효화
-            self._last = None
-            self._cursor = 0
-        while self._cursor < len(timestamps) and timestamps[self._cursor] <= target:
-            self._last = timestamps[self._cursor]
-            self._cursor += 1
-        return self._last
-
-
 class LkvForwardBisectHybrid:
     """forward 시 cache (O(1)), backward 감지 시 bisect fallback (O(log N))."""
 
@@ -106,15 +66,15 @@ class LkvForwardBisectHybrid:
         return self._last
 
 
-class LkvBidirectional:
-    """사용자 안. target이 data grid에 정확히 일치할 때만 cache update, 그 외에는 cache 그대로 반환.
+class LkvCache:
+    """grid hit 시 cache 갱신, miss 시 cache 그대로 반환.
 
     - search 없음. set membership check (O(1)) + 변수 반환.
     - 모든 query O(1) 보장.
     - 정확성:
       - target이 grid에 일치 → 정확
-      - target이 grid 사이 (forward play) → 직전 갱신 시점 ts = 직전 grid (정확한 LKV)
-      - target이 grid 사이 (backward play) → 직전 갱신 시점 ts = 직후 grid (한 grid 밀림)
+      - forward play: 직전 갱신 시점 ts = 직전 grid (정확한 floor)
+      - backward play: 직전 갱신 시점 ts = 직후 grid (한 grid 밀림)
       - 빠른 slider drag (grid 건너뜀) → cache stale (의도된 trade-off)
     """
 
@@ -127,7 +87,6 @@ class LkvBidirectional:
 
     def query(self, timestamps: List[str], target: str) -> Optional[str]:
         if self._ts_set is None:
-            # lazy: 첫 호출에 set 빌드 (O(N)). warm-up에서 흡수됨.
             self._ts_set = set(timestamps)
         if target in self._ts_set:
             self._last = target
@@ -139,9 +98,7 @@ class LkvBidirectional:
 ALGORITHMS = {
     "linear": "function",
     "bisect": "function",
-    "lkv_forward": LkvForward,
-    "lkv_invalidate": LkvInvalidate,
-    "lkv_bidirectional": LkvBidirectional,
+    "lkv_cache": LkvCache,
     "hybrid": LkvForwardBisectHybrid,
 }
 
@@ -231,15 +188,46 @@ def synthesize_forward_queries(
     n_queries: int,
     fps: int = 60,
 ) -> List[str]:
-    """60fps wall-clock을 시뮬레이션한 forward play query.
-
-    시작 = timestamps[0], 매 query += 1/fps 초. data grid가 0.2초(=5fps)면
-    12 frame마다 한 번 grid 일치 → cache friendly. 단조증가.
-    """
+    """60fps wall-clock 단조증가 forward play."""
     fmt = "%Y-%m-%d %H:%M:%S.%f"
     start = _dt.datetime.strptime(timestamps[0], fmt)
     step = _dt.timedelta(seconds=1.0 / fps)
     return [(start + step * i).strftime(fmt)[:-3] for i in range(n_queries)]
+
+
+def synthesize_backward_queries(
+    timestamps: List[str],
+    n_queries: int,
+    fps: int = 60,
+) -> List[str]:
+    """60fps wall-clock 단조감소 backward play."""
+    fmt = "%Y-%m-%d %H:%M:%S.%f"
+    start = _dt.datetime.strptime(timestamps[-1], fmt)
+    step = _dt.timedelta(seconds=-1.0 / fps)
+    return [(start + step * i).strftime(fmt)[:-3] for i in range(n_queries)]
+
+
+def synthesize_slider_drag_queries(
+    timestamps: List[str],
+    n_queries: int,
+    step_s: float = 0.1,
+    direction: str = "forward",
+) -> List[str]:
+    """slider drag 시나리오. 단조 진행, query 간 일정 step.
+
+    direction="forward"면 timestamps[0]에서 시작 step_s씩 증가.
+    direction="backward"면 timestamps[-1]에서 시작 step_s씩 감소.
+    """
+    if direction not in ("forward", "backward"):
+        raise ValueError("direction must be forward|backward")
+    fmt = "%Y-%m-%d %H:%M:%S.%f"
+    if direction == "forward":
+        base = _dt.datetime.strptime(timestamps[0], fmt)
+        step = _dt.timedelta(seconds=step_s)
+    else:
+        base = _dt.datetime.strptime(timestamps[-1], fmt)
+        step = _dt.timedelta(seconds=-step_s)
+    return [(base + step * i).strftime(fmt)[:-3] for i in range(n_queries)]
 
 
 # ---------- top-level driver ----------
@@ -248,20 +236,31 @@ def benchmark_all(
     n_timestamps_list: List[int] = (300, 3_000, 300_000),
     n_queries: int = 10_000,
     seed: int = 42,
-    pattern: str = "random",  # "random" | "forward"
+    pattern: str = "play_forward",
+    slider_step_s: float = 0.1,
 ) -> List[Dict[str, object]]:
     """N 스케일 × 5 알고리즘 측정. linear 결과를 oracle로 사용해 정확도 측정.
 
-    pattern="random": slider drag 시나리오. grid 사이 임의 시점.
-    pattern="forward": 60fps wall-clock forward play. 단조증가. cache 친화적.
+    pattern 옵션:
+      - "play_forward":     60fps 단조증가
+      - "play_backward":    60fps 단조감소
+      - "slider_forward":   천천히 우측 drag (step_s=0.1초)
+      - "slider_backward":  천천히 좌측 drag
+      - "random_jump":      slider를 임의 위치로 던지는 경우 (기존 random)
     """
     all_results: List[Dict[str, object]] = []
     for n in n_timestamps_list:
         timestamps = synthesize_timestamps(n)
-        if pattern == "random":
+        if pattern == "random_jump":
             queries = synthesize_random_queries(timestamps, n_queries, seed=seed)
-        elif pattern == "forward":
+        elif pattern == "play_forward":
             queries = synthesize_forward_queries(timestamps, n_queries)
+        elif pattern == "play_backward":
+            queries = synthesize_backward_queries(timestamps, n_queries)
+        elif pattern == "slider_forward":
+            queries = synthesize_slider_drag_queries(timestamps, n_queries, slider_step_s, "forward")
+        elif pattern == "slider_backward":
+            queries = synthesize_slider_drag_queries(timestamps, n_queries, slider_step_s, "backward")
         else:
             raise ValueError(f"unknown pattern: {pattern}")
         oracle = [lkv_linear(timestamps, q) for q in queries]

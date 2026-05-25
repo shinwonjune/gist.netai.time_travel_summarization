@@ -4,6 +4,9 @@ from pxr import UsdGeom
 
 
 class ObjectIdManipulator(sc.Manipulator):
+    # 라벨을 객체 좌표에 정확히 배치 (PIL 합성 마커와 동일 3D 점). 0이 아니면 Y로 띄움.
+    _LABEL_Y_OFFSET = 0.0
+
     def __init__(self, prim_path: str, label_text: str, **kwargs):
         super().__init__(**kwargs)
         self._prim_path = prim_path
@@ -25,7 +28,7 @@ class ObjectIdManipulator(sc.Manipulator):
         self._transform = sc.Transform(
             transform=sc.Matrix44.get_translation_matrix(
                 translation[0],
-                translation[1] + 100,
+                translation[1] + self._LABEL_Y_OFFSET,
                 translation[2],
             )
         )
@@ -53,7 +56,7 @@ class ObjectIdManipulator(sc.Manipulator):
 
         self._transform.transform = sc.Matrix44.get_translation_matrix(
             translation[0],
-            translation[1] + 100,
+            translation[1] + self._LABEL_Y_OFFSET,
             translation[2],
         )
         self._last_position = current_position

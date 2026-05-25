@@ -108,6 +108,15 @@ class TimeTravelWindow:
                     self._speed_field.model.add_end_edit_fn(self._on_speed_changed)
                     ui.Label("x", width=20)
 
+                    # Capture controls
+                    ui.Spacer(width=10)
+                    self._capture_button = ui.Button("● Capture", width=90)
+                    self._capture_button.set_clicked_fn(self._on_capture_clicked)
+
+                    ui.Label("Length(s):", width=70)
+                    self._capture_length_field = ui.FloatField(width=60)
+                    self._capture_length_field.model.set_value(0.0)
+
                 with ui.HStack(height=30, spacing=8):
                     ui.Label("Mode:", width=50)
                     self._playback_mode_button = ui.Button("Playback", width=90)
@@ -202,6 +211,17 @@ class TimeTravelWindow:
         else:
             if self._core.start_wander():
                 self._move_button.text = "Stop Move"
+
+    def _on_capture_clicked(self):
+        if self._core.is_capturing():
+            self._core.stop_capture()
+            self._capture_button.text = "● Capture"
+        else:
+            duration_s = self._capture_length_field.model.get_value_as_float()
+            if duration_s < 0:
+                duration_s = 0.0
+            self._core.start_capture(duration_s=duration_s)
+            self._capture_button.text = "■ Stop"
 
     def _on_trace_toggle(self):
         if self._core.is_tracing():
@@ -324,6 +344,11 @@ class TimeTravelWindow:
         self._update_play_button()
         self._update_mode_controls()
         self._update_move_trace_controls()
+        # sync capture button label with facade state
+        if hasattr(self, "_capture_button"):
+            expected = "■ Stop" if self._core.is_capturing() else "● Capture"
+            if self._capture_button.text != expected:
+                self._capture_button.text = expected
     
     def destroy(self):
         """Clean up the window."""

@@ -29,6 +29,11 @@ class TimeTravelCore:
         self._wander = None
         self._trace = None
         self._stage_objects.ensure_summarization_camera()
+        self._capture_active: bool = False
+        self._capture_start_time = None
+        self._capture_duration_s: float = 0.0
+        self._capture_output_path = None
+        self._capture_pipeline = None
 
     def load_config(self, config_path: str) -> bool:
         try:
@@ -119,6 +124,85 @@ class TimeTravelCore:
     def toggle_playback(self):
         self._playback.toggle_playback()
 
+    def start_capture(self, duration_s: float = 0.0, output_path: Optional[str] = None) -> bool:
+        """실시간 viewport 캡처 시작. duration_s=0 이면 default 60초. 중간에 stop_capture로 중단 가능."""
+        if self._capture_active:
+            carb.log_warn("[Capture] already active")
+            return False
+        # duration_s 0 이하 → default 60초
+        effective_duration = float(duration_s) if duration_s > 0 else 60.0
+        if output_path is None:
+            from datetime import datetime as _dt
+            ts = _dt.now().strftime("%Y%m%dT%H%M%S")
+            # config의 video_output_dir 사용. 없으면 default "data/video"
+            output_dir_str = getattr(self._config, "video_output_dir", "data/video") if self._config else "data/video"
+            output_dir = Path(output_dir_str)
+            if not output_dir.is_absolute():
+                output_dir = self._module_dir / output_dir
+            output_dir.mkdir(parents=True, exist_ok=True)
+            output_path = str(output_dir / f"capture_{ts}.mp4")
+        self._capture_active = True
+        self._capture_duration_s = effective_duration
+        self._capture_output_path = output_path
+        import threading
+        import time as _time
+        self._capture_stop_event = threading.Event()
+        self._capture_start_time = _time.perf_counter()
+        self._start_capture_backend(output_path)
+        carb.log_warn(f"[Capture] started duration={effective_duration:g}s output={output_path}")
+        return True
+
+    def stop_capture(self) -> Optional[str]:
+        if not self._capture_active:
+            return None
+        out = self._capture_output_path
+        # stop_event 신호 → background worker가 capture loop 빠져나오고 인코더 마무리 후 파일 저장
+        if getattr(self, "_capture_stop_event", None) is not None:
+            self._capture_stop_event.set()
+        carb.log_warn(f"[Capture] stop requested -> {out}")
+        return out
+
+    def is_capturing(self) -> bool:
+        return self._capture_active
+
+    def _start_capture_backend(self, output_path: str) -> None:
+        """RealtimeCaptureRunner를 background thread에서 실행. duration은 runner 내부에서 자동 처리."""
+        import threading
+        from pathlib import Path as _P
+        from ..video_capture import CaptureRequest, RealtimeCaptureRunner
+
+        # duration_s=0 (무한)이면 기본 60초로 fallback. runner.capture는 blocking이라 외부 stop 불가.
+        duration = self._capture_duration_s if self._capture_duration_s > 0 else 60.0
+        output_uri = _P(output_path).resolve().as_uri()
+
+        def _worker():
+            try:
+                runner = RealtimeCaptureRunner(core=self)
+                req = CaptureRequest(duration_s=duration, output_uri=output_uri, label="ui_capture")
+                res = runner.capture(req, stop_event=self._capture_stop_event)
+                if res.success:
+                    carb.log_warn(
+                        f"[Capture] done {res.wall_clock_s:.1f}s "
+                        f"{res.output_size_bytes // 1024}KB drop={res.dropped_frames}"
+                    )
+                else:
+                    carb.log_warn(f"[Capture] FAILED: {res.error}")
+            except Exception as exc:
+                carb.log_warn(f"[Capture] worker exception: {exc!r}")
+            finally:
+                self._capture_active = False
+                self._capture_pipeline = None
+                self._capture_stop_event = None
+
+        thread = threading.Thread(target=_worker, daemon=True)
+        thread.start()
+        self._capture_pipeline = thread
+
+    def _stop_capture_backend(self) -> None:
+        """RealtimeCaptureRunner.capture는 blocking이라 외부 stop 불가.
+        duration_s까지 runner가 자체 종료. 여기서는 flag만 해제."""
+        self._capture_pipeline = None
+
     def update(self, dt: float):
         self._playback.update(dt, self._parse_timestamp, self.set_current_time, self._on_event_requested)
         if self._trace and self._trace.active:
@@ -126,6 +210,7 @@ class TimeTravelCore:
                 self._trace.tick()
             except Exception as e:
                 carb.log_warn(f"[Trace] tick failed: {e}")
+        # capture auto-stop은 RealtimeCaptureRunner가 내부에서 처리
 
     def start_wander(self) -> bool:
         """Start PhysX wandering when Physics mode has created a controller."""
@@ -535,6 +620,21 @@ class TimeTravelCore:
                 self._playback.toggle_playback()
             results.append(self.stop_lookup_benchmark())
         return results
+
+    def set_visual_complexity(self, level: str) -> bool:
+        if not self._config:
+            carb.log_warn("[Complexity] config not loaded")
+            return False
+        return self._stage_objects.set_visual_complexity(
+            level,
+            self._config.visibility_groups,
+            self._config.complexity_levels,
+        )
+
+    def get_complexity_levels(self) -> list:
+        if not self._config:
+            return ["Full", "Simplified", "Abstract"]
+        return list(self._config.complexity_levels.keys())
 
     def _on_event_requested(self, timestamp: str):
         self._stage_objects.move_camera_to_event(self._events.get_event_position(timestamp))

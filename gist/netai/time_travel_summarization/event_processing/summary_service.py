@@ -123,6 +123,13 @@ class EventSummaryService:
             time_obj = self._repository.parse_timestamp(timestamp)
             time_data = self._repository.get_data_at_time(time_obj)
             if first_objid not in time_data:
+                try:
+                    import carb
+                    carb.log_warn(
+                        f"[Events] objid={first_objid} not in trajectory at {timestamp}, skipped"
+                    )
+                except Exception:
+                    pass
                 continue
 
             x, y, z = time_data[first_objid]

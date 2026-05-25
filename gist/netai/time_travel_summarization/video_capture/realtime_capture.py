@@ -12,6 +12,10 @@ import re
 from .overlay_composer import CircleLabel, OverlayComposer, OverlayFrame, TextItem
 
 
+# True로 두면 마커가 반투명 + 4-방향 tick으로 렌더되어 객체 중심과 투영 픽셀의 일치 여부를 시각 확인할 수 있다
+DEBUG_OVERLAY_MARKERS = False
+
+
 def _extract_objid_number(objid: str) -> str:
     """objid 끝의 숫자만 추출. 'obj001' → '1', 'obj042' → '42'. 못 찾으면 원본."""
     m = re.search(r"(\d+)$", objid)
@@ -246,7 +250,15 @@ class RealtimeCaptureRunner:
 
         return _provider
 
-    def capture(self, req: CaptureRequest) -> CaptureResult:
+    def capture(self, req: CaptureRequest, stop_event=None) -> CaptureResult:
+        # Kit 내부에서 asyncio.get_event_loop()가 호출되는 경로가 있어
+        # 워커 스레드에도 이벤트 루프가 필요. 없으면 새로 부착.
+        import asyncio
+        try:
+            asyncio.get_event_loop()
+        except RuntimeError:
+            asyncio.set_event_loop(asyncio.new_event_loop())
+
         start_wall = time.perf_counter()
         metadata = {
             "runner": "A2_realtime_capture",
@@ -294,7 +306,7 @@ class RealtimeCaptureRunner:
                 pass
 
             stage = omni.usd.get_context().get_stage()
-            composer = OverlayComposer(req.width, req.height)
+            composer = OverlayComposer(req.width, req.height, debug=DEBUG_OVERLAY_MARKERS)
             provider = self._overlay_provider or (
                 self._default_provider_from_core(viewport, stage) if self._core else None
             )
@@ -327,7 +339,11 @@ class RealtimeCaptureRunner:
                 queue.push((received, rgba, width, height))
                 received += 1
 
+            stopped_early = False
             while received < target_frames:
+                if stop_event is not None and stop_event.is_set():
+                    stopped_early = True
+                    break
                 now = time.perf_counter()
                 if now < next_due:
                     time.sleep(min(0.005, next_due - now))

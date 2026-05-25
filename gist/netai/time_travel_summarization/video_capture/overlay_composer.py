@@ -43,10 +43,11 @@ class OverlayFrame:
 class OverlayComposer:
     """RGBA bytes에 PIL로 텍스트를 합성."""
 
-    def __init__(self, width: int, height: int):
+    def __init__(self, width: int, height: int, debug: bool = False):
         self._width = width
         self._height = height
         self._font_cache: dict = {}
+        self._debug = debug
 
     def _get_font(self, size, image_font):
         cached = self._font_cache.get(size)
@@ -143,10 +144,21 @@ class OverlayComposer:
         cx, cy, r = marker.x, marker.y, marker.radius
         # 원: bounding box (left, top, right, bottom)
         bbox = (cx - r, cy - r, cx + r, cy + r)
-        draw.ellipse(bbox, fill=marker.bg, outline=marker.border, width=marker.border_width)
+        # debug=True면 반투명 fill로 객체가 마커 뒤로 보이게 한다
+        fill = (marker.bg[0], marker.bg[1], marker.bg[2], 90) if self._debug else marker.bg
+        draw.ellipse(bbox, fill=fill, outline=marker.border, width=marker.border_width)
         # 중앙 정렬 텍스트
         font = self._get_font(marker.font_size, image_font)
         tbbox = draw.textbbox((0, 0), marker.text, font=font)
         tw = tbbox[2] - tbbox[0]
         th = tbbox[3] - tbbox[1]
         draw.text((cx - tw // 2, cy - th // 2 - tbbox[1]), marker.text, font=font, fill=marker.fg)
+        if self._debug:
+            # 정확한 투영 픽셀(cx, cy)을 외곽 4-방향 tick으로 가시화
+            tick_outer = r + 6
+            tick_inner = r + 1
+            red = (255, 0, 0, 255)
+            draw.line([(cx - tick_outer, cy), (cx - tick_inner, cy)], fill=red, width=1)
+            draw.line([(cx + tick_inner, cy), (cx + tick_outer, cy)], fill=red, width=1)
+            draw.line([(cx, cy - tick_outer), (cx, cy - tick_inner)], fill=red, width=1)
+            draw.line([(cx, cy + tick_inner), (cx, cy + tick_outer)], fill=red, width=1)

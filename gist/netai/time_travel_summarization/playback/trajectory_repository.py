@@ -6,7 +6,7 @@ import time
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
-from .lookup_benchmark import LkvBidirectional, LkvForwardBisectHybrid, LkvInvalidate
+from .lookup_benchmark import LkvCache, LkvForwardBisectHybrid
 
 
 class TrajectoryRepository:
@@ -21,8 +21,7 @@ class TrajectoryRepository:
         # lookup mode
         self._lookup_mode: str = "linear"
         self._hybrid = LkvForwardBisectHybrid()
-        self._invalidate = LkvInvalidate()
-        self._bidirectional = LkvBidirectional()
+        self._lkv_cache = LkvCache()
         # benchmark instrumentation
         self._bench_active: bool = False
         self._bench_call_count: int = 0
@@ -72,8 +71,7 @@ class TrajectoryRepository:
             self._data_end_time = self.parse_timestamp(self._timestamps[-1])
 
         self._hybrid.reset()
-        self._invalidate.reset()
-        self._bidirectional.reset()
+        self._lkv_cache.reset()
         return bool(self._timestamps)
 
     def load_csv(self, csv_path: Path) -> bool:
@@ -110,56 +108,56 @@ class TrajectoryRepository:
         return (tuple(mins), tuple(maxs))
 
     def set_lookup_mode(self, mode: str) -> None:
-        valid = ("linear", "bisect", "hybrid", "invalidate", "bidirectional")
+        valid = ("linear", "bisect", "hybrid", "lkv_cache")
         if mode not in valid:
             raise ValueError(f"mode must be one of {valid}, got {mode!r}")
         self._lookup_mode = mode
-        # cache state 초기화 — 모드 전환 시 stale 방지
         self._hybrid.reset()
-        self._invalidate.reset()
-        self._bidirectional.reset()
+        self._lkv_cache.reset()
 
     def get_lookup_mode(self) -> str:
         return self._lookup_mode
 
     def get_data_at_time(self, timestamp: datetime.datetime) -> Dict[str, Tuple[float, float, float]]:
-        if not self._bench_active:
-            normalized_time = timestamp.replace(microsecond=(timestamp.microsecond // 1000) * 1000)
-            timestamp_str = self.format_timestamp(normalized_time)
-            if timestamp_str in self._data:
-                return self._data[timestamp_str]
-            return self._get_last_known_value(timestamp_str)
-        # benchmark mode: timing 누적
-        t0 = time.perf_counter()
+        if self._bench_active:
+            t0 = time.perf_counter()
+            result = self._do_lookup(timestamp)
+            self._bench_total_seconds += time.perf_counter() - t0
+            self._bench_call_count += 1
+            return result
+        return self._do_lookup(timestamp)
+
+    def _do_lookup(self, timestamp: datetime.datetime) -> Dict[str, Tuple[float, float, float]]:
         normalized_time = timestamp.replace(microsecond=(timestamp.microsecond // 1000) * 1000)
         timestamp_str = self.format_timestamp(normalized_time)
+        # stateful cache 알고리즘은 hit/miss를 직접 처리 (cache learning 필요)
+        if self._lookup_mode in ("hybrid", "lkv_cache"):
+            return self._lookup_via_algorithm(timestamp_str)
+        # linear/bisect는 floor lookup만 책임. hit fast path는 여기서 처리.
         if timestamp_str in self._data:
-            result = self._data[timestamp_str]
+            return self._data[timestamp_str]
+        return self._get_last_known_value(timestamp_str)
+
+    def _lookup_via_algorithm(self, timestamp_str: str) -> Dict[str, Tuple[float, float, float]]:
+        if not self._timestamps:
+            return {}
+        if self._lookup_mode == "hybrid":
+            ts = self._hybrid.query(self._timestamps, timestamp_str)
+        elif self._lookup_mode == "lkv_cache":
+            ts = self._lkv_cache.query(self._timestamps, timestamp_str)
         else:
-            result = self._get_last_known_value(timestamp_str)
-        self._bench_total_seconds += time.perf_counter() - t0
-        self._bench_call_count += 1
-        return result
+            ts = None
+        if ts is None:
+            return self._data[self._timestamps[0]]
+        return self._data[ts]
 
     def _get_last_known_value(self, timestamp_str: str) -> Dict[str, Tuple[float, float, float]]:
         """target ≤ timestamp_str인 최대 timestamp의 데이터 반환 (floor lookup)."""
         if not self._timestamps:
             return {}
-        if self._lookup_mode == "linear":
-            return self._lookup_linear(timestamp_str)
         if self._lookup_mode == "bisect":
             return self._lookup_bisect(timestamp_str)
-        elif self._lookup_mode == "hybrid":
-            ts = self._hybrid.query(self._timestamps, timestamp_str)
-        elif self._lookup_mode == "invalidate":
-            ts = self._invalidate.query(self._timestamps, timestamp_str)
-        elif self._lookup_mode == "bidirectional":
-            ts = self._bidirectional.query(self._timestamps, timestamp_str)
-        else:
-            return self._lookup_linear(timestamp_str)
-        if ts is None:
-            return self._data[self._timestamps[0]]
-        return self._data[ts]
+        return self._lookup_linear(timestamp_str)
 
     def _lookup_linear(self, timestamp_str: str) -> Dict[str, Tuple[float, float, float]]:
         """원본 선형 floor lookup. O(N), 정렬 가정 + 이른 break로 평균 O(N/2)."""
