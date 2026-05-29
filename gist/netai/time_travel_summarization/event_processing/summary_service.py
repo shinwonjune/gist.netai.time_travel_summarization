@@ -17,7 +17,30 @@ class EventSummaryService:
     def get_event_position(self, timestamp: str):
         return self._event_positions.get(timestamp)
 
-    def load_events_from_event_list(self) -> List[str]:
+    def load_events_from_event_list(self, event_list_uri: Optional[str] = None) -> List[str]:
+        if event_list_uri:
+            # minIO/S3 prefix는 디렉터리 경계를 위해 trailing slash가 필요. 없으면
+            # recursive=False가 폴더 내부 파일을 못 찾고 빈 결과를 낸다(로컬은 무해).
+            prefix = event_list_uri if event_list_uri.endswith("/") else event_list_uri + "/"
+            adapter = from_uri(prefix)
+            eventlist_files = [
+                info
+                for info in adapter.list_prefix(prefix, recursive=False)
+                if info.uri.rstrip("/").rsplit("/", 1)[-1].endswith("_eventlist.jsonl")
+            ]
+            if not eventlist_files:
+                return []
+
+            with_modified = [info for info in eventlist_files if info.last_modified]
+            if with_modified:
+                latest_file = max(with_modified, key=lambda info: info.last_modified)
+            else:
+                latest_file = max(eventlist_files, key=lambda info: info.uri)
+
+            with adapter.open_read(latest_file.uri) as file:
+                text = file.read().decode("utf-8")
+            return self._parse_eventlist_text(text)
+
         eventlist_files = list(self._paths.event_list_dir.glob("*_eventlist.jsonl"))
         if not eventlist_files:
             legacy_dir = self._module_dir / "event_list"
@@ -27,23 +50,28 @@ class EventSummaryService:
             return []
 
         latest_file = max(eventlist_files, key=lambda path: path.stat().st_mtime)
+        return self._parse_eventlist_text(latest_file.read_text(encoding="utf-8"))
+
+    def _parse_eventlist_text(self, text: str) -> List[str]:
         event_timestamps: List[str] = []
         event_positions: Dict[str, Tuple[float, float, float]] = {}
 
-        with open(latest_file, "r", encoding="utf-8") as file:
-            for line in file:
-                entry = json.loads(line)
-                timestamp = entry.get("timestamp")
-                position = entry.get("position")
-                if not timestamp or not position:
-                    continue
+        for line in text.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            entry = json.loads(line)
+            timestamp = entry.get("timestamp")
+            position = entry.get("position")
+            if not timestamp or not position:
+                continue
 
-                event_timestamps.append(timestamp)
-                event_positions[timestamp] = (
-                    position.get("x", 0),
-                    position.get("y", 0),
-                    position.get("z", 0),
-                )
+            event_timestamps.append(timestamp)
+            event_positions[timestamp] = (
+                position.get("x", 0),
+                position.get("y", 0),
+                position.get("z", 0),
+            )
 
         self._event_positions = event_positions
         return event_timestamps

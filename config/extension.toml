@@ -34,6 +34,20 @@ repository = ""  # URL of the extension source repository
 "omni.kit.pip_archive" = {}
 "omni.kit.pipapi" = {} 
 
+[python.pipapi]
+# Runtime packages needed for Data Lake / MinIO trajectory loading.
+# `minio` handles s3:// / minio:// URIs and `pyarrow` is required for parquet chunks.
+requirements = [
+    "minio",
+    "pyarrow",
+]
+modules = [
+    "minio",
+    "pyarrow",
+]
+use_online_index = true
+ignore_import_check = false
+
 [settings]
 
 

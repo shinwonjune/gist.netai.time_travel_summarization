@@ -1,9 +1,39 @@
 {
-  "data_path": "./data/living_trajectory_1min_0.2s.csv",
+  "data_path": "${DATA_PATH}",
 
   "auto_generate": true,
 
-  "astronaut_usd": "omniverse://<your-nucleus-host>/Projects/<...>/Astronaut.usd",
+  "astronaut_usd": "${ASTRONAUT_USD_PATH}",
 
-  "prim_map": {}
+  "prim_map": {},
+
+  "visibility_groups": {
+    "Furniture": ["/World/Furniture"],
+    "Equipment": ["/World/Equipment"],
+    "Ground": ["/World/Ground"],
+    "A_Exterior": ["/World/A_Exterior"],
+    "_comment_TimeTravel_Objects": "Objects related to time travel events, e.g., vehicles, people, etc.",
+    "TimeTravel_Objects": ["/World/TimeTravel_Objects"]
+  },
+
+  "complexity_levels": {
+    "Full": [],
+    "_comment_Simplified": "Groups that are hidden in Simplified level",
+    "Simplified": ["GROUPS_1", "GROUPS_2"], 
+    "_comment_Abstract": "Groups that are hidden in Abstract level (in addition to those in Simplified)",
+    "Abstract": ["GROUPS_1", "GROUPS_2", "GROUPS_3", "GROUPS_4", "GROUPS_5"] 
+  },
+
+  "video_output_dir": "data/video",
+
+  "output_root_uri": "s3://${MINIO_BUCKET}/timetravel",
+  "event_list_uri": "s3://${MINIO_BUCKET}/timetravel/event_list",
+  "video_output_uri": "s3://${MINIO_BUCKET}/timetravel/video",
+
+  "lake": {
+    "enabled": false,
+    "manifest_uri": "s3://${MINIO_BUCKET}/trajectory/<dataset>/manifest.json",
+    "cache_chunks": 4,
+    "prefetch_ahead": 2
+  }
 }

@@ -12,6 +12,8 @@ from ..playback.stage_object_controller import StageObjectController
 from ..playback.trajectory_repository import TrajectoryRepository
 
 
+DEFAULT_ASTRONAUT_USD = str((Path(__file__).resolve().parent.parent / "assets" / "Astronaut.usd").resolve())
+
 
 
 class TimeTravelCore:
@@ -23,6 +25,8 @@ class TimeTravelCore:
         self._config = None
         self._prim_map = {}
         self._repository = TrajectoryRepository()
+        self._data_source = "local"
+        self._last_data_load_error = ""
         self._playback = PlaybackController()
         self._stage_objects = StageObjectController()
         self._events = EventSummaryService(self._module_dir, self._repository)
@@ -39,32 +43,125 @@ class TimeTravelCore:
         try:
             path = Path(config_path)
             if not path.exists():
-                carb.log_warn(f"[TimeTravel] Config file not found: {config_path}")
+                self._last_data_load_error = f"Config file not found: {config_path}"
+                carb.log_warn(f"[TimeTravel] {self._last_data_load_error}")
                 return False
 
             self._config = ExtensionConfig.from_file(config_path)
             self._prim_map = dict(self._config.prim_map)
             self._playback.set_event_summary(self._config.event_summary)
+            self._last_data_load_error = ""
             carb.log_info("[TimeTravel] Config loaded")
             return True
         except Exception as e:
-            carb.log_error(f"[TimeTravel] Failed to load config: {e}")
+            self._last_data_load_error = f"Failed to load config: {e}"
+            carb.log_error(f"[TimeTravel] {self._last_data_load_error}")
             return False
 
-    def load_data(self) -> bool:
+    def _resolve_uri(self, value: str) -> Optional[str]:
+        """'://'가 있으면 그대로, 아니면 config 디렉터리 기준 로컬 경로 -> file:// URI."""
+        if not value:
+            return None
+        if "://" in value:
+            return value
+        path = Path(value)
+        if not path.is_absolute():
+            # Path 결합이 './' '../'를 정상 처리. lstrip 문자집합 제거 버그 회피.
+            path = self._config.config_dir / value
+        return path.resolve().as_uri()
+
+    def _resolve_output_uri_for_mode(self, mode: str, value: str) -> Optional[str]:
+        """Return configured output URI only when the active data source is Data Lake."""
+        if mode != "lake":
+            return None
+        return self._resolve_uri(value)
+
+    def get_output_root_uri_for_active_mode(self) -> Optional[str]:
+        if not self._config:
+            return None
+        return self._resolve_output_uri_for_mode(
+            self.get_data_source(),
+            getattr(self._config, "output_root_uri", ""),
+        )
+
+    def get_event_list_uri_for_active_mode(self) -> Optional[str]:
+        if not self._config:
+            return None
+        return self._resolve_output_uri_for_mode(
+            self.get_data_source(),
+            getattr(self._config, "event_list_uri", ""),
+        )
+
+    def get_video_output_uri_for_active_mode(self) -> Optional[str]:
+        if not self._config:
+            return None
+        return self._resolve_output_uri_for_mode(
+            self.get_data_source(),
+            getattr(self._config, "video_output_uri", ""),
+        )
+
+    def _activate_data_source(self, mode: str) -> bool:
         try:
             if not self._config:
-                carb.log_error("[TimeTravel] Config must be loaded before data")
+                self._last_data_load_error = "Config must be loaded before data"
+                carb.log_error(f"[TimeTravel] {self._last_data_load_error}")
                 return False
 
-            uri = self._config.data_uri
-            carb.log_info(f"[TimeTravel] Looking for data at URI: {uri}")
+            lake_cfg = getattr(self._config, "lake", {}) or {}
+            if mode == "lake":
+                direct_data_uri = self._resolve_uri(lake_cfg.get("direct_data_uri", ""))
+                if direct_data_uri:
+                    repo_factory = TrajectoryRepository
+                    uri = direct_data_uri
+                    log_message = f"[TimeTravel] Lake mode test direct data URI: {uri}"
+                else:
+                    from ..playback.lake_repository import LakeTrajectoryRepository
 
-            loaded = self._repository.load_from_uri(uri)
+                    manifest_uri = self._resolve_uri(lake_cfg.get("manifest_uri", ""))
+                    if not manifest_uri:
+                        self._last_data_load_error = "Data Lake manifest URI is not configured"
+                        carb.log_warn(f"[TimeTravel] {self._last_data_load_error}")
+                        return False
+                    cache_chunks = int(lake_cfg.get("cache_chunks", 4))
+                    prefetch_ahead = int(lake_cfg.get("prefetch_ahead", 1))
+                    repo_factory = lambda: LakeTrajectoryRepository(
+                        cache_chunks=cache_chunks,
+                        prefetch_ahead=prefetch_ahead,
+                    )
+                    uri = manifest_uri
+                    log_message = f"[TimeTravel] Lake mode: manifest URI: {uri}"
+            elif mode == "local":
+                repo_factory = TrajectoryRepository
+                uri = self._config.data_uri
+                log_message = f"[TimeTravel] Looking for data at URI: {uri}"
+            else:
+                self._last_data_load_error = f"Invalid data source: {mode}"
+                carb.log_warn(f"[TimeTravel] {self._last_data_load_error}")
+                return False
+
+            output_root_uri = self._resolve_output_uri_for_mode(
+                mode,
+                getattr(self._config, "output_root_uri", ""),
+            )
+            repo = repo_factory()
+            carb.log_info(log_message)
+
+            loaded = repo.load_from_uri(uri)
             if not loaded:
-                carb.log_error(f"[TimeTravel] Data load failed for URI: {uri}")
+                self._last_data_load_error = f"Data load failed for URI: {uri}"
+                carb.log_error(f"[TimeTravel] {self._last_data_load_error}")
                 return False
 
+            old_repository = getattr(self, "_repository", None)
+            if old_repository and hasattr(old_repository, "clear"):
+                old_repository.clear()
+
+            self._repository = repo
+            self._events = EventSummaryService(
+                self._module_dir,
+                self._repository,
+                output_root_uri=output_root_uri,
+            )
             self._playback.configure_data_range(
                 self._repository.data_start_time,
                 self._repository.data_end_time,
@@ -73,10 +170,64 @@ class TimeTravelCore:
                 f"[TimeTravel] Data loaded: {len(self._repository.timestamps)} timestamps, "
                 f"{self._repository.data_start_time} to {self._repository.data_end_time}"
             )
+            self._data_source = mode
+            self._last_data_load_error = ""
+            if mode == "lake":
+                prim_map = self.regenerate_astronauts_from_loaded_data()
+                if not prim_map:
+                    carb.log_warn("[TimeTravel] Data Lake data loaded, but no astronauts were generated")
+                self.update_stage_objects()
+                carb.log_warn(
+                    f"[TimeTravel] Data Lake activation complete: "
+                    f"timestamps={len(self._repository.timestamps)}, "
+                    f"objects={self.get_loaded_object_count()}, "
+                    f"astronauts={len(self._prim_map)}"
+                )
             return True
         except Exception as e:
-            carb.log_error(f"[TimeTravel] Failed to load data: {e}")
+            self._last_data_load_error = f"Failed to load data: {e}"
+            carb.log_error(f"[TimeTravel] {self._last_data_load_error}")
+            import traceback
+
+            carb.log_error(traceback.format_exc())
             return False
+
+    def load_data(self) -> bool:
+        try:
+            if not self._config:
+                self._last_data_load_error = "Config must be loaded before data"
+                carb.log_error(f"[TimeTravel] {self._last_data_load_error}")
+                return False
+
+            lake_cfg = getattr(self._config, "lake", {}) or {}
+            initial = "lake" if lake_cfg.get("enabled") and lake_cfg.get("manifest_uri") else "local"
+            return self._activate_data_source(initial)
+        except Exception as e:
+            self._last_data_load_error = f"Failed to load data: {e}"
+            carb.log_error(f"[TimeTravel] {self._last_data_load_error}")
+            return False
+
+    def set_data_source(self, mode: str) -> bool:
+        if mode not in ("local", "lake"):
+            self._last_data_load_error = f"Invalid data source: {mode}"
+            carb.log_warn(f"[TimeTravel] {self._last_data_load_error}")
+            return False
+        if mode == "lake":
+            lake_cfg = getattr(self._config, "lake", {}) or {}
+            if not lake_cfg.get("direct_data_uri") and not lake_cfg.get("manifest_uri"):
+                self._last_data_load_error = "Data Lake manifest URI is not configured"
+                carb.log_warn(f"[TimeTravel] {self._last_data_load_error}")
+                return False
+        if self._activate_data_source(mode):
+            self.set_to_earliest_time()
+            return True
+        return False
+
+    def get_data_source(self) -> str:
+        return getattr(self, "_data_source", "local")
+
+    def get_last_data_load_error(self) -> str:
+        return getattr(self, "_last_data_load_error", "")
 
     def _parse_timestamp(self, timestamp_str: str) -> datetime.datetime:
         return self._repository.parse_timestamp(timestamp_str)
@@ -89,6 +240,29 @@ class TimeTravelCore:
         if updated:
             self.update_stage_objects()
         return updated
+
+    def load_time_range(self, start_time: datetime.datetime, end_time: datetime.datetime) -> bool:
+        """[start,end] 구간으로 재생 범위를 설정하고 시작점으로 이동.
+
+        Lake 모드에서는 데이터 전체가 manifest로 인덱싱돼 있고, seek 시 해당 구간 청크만
+        윈도우로 로드된다(프리페치로 경계 무지연). 단일 파일 모드에서도 동일 API로 동작.
+        """
+        full_start = self._repository.data_start_time
+        full_end = self._repository.data_end_time
+        if not full_start or not full_end:
+            carb.log_warn("[TimeTravel] load_time_range: no data loaded")
+            return False
+        # 전체 범위로 리셋 후 좁혀야 재진입(다른 구간 재입력) 시 정상 동작
+        self._playback.configure_data_range(full_start, full_end)
+        if not self._playback.set_time_range(start_time, end_time):
+            carb.log_warn(f"[TimeTravel] load_time_range: invalid range {start_time}..{end_time}")
+            return False
+        self._playback.set_current_time(self._playback.get_start_time())
+        self.update_stage_objects()
+        carb.log_info(
+            f"[TimeTravel] Time range loaded: {self._playback.get_start_time()} .. {self._playback.get_end_time()}"
+        )
+        return True
 
     def get_data_start_time(self) -> datetime.datetime:
         return self._repository.data_start_time or datetime.datetime.now()
@@ -134,13 +308,17 @@ class TimeTravelCore:
         if output_path is None:
             from datetime import datetime as _dt
             ts = _dt.now().strftime("%Y%m%dT%H%M%S")
-            # config의 video_output_dir 사용. 없으면 default "data/video"
-            output_dir_str = getattr(self._config, "video_output_dir", "data/video") if self._config else "data/video"
-            output_dir = Path(output_dir_str)
-            if not output_dir.is_absolute():
-                output_dir = self._module_dir / output_dir
-            output_dir.mkdir(parents=True, exist_ok=True)
-            output_path = str(output_dir / f"capture_{ts}.mp4")
+            video_output_uri = self.get_video_output_uri_for_active_mode()
+            if video_output_uri:
+                output_path = f"{video_output_uri.rstrip('/')}/capture_{ts}.mp4"
+            else:
+                # config의 video_output_dir 사용. 없으면 default "data/video"
+                output_dir_str = getattr(self._config, "video_output_dir", "data/video") if self._config else "data/video"
+                output_dir = Path(output_dir_str)
+                if not output_dir.is_absolute():
+                    output_dir = self._module_dir / output_dir
+                output_dir.mkdir(parents=True, exist_ok=True)
+                output_path = str(output_dir / f"capture_{ts}.mp4")
         self._capture_active = True
         self._capture_duration_s = effective_duration
         self._capture_output_path = output_path
@@ -173,7 +351,7 @@ class TimeTravelCore:
 
         # duration_s=0 (무한)이면 기본 60초로 fallback. runner.capture는 blocking이라 외부 stop 불가.
         duration = self._capture_duration_s if self._capture_duration_s > 0 else 60.0
-        output_uri = _P(output_path).resolve().as_uri()
+        output_uri = output_path if "://" in output_path else _P(output_path).resolve().as_uri()
 
         def _worker():
             try:
@@ -434,6 +612,17 @@ class TimeTravelCore:
     def has_data(self) -> bool:
         return self._repository.has_data()
 
+    def get_stage_object_count(self) -> int:
+        return len(self._prim_map)
+
+    def get_loaded_object_count(self) -> int:
+        get_object_ids = getattr(self._repository, "get_object_ids", None)
+        if callable(get_object_ids):
+            return len(get_object_ids())
+        if self._repository.data_start_time:
+            return len(self._repository.get_data_at_time(self._repository.data_start_time))
+        return 0
+
     def has_events(self) -> bool:
         return len(self._playback.get_event_summary()) > 0
 
@@ -445,7 +634,10 @@ class TimeTravelCore:
 
     def load_events_from_positions_jsonl(self) -> bool:
         try:
-            event_summary = self._events.load_events_from_event_list()
+            event_list_uri = None
+            if self._config:
+                event_list_uri = self.get_event_list_uri_for_active_mode()
+            event_summary = self._events.load_events_from_event_list(event_list_uri=event_list_uri)
             if not event_summary:
                 return False
             self._playback.set_event_summary(event_summary)
@@ -487,12 +679,15 @@ class TimeTravelCore:
             self._config.astronaut_usd = DEFAULT_ASTRONAUT_USD
             carb.log_info(f"[TimeTravel] Using default astronaut USD: {DEFAULT_ASTRONAUT_USD}")
 
-        csv_path = self._config.resolve_from_config(self._config.data_path)
-        if not csv_path.exists():
-            carb.log_error(f"[TimeTravel] Data file not found: {csv_path}")
-            return {}
-
-        objids = self.parse_unique_objids(str(csv_path))
+        data_uri = self._config.data_uri
+        if "://" in self._config.data_path:
+            objids = TrajectoryRepository.parse_unique_objids_from_uri(data_uri)
+        else:
+            csv_path = self._config.resolve_from_config(self._config.data_path)
+            if not csv_path.exists():
+                carb.log_error(f"[TimeTravel] Data file not found: {csv_path}")
+                return {}
+            objids = self.parse_unique_objids(str(csv_path))
         if not objids:
             carb.log_error("[TimeTravel] No objids found in CSV")
             return {}
@@ -507,6 +702,50 @@ class TimeTravelCore:
 
         self.hide_all_cameras()
         self._prim_map = prim_map
+        return prim_map
+
+    def regenerate_astronauts_from_loaded_data(self) -> Dict[str, str]:
+        if not self._config:
+            carb.log_error("[TimeTravel] Config must be loaded before auto-generation")
+            return {}
+        if not self._config.astronaut_usd:
+            self._config.astronaut_usd = DEFAULT_ASTRONAUT_USD
+            carb.log_info(f"[TimeTravel] Using default astronaut USD: {DEFAULT_ASTRONAUT_USD}")
+
+        objids = []
+        get_object_ids = getattr(self._repository, "get_object_ids", None)
+        if callable(get_object_ids):
+            objids = get_object_ids()
+        if not objids and self._repository.data_start_time:
+            objids = sorted(self._repository.get_data_at_time(self._repository.data_start_time).keys())
+        if not objids:
+            carb.log_error("[TimeTravel] No objids found in loaded data")
+            return {}
+
+        if self._wander:
+            self._wander.stop()
+            self._wander = None
+        self._stage_objects.clear_timetravel_objects()
+
+        prim_map = {}
+        for i, objid in enumerate(objids, start=1):
+            prim_path = self.create_astronaut_prim(i)
+            if prim_path:
+                prim_map[objid] = prim_path
+            else:
+                carb.log_error(f"[TimeTravel] Failed to create astronaut prim for objid={objid}")
+
+        self.hide_all_cameras()
+        self._prim_map = prim_map
+        if prim_map:
+            carb.log_warn(
+                f"[TimeTravel] Regenerated {len(prim_map)} astronauts from loaded data "
+                f"(objids={len(objids)})"
+            )
+        else:
+            carb.log_error(
+                f"[TimeTravel] Loaded data has {len(objids)} objids, but no astronaut prims were created"
+            )
         return prim_map
 
     def hide_all_cameras(self):

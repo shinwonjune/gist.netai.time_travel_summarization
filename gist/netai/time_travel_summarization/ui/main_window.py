@@ -3,6 +3,8 @@
 import datetime
 import carb
 
+from .task_dispatcher import UiTaskDispatcher
+
 
 class TimeTravelWindow:
     """Time Travel UI Window."""
@@ -13,9 +15,12 @@ class TimeTravelWindow:
 
         self._core = core
         self._updating_slider = False  # Flag to prevent infinite loops
+        self._source_status_message = ""
+        self._source_switch_pending = False
+        self._ui_dispatcher = UiTaskDispatcher("TimeTravelWindowUiDispatcher")
         
         # Create window
-        self._window = ui.Window("Time Travel", width=500, height=450)
+        self._window = ui.Window("Time Travel", width=500, height=480)
         
         with self._window.frame:
             with ui.VStack(spacing=5):
@@ -69,7 +74,29 @@ class TimeTravelWindow:
                     ui.Spacer(width=10)
                     self._goto_button = ui.Button("Go", width=50)
                     self._goto_button.set_clicked_fn(self._on_goto_clicked)
-                
+
+                with ui.HStack(height=30, spacing=8):
+                    ui.Label("Data Source:", width=85)
+                    self._source_local_button = ui.Button("Local", width=90)
+                    self._source_local_button.set_clicked_fn(self._on_source_local_clicked)
+                    self._source_lake_button = ui.Button("Data Lake", width=90)
+                    self._source_lake_button.set_clicked_fn(self._on_source_lake_clicked)
+                    self._source_status = ui.Label("", style={"color": 0xFF888888})
+
+                # Load time range (data lake / minIO windowed load)
+                ui.Label("Load Time Range (minIO):", style={"font_size": 14, "font_weight": "bold"})
+                _fmt = "%Y-%m-%d %H:%M:%S"
+                with ui.HStack(height=25, spacing=5):
+                    ui.Label("Start:", width=40)
+                    self._range_start_field = ui.StringField(width=160)
+                    self._range_start_field.model.set_value(self._core.get_start_time().strftime(_fmt))
+                    ui.Label("End:", width=30)
+                    self._range_end_field = ui.StringField(width=160)
+                    self._range_end_field.model.set_value(self._core.get_end_time().strftime(_fmt))
+                    ui.Spacer(width=10)
+                    self._load_range_button = ui.Button("Load Range", width=90)
+                    self._load_range_button.set_clicked_fn(self._on_load_range_clicked)
+
                 # Event Summary checkbox with Next Event button
                 with ui.HStack(height=25, spacing=10):
                     self._event_checkbox = ui.CheckBox(width=20)
@@ -151,6 +178,8 @@ class TimeTravelWindow:
                     ui.Spacer()
                     self._progress_label = ui.Label("0.0%", style={"font_size": 12})
                     ui.Spacer()
+
+                self._update_source_controls()
     
     def _on_goto_clicked(self):
         """Handle Go button click - go to user-specified time."""
@@ -173,6 +202,82 @@ class TimeTravelWindow:
         except Exception as e:
             carb.log_error(f"[TimeTravel] Error setting time: {e}")
     
+    def _on_load_range_clicked(self):
+        """Handle Load Range click - narrow playback to [start,end] and seek to start.
+
+        Lake 모드에서는 해당 구간 청크만 minIO에서 윈도우로 로드된다(프리페치로 무지연).
+        """
+        fmt = "%Y-%m-%d %H:%M:%S"
+        try:
+            start = datetime.datetime.strptime(self._range_start_field.model.get_value_as_string().strip(), fmt)
+            end = datetime.datetime.strptime(self._range_end_field.model.get_value_as_string().strip(), fmt)
+        except ValueError as e:
+            carb.log_error(f"[TimeTravel] Invalid range (use 'YYYY-MM-DD HH:MM:SS'): {e}")
+            return
+        if self._core.load_time_range(start, end):
+            self._time_slider.model.set_value(self._core.get_progress())
+            self._update_goto_fields()
+
+    def _on_source_local_clicked(self):
+        """Switch trajectory loading to the configured local data file."""
+        self._request_source_switch("local")
+
+    def _on_source_lake_clicked(self):
+        """Switch trajectory loading to the configured Data Lake manifest."""
+        carb.log_warn("[TimeTravel] Data Lake button clicked")
+        self._request_source_switch("lake")
+
+    def _request_source_switch(self, mode: str):
+        if self._source_switch_pending:
+            carb.log_warn(f"[TimeTravel] Source switch already pending; ignored mode={mode}")
+            return
+        self._source_switch_pending = True
+        label = "Data Lake" if mode == "lake" else "Local"
+        self._source_status_message = f"{label} loading..."
+        self._update_source_controls()
+        self._ui_dispatcher.submit(lambda mode=mode: self._apply_source_switch(mode))
+
+    def _apply_source_switch(self, mode: str):
+        try:
+            carb.log_warn(f"[TimeTravel] Applying source switch on update tick: {mode}")
+            if mode == "lake":
+                self._apply_lake_source_switch()
+            else:
+                self._apply_local_source_switch()
+        except Exception as exc:
+            carb.log_error(f"[TimeTravel] Source switch crashed before completion: {exc!r}")
+            import traceback
+
+            carb.log_error(traceback.format_exc())
+            self._source_status_message = f"Source switch failed: {exc}"
+            self._update_source_controls()
+        finally:
+            self._source_switch_pending = False
+            self._update_source_controls()
+
+    def _apply_local_source_switch(self):
+        if self._core.set_data_source("local"):
+            self._source_status_message = ""
+            self._refresh_after_source_switch()
+            return
+        self._source_status_message = self._core.get_last_data_load_error() or "Local load failed"
+        carb.log_warn(f"[TimeTravel] {self._source_status_message}")
+
+    def _apply_lake_source_switch(self):
+        if self._core.set_data_source("lake"):
+            objects = self._core.get_loaded_object_count() if hasattr(self._core, "get_loaded_object_count") else 0
+            astronauts = self._core.get_stage_object_count() if hasattr(self._core, "get_stage_object_count") else 0
+            self._source_status_message = f"Data Lake loaded: objects={objects}, astronauts={astronauts}"
+            carb.log_warn(f"[TimeTravel] {self._source_status_message}")
+            self._refresh_after_source_switch()
+            return
+
+        self._source_status_message = "Data Lake 미설정(config lake.manifest_uri 필요)"
+        if hasattr(self._core, "get_last_data_load_error"):
+            self._source_status_message = self._core.get_last_data_load_error() or self._source_status_message
+        carb.log_warn(f"[TimeTravel] {self._source_status_message}")
+        self._update_source_controls()
+
     def _on_next_event_clicked(self):
         """Handle Next Event button click - jump to next event."""
         if self._core.has_events():
@@ -304,6 +409,19 @@ class TimeTravelWindow:
         self._playback_mode_button.enabled = mode != "playback"
         self._physics_mode_button.enabled = mode != "physics"
 
+    def _update_source_controls(self):
+        """Update current data source label and button enabled states."""
+        if not hasattr(self, "_source_local_button"):
+            return
+        source = self._core.get_data_source()
+        pending = getattr(self, "_source_switch_pending", False)
+        self._source_local_button.enabled = not pending and source != "local"
+        self._source_lake_button.enabled = not pending and source != "lake"
+        if self._source_status_message:
+            self._source_status.text = self._source_status_message
+        else:
+            self._source_status.text = "Data Lake" if source == "lake" else "Local"
+
     def _update_move_trace_controls(self):
         """Update Move and Trace controls from facade state."""
         self._move_button.text = "Stop Move" if self._core.is_wandering() else "Move"
@@ -322,6 +440,21 @@ class TimeTravelWindow:
         self._goto_hour.model.set_value(current.hour)
         self._goto_minute.model.set_value(current.minute)
         self._goto_second.model.set_value(current.second)
+
+    def _refresh_after_source_switch(self):
+        """Refresh time controls after changing repository-backed data."""
+        fmt = "%Y-%m-%d %H:%M:%S"
+        start_time = self._core.get_start_time()
+        end_time = self._core.get_end_time()
+        self._start_label.text = start_time.strftime(fmt)
+        self._end_label.text = end_time.strftime(fmt)
+        if hasattr(self, "_range_start_field"):
+            self._range_start_field.model.set_value(start_time.strftime(fmt))
+        if hasattr(self, "_range_end_field"):
+            self._range_end_field.model.set_value(end_time.strftime(fmt))
+        self._time_slider.model.set_value(self._core.get_progress())
+        self._update_goto_fields()
+        self._update_source_controls()
     
     def update_ui(self):
         """Update UI elements (called every frame)."""
@@ -343,6 +476,7 @@ class TimeTravelWindow:
         # Update play button
         self._update_play_button()
         self._update_mode_controls()
+        self._update_source_controls()
         self._update_move_trace_controls()
         # sync capture button label with facade state
         if hasattr(self, "_capture_button"):
@@ -352,6 +486,9 @@ class TimeTravelWindow:
     
     def destroy(self):
         """Clean up the window."""
+        if hasattr(self, "_ui_dispatcher") and self._ui_dispatcher:
+            self._ui_dispatcher.shutdown()
+            self._ui_dispatcher = None
         if self._window:
             self._window.destroy()
             self._window = None

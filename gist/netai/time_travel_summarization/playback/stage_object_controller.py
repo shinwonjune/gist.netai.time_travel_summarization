@@ -88,15 +88,31 @@ class StageObjectController:
 
     def create_astronaut_prim(self, index: int, astronaut_usd: str) -> str:
         stage = self.get_stage()
-        if not stage or not astronaut_usd:
+        if not stage:
+            carb.log_warn("[TimeTravel] Cannot create astronaut prim: no active USD stage")
+            return ""
+        if not astronaut_usd:
+            carb.log_error("[TimeTravel] Cannot create astronaut prim: astronaut_usd is empty")
             return ""
 
         parent_path = "/World/TimeTravel_Objects"
-        if not stage.GetPrimAtPath(parent_path):
-            stage.DefinePrim(parent_path, "Xform")
+        parent_prim = stage.GetPrimAtPath(parent_path)
+        if not parent_prim or not parent_prim.IsValid():
+            parent_prim = stage.DefinePrim(parent_path, "Xform")
+        if not parent_prim or not parent_prim.IsValid():
+            carb.log_error(f"[TimeTravel] Cannot create astronaut parent prim: {parent_path}")
+            return ""
+        UsdGeom.Imageable(parent_prim).MakeVisible()
 
         prim_path = f"{parent_path}/Astronaut{index:03d}"
+        existing = stage.GetPrimAtPath(prim_path)
+        if existing and existing.IsValid():
+            stage.RemovePrim(prim_path)
         prim = stage.DefinePrim(prim_path, "Xform")
+        if not prim or not prim.IsValid():
+            carb.log_error(f"[TimeTravel] Cannot define astronaut prim: {prim_path}")
+            return ""
+        UsdGeom.Imageable(prim).MakeVisible()
 
         from pxr import Sdf
 

@@ -21,5 +21,16 @@
     "Abstract": ["Furniture", "Equipment", "Ground", "A_Exterior", "TimeTravel_Objects"]
   },
 
-  "video_output_dir": "data/video"
+  "video_output_dir": "data/video",
+
+  "output_root_uri": "s3://${MINIO_BUCKET}/timetravel",
+  "event_list_uri": "s3://${MINIO_BUCKET}/timetravel/event_list",
+  "video_output_uri": "s3://${MINIO_BUCKET}/timetravel/video",
+
+  "lake": {
+    "enabled": false,
+    "manifest_uri": "s3://${MINIO_BUCKET}/trajectory/${LAKE_DATASET}/manifest.json",
+    "cache_chunks": 4,
+    "prefetch_ahead": 2
+  }
 }

@@ -17,7 +17,7 @@ class VLMClientWindow:
         self._ui_dispatcher = UiTaskDispatcher("VLMClientWindowUiDispatcher")
         
         # Create window
-        self._window = ui.Window("VLM Client", width=450, height=285)
+        self._window = ui.Window("VLM Client", width=540, height=285)
         
         with self._window.frame:
             with ui.VStack(spacing=5, style={"margin": 3}):
@@ -26,8 +26,8 @@ class VLMClientWindow:
                 
                 # Video input section
                 with ui.HStack(height=22, spacing=5):
-                    ui.Label("Video:", width=50, style={"font_size": 16, "font_weight": "bold"})
-                    ui.Label("artifacts/video/", width=120)
+                    ui.Label("Source:", width=60, style={"font_size": 16, "font_weight": "bold"})
+                    ui.Label("Filename or URI (s3://, file://)", width=190)
                     self._video_filename_field = ui.StringField()
                     self._video_filename_field.model.set_value("video_19.mp4")
                 
@@ -90,10 +90,10 @@ class VLMClientWindow:
 
     def _on_upload_clicked(self):
         """Handle Upload button click."""
-        video_filename = self._video_filename_field.model.get_value_as_string()
+        video_source = self._video_filename_field.model.get_value_as_string()
         
-        if not video_filename:
-            self._update_status("Please enter video filename", is_error=True)
+        if not video_source:
+            self._update_status("Please enter video filename or URI", is_error=True)
             return
         
         self._update_status("Uploading video...", is_processing=True)
@@ -103,7 +103,7 @@ class VLMClientWindow:
         
         # Run upload in separate thread to avoid blocking UI
         def upload_async():
-            success = self._vlm_core.upload_video(video_filename)
+            success = self._vlm_core.upload_video(video_source)
             self._ui_dispatcher.submit(lambda: self._apply_upload_result(success))
         
         thread = threading.Thread(target=upload_async, daemon=True)
@@ -157,11 +157,22 @@ class VLMClientWindow:
         
         # Run generation in separate thread to avoid blocking UI
         def generate_async():
+            output_root_uri = None
+            try:
+                from ..extension import get_active_core
+
+                active_core = get_active_core()
+                if active_core is not None:
+                    output_root_uri = active_core.get_output_root_uri_for_active_mode()
+            except Exception as exc:
+                carb.log_warn(f"[VLMClientWindow] Could not resolve Data Lake output root: {exc!r}")
+
             success, output_filename = self._vlm_core.generate_captions(
                 model=model,
                 preset_name=preset,
                 video_filename=video_filename,
-                chunk_overlap_duration=chunk_overlap
+                chunk_overlap_duration=chunk_overlap,
+                output_root_uri=output_root_uri,
             )
             self._ui_dispatcher.submit(lambda: self._apply_generate_result(success, output_filename))
         
@@ -211,6 +222,49 @@ class VLMClientWindow:
 
         self._update_status("Generation failed. Check console for details.", is_error=True)
 
+    def _build_a2_output_uri(self, active_core, module_dir, filename: str) -> str:
+        output_root = None
+        if active_core is not None:
+            output_root = active_core.get_video_output_uri_for_active_mode()
+        if output_root:
+            output_root = output_root.strip()
+        if output_root:
+            if "://" in output_root:
+                return f"{output_root.rstrip('/')}/{filename}"
+
+            from pathlib import Path as _P
+
+            root_path = _P(output_root)
+            if not root_path.is_absolute():
+                root_path = module_dir / output_root
+            return (root_path / filename).resolve().as_uri()
+
+        from ..app.paths import ExtensionPaths
+
+        paths = ExtensionPaths(module_dir)
+        return (paths.videos_dir / filename).resolve().as_uri()
+
+    def _apply_a2_capture_result(self, msg: str, output_uri: str | None, upload_success: bool | None):
+        self._a2_status_label.text = msg
+        self._a2_capture_button.enabled = True
+
+        if output_uri:
+            self._video_filename_field.model.set_value(output_uri)
+
+        if upload_success is None:
+            return
+
+        if upload_success:
+            video_id = self._vlm_core.get_current_video_id() or "Unknown"
+            self._video_id_label.text = video_id
+            self._video_id_label.style = {"color": 0xFF00AA00}
+            self._delete_button.enabled = True
+            self._generate_button.enabled = True
+            self._update_status(f"A2 capture uploaded. ID: {video_id[:8]}...", is_error=False)
+            return
+
+        self._update_status("A2 capture succeeded, VLM upload failed.", is_error=True)
+
     def _on_a1_capture_clicked(self):
         self._a1_capture_button.enabled = False
         self._a1_status_label.text = "Capturing (A1)..."
@@ -255,28 +309,42 @@ class VLMClientWindow:
                 from datetime import datetime as _dt
                 from pathlib import Path as _P
 
-                from ..app.paths import ExtensionPaths
                 from ..extension import get_active_core
                 from ..video_capture import CaptureRequest, RealtimeCaptureRunner
 
-                paths = ExtensionPaths(_P(__file__).resolve().parent.parent)
+                active_core = get_active_core()
+                module_dir = _P(__file__).resolve().parent.parent
                 ts = _dt.now().strftime("%Y%m%dT%H%M%S")
-                out = (paths.videos_dir / f"a2_{ts}.mp4").resolve().as_uri()
+                out = self._build_a2_output_uri(active_core, module_dir, f"a2_{ts}.mp4")
                 req = CaptureRequest(duration_s=10.0, output_uri=out, label="ui_button")
-                runner = RealtimeCaptureRunner(core=get_active_core())
+                runner = RealtimeCaptureRunner(core=active_core)
                 res = runner.capture(req)
+                output_uri = res.output_uri if res.success else None
+                upload_success = None
                 if res.success:
-                    msg = f"A2 OK {res.wall_clock_s:.1f}s {res.output_size_bytes // 1024}KB drop={res.dropped_frames}"
+                    carb.log_info(f"[VLMClientWindow] A2 capture succeeded: {res.output_uri}")
+                    upload_success = self._vlm_core.upload_video(res.output_uri)
+                    if upload_success:
+                        carb.log_info(f"[VLMClientWindow] A2 capture auto-uploaded to VLM: {res.output_uri}")
+                        msg = (
+                            f"A2 OK+VLM {res.wall_clock_s:.1f}s "
+                            f"{res.output_size_bytes // 1024}KB drop={res.dropped_frames}"
+                        )
+                    else:
+                        carb.log_error(f"[VLMClientWindow] A2 capture VLM auto-upload failed: {res.output_uri}")
+                        msg = (
+                            f"A2 OK, VLM FAIL {res.wall_clock_s:.1f}s "
+                            f"{res.output_size_bytes // 1024}KB drop={res.dropped_frames}"
+                        )
                 else:
                     msg = f"A2 FAIL {res.error}"
             except Exception as exc:
                 msg = f"A2 ERROR {exc!r}"
+                output_uri = None
+                upload_success = None
 
             self._ui_dispatcher.submit(
-                lambda: (
-                    setattr(self._a2_status_label, "text", msg),
-                    setattr(self._a2_capture_button, "enabled", True),
-                )
+                lambda: self._apply_a2_capture_result(msg, output_uri, upload_success)
             )
 
         threading.Thread(target=_worker, daemon=True).start()

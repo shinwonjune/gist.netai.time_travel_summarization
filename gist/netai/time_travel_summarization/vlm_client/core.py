@@ -6,6 +6,7 @@ VLM 서버 통신: _initialize_client 메서드에서 직접 IP 주소와 포트
 """
 
 import os
+import json
 from pathlib import Path
 from typing import Optional, Dict, Any
 import carb
@@ -153,12 +154,12 @@ Do not include any reasoning or description; output **only** the JSON results.
             carb.log_error(traceback.format_exc())
             self._client = None
     
-    def upload_video(self, video_filename: str) -> bool:
+    def upload_video(self, video_source: str) -> bool:
         """
         Upload video to VSS server.
         
         Args:
-            video_filename: Video filename (relative to videos/ directory)
+            video_source: Video filename (relative to videos/ directory) or storage URI
             
         Returns:
             True if successful, False otherwise
@@ -167,9 +168,48 @@ Do not include any reasoning or description; output **only** the JSON results.
             carb.log_error("[VLMClient] Client not initialized")
             return False
         
+        if "://" in video_source:
+            tmp_path = None
+            try:
+                import tempfile
+
+                from ..storage import from_uri
+
+                adapter = from_uri(video_source)
+                if not adapter.exists(video_source):
+                    carb.log_error(f"[VLMClient] Video URI not found: {video_source}")
+                    return False
+
+                with tempfile.NamedTemporaryFile(delete=False, suffix=".mp4") as tmp_file:
+                    tmp_path = Path(tmp_file.name)
+
+                with adapter.open_read(video_source) as stream:
+                    tmp_path.write_bytes(stream.read())
+
+                carb.log_info(f"[VLMClient] Uploading video URI via temp file: {video_source}")
+
+                response = self._client.upload_video(str(tmp_path))
+                self._last_upload_response = response
+                self._current_video_id = response.get("id")
+
+                carb.log_info(f"[VLMClient] Uploaded video ID: {self._current_video_id}")
+                return True
+
+            except Exception as e:
+                carb.log_error(f"[VLMClient] Upload failed: {e}")
+                import traceback
+                carb.log_error(traceback.format_exc())
+                return False
+            finally:
+                if tmp_path and tmp_path.exists():
+                    try:
+                        tmp_path.unlink()
+                    except Exception as cleanup_error:
+                        carb.log_warn(f"[VLMClient] Failed to delete temp upload file: {cleanup_error}")
+
         try:
             # Construct full path
-            video_path = self._videos_base_path / video_filename
+            video_path = self._videos_base_path / video_source
             
             if not video_path.exists():
                 carb.log_error(f"[VLMClient] Video file not found: {video_path}")
@@ -232,7 +272,8 @@ Do not include any reasoning or description; output **only** the JSON results.
         model: str = "Qwen3-VL-8B-Instruct",
         preset_name: str = "simple_view",
         video_filename: Optional[str] = None,
-        chunk_overlap_duration: int = 0
+        chunk_overlap_duration: int = 0,
+        output_root_uri: Optional[str] = None,
     ) -> tuple[bool, Optional[str]]:
         """
         Generate VLM captions for current video.
@@ -242,6 +283,8 @@ Do not include any reasoning or description; output **only** the JSON results.
             preset_name: Prompt preset name (default: "simple_view")
             video_filename: Optional video filename for output naming
             chunk_overlap_duration: Chunk overlap duration in seconds (default: 0)
+            output_root_uri: Optional artifact root for Data Lake mode. When provided,
+                the raw VLM JSON is also written under ``<root>/vlm_outputs/``.
             
         Returns:
             Tuple of (success: bool, output_filename: Optional[str])
@@ -280,13 +323,22 @@ Do not include any reasoning or description; output **only** the JSON results.
             else:
                 output_filename = f"{model}_output_{timestamp}.json"
             
-            output_path = self._outputs_base_path / output_filename
-            
-            # Save JSON
-            self._client.save_json(response, str(output_path))
-            
-            carb.log_info(f"[VLMClient] Results saved to: {output_path}")
-            
+            if output_root_uri:
+                output_uri = f"{output_root_uri.rstrip('/')}/vlm_outputs/{output_filename}"
+                from ..storage import from_uri
+
+                payload = json.dumps(response, indent=4, ensure_ascii=False).encode("utf-8")
+                from_uri(output_uri).put_bytes(
+                    output_uri,
+                    payload,
+                    content_type="application/json",
+                )
+                carb.log_info(f"[VLMClient] Results saved to: {output_uri}")
+            else:
+                output_path = self._outputs_base_path / output_filename
+                self._client.save_json(response, str(output_path))
+                carb.log_info(f"[VLMClient] Results saved to: {output_path}")
+
             # Log execution time
             exec_time = response.get("execution_time", 0)
             carb.log_info(f"[VLMClient] Execution time: {exec_time:.2f} seconds")

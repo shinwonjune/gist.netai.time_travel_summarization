@@ -1,0 +1,210 @@
+"""데이터레이크 파티션 규약 + 합성 데이터 생성 + 적재(ingest).
+
+레이크 레이아웃 (dataset_uri 하위):
+    {dataset_uri}/manifest.json          # 청크 인덱스 + 데이터 범위
+    {dataset_uri}/chunk_{startMs:013d}.csv|.parquet
+
+manifest.json:
+    {
+      "version": 1, "dataset": str, "hz": float, "chunk_seconds": int,
+      "format": "csv"|"parquet", "objids": [...],
+      "start": ts, "end": ts, "rows": int,
+      "coord_min": [x,y,z], "coord_max": [x,y,z],
+      "chunks": [{"key", "start", "end", "rows"}, ...]   # start 오름차순
+    }
+
+청크 키가 결정적(시작 epoch-ms 기반)이라 시간대 -> 키를 LIST 스캔 없이 계산/조회한다.
+CSV는 의존성 없이 동작하고, Parquet은 pyarrow가 있을 때만 사용한다(선택).
+"""
+
+from __future__ import annotations
+
+import csv
+import datetime
+import io
+import json
+import math
+import random
+from typing import Dict, Iterable, List, Optional, Tuple
+
+from .trajectory_repository import TrajectoryRepository
+
+MANIFEST_NAME = "manifest.json"
+_EPOCH = datetime.datetime(1970, 1, 1)
+_FIELDS = ("timestamp", "objid", "x", "y", "z")
+
+
+def to_epoch_ms(dt: datetime.datetime) -> int:
+    """tz-naive datetime -> epoch milliseconds (머신 로컬 tz에 의존하지 않도록 고정 기준 사용)."""
+    return int(round((dt - _EPOCH).total_seconds() * 1000))
+
+
+def chunk_object_key(start_ms: int, fmt: str) -> str:
+    return f"chunk_{start_ms:013d}.{fmt}"
+
+
+def join_uri(base: str, name: str) -> str:
+    return base.rstrip("/") + "/" + name
+
+
+def manifest_uri(dataset_uri: str) -> str:
+    return join_uri(dataset_uri, MANIFEST_NAME)
+
+
+def dataset_uri_from_manifest(uri: str) -> str:
+    """manifest.json URI -> dataset_uri (디렉터리). manifest가 아니면 그대로 반환."""
+    if uri.lower().endswith(MANIFEST_NAME):
+        return uri[: -(len(MANIFEST_NAME) + 1)]  # +1 = 구분자 '/'
+    return uri.rstrip("/")
+
+
+# ---------- 합성 데이터 ----------
+
+def generate_synthetic_rows(
+    n_objects: int,
+    duration_s: float,
+    hz: float = 5.0,
+    start: str = "2025-01-01 00:00:00.000",
+    seed: int = 42,
+    bounds: Tuple[float, float] = (0.0, 1000.0),
+    step_units: float = 12.0,
+) -> Iterable[dict]:
+    """경계 박스 내 random-walk 궤적을 hz 간격으로 생성. 시간 오름차순 yield.
+
+    성능 측정용. n_objects/duration_s로 규모를 조절한다(예: 100객체×12시간).
+    """
+    rng = random.Random(seed)
+    fmt = "%Y-%m-%d %H:%M:%S.%f"
+    base = datetime.datetime.strptime(start, fmt)
+    step = datetime.timedelta(seconds=1.0 / hz)
+    n_steps = int(round(duration_s * hz))
+    lo, hi = bounds
+    objids = [f"obj{idx:03d}" for idx in range(1, n_objects + 1)]
+    pos = {oid: [rng.uniform(lo, hi), rng.uniform(lo, hi), rng.uniform(lo, hi)] for oid in objids}
+    for i in range(n_steps):
+        ts = (base + step * i).strftime(fmt)[:-3]
+        for oid in objids:
+            p = pos[oid]
+            for a in range(3):
+                p[a] = min(hi, max(lo, p[a] + rng.uniform(-step_units, step_units)))
+            yield {"timestamp": ts, "objid": oid, "x": p[0], "y": p[1], "z": p[2]}
+
+
+# ---------- 청크 인코딩 ----------
+
+def _encode_chunk(rows: List[dict], fmt: str) -> Tuple[bytes, str]:
+    """청크 rows -> (bytes, content_type). fmt: 'csv' | 'parquet'."""
+    if fmt == "csv":
+        buf = io.StringIO()
+        writer = csv.DictWriter(buf, fieldnames=_FIELDS)
+        writer.writeheader()
+        for r in rows:
+            writer.writerow({k: r[k] for k in _FIELDS})
+        return buf.getvalue().encode("utf-8"), "text/csv"
+    if fmt == "parquet":
+        import pyarrow as pa
+        import pyarrow.parquet as pq
+
+        table = pa.table(
+            {
+                "timestamp": [str(r["timestamp"]) for r in rows],
+                "objid": [str(r["objid"]) for r in rows],
+                "x": [float(r["x"]) for r in rows],
+                "y": [float(r["y"]) for r in rows],
+                "z": [float(r["z"]) for r in rows],
+            }
+        )
+        out = io.BytesIO()
+        pq.write_table(table, out, compression="snappy")
+        return out.getvalue(), "application/octet-stream"
+    raise ValueError(f"unknown format: {fmt!r}")
+
+
+# ---------- 적재 ----------
+
+def ingest_rows(
+    rows: Iterable[dict],
+    dataset_uri: str,
+    *,
+    chunk_seconds: int = 60,
+    fmt: str = "csv",
+    hz: Optional[float] = None,
+    dataset: str = "",
+) -> dict:
+    """rows를 시간 단위 청크로 분할해 dataset_uri 하위에 업로드하고 manifest를 쓴다.
+
+    dataset_uri: 's3://bucket/trajectory/ds1' 또는 'file:///tmp/lake/ds1'.
+    반환: 작성한 manifest dict.
+    """
+    from ..storage import from_uri
+
+    fmt = fmt.lower()
+    dataset_uri = dataset_uri.rstrip("/")
+    rows = sorted(rows, key=lambda r: r["timestamp"])
+    if not rows:
+        raise ValueError("ingest_rows: no rows to ingest")
+
+    base = TrajectoryRepository.parse_timestamp(rows[0]["timestamp"])
+    buckets: Dict[int, List[dict]] = {}
+    objids = set()
+    mins = [math.inf] * 3
+    maxs = [-math.inf] * 3
+    for r in rows:
+        objids.add(r["objid"])
+        xyz = (float(r["x"]), float(r["y"]), float(r["z"]))
+        for a in range(3):
+            if xyz[a] < mins[a]:
+                mins[a] = xyz[a]
+            if xyz[a] > maxs[a]:
+                maxs[a] = xyz[a]
+        t = TrajectoryRepository.parse_timestamp(r["timestamp"])
+        idx = int((t - base).total_seconds() // chunk_seconds)
+        buckets.setdefault(idx, []).append(r)
+
+    manifest_chunks: List[dict] = []
+    total = 0
+    for idx in sorted(buckets):
+        crows = buckets[idx]
+        c_start = crows[0]["timestamp"]
+        c_end = crows[-1]["timestamp"]
+        start_ms = to_epoch_ms(TrajectoryRepository.parse_timestamp(c_start))
+        key = chunk_object_key(start_ms, fmt)
+        payload, content_type = _encode_chunk(crows, fmt)
+        uri = join_uri(dataset_uri, key)
+        from_uri(uri).put_bytes(uri, payload, content_type=content_type)
+        manifest_chunks.append({"key": key, "start": c_start, "end": c_end, "rows": len(crows)})
+        total += len(crows)
+
+    manifest = {
+        "version": 1,
+        "dataset": dataset,
+        "hz": hz,
+        "chunk_seconds": chunk_seconds,
+        "format": fmt,
+        "objids": sorted(objids),
+        "start": rows[0]["timestamp"],
+        "end": rows[-1]["timestamp"],
+        "rows": total,
+        "coord_min": mins,
+        "coord_max": maxs,
+        "chunks": manifest_chunks,
+    }
+    muri = manifest_uri(dataset_uri)
+    from_uri(muri).put_bytes(
+        muri, json.dumps(manifest, ensure_ascii=False, indent=2).encode("utf-8"), content_type="application/json"
+    )
+    return manifest
+
+
+def ingest_synthetic(
+    dataset_uri: str,
+    *,
+    n_objects: int = 10,
+    duration_s: float = 60.0,
+    hz: float = 5.0,
+    chunk_seconds: int = 60,
+    fmt: str = "csv",
+    seed: int = 42,
+) -> dict:
+    rows = generate_synthetic_rows(n_objects, duration_s, hz=hz, seed=seed)
+    return ingest_rows(rows, dataset_uri, chunk_seconds=chunk_seconds, fmt=fmt, hz=hz, dataset="synthetic")

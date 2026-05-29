@@ -26,7 +26,7 @@ def _load_dotenv(env_path: Path) -> None:
             continue
         key = key.strip()
         value = value.strip().strip('"').strip("'")
-        if key and key not in os.environ:
+        if key:
             os.environ[key] = value
 
 
@@ -41,6 +41,10 @@ class ExtensionConfig:
     visibility_groups: Dict[str, List[str]] = field(default_factory=dict)
     complexity_levels: Dict[str, List[str]] = field(default_factory=dict)
     video_output_dir: str = "data/video"
+    output_root_uri: str = ""
+    event_list_uri: str = ""
+    video_output_uri: str = ""
+    lake: Dict = field(default_factory=dict)
 
     @property
     def config_dir(self) -> Path:
@@ -68,6 +72,11 @@ class ExtensionConfig:
         with open(path, "r", encoding="utf-8") as file:
             raw = json.load(file)
 
+        lake = dict(raw.get("lake", {}))
+        for key, value in list(lake.items()):
+            if isinstance(value, str):
+                lake[key] = _expand_env(value)
+
         return cls(
             config_path=path,
             data_path=_expand_env(raw.get("data_path", "./data/merged_trajectory.csv")),
@@ -78,6 +87,10 @@ class ExtensionConfig:
             visibility_groups=dict(raw.get("visibility_groups", {})),
             complexity_levels=dict(raw.get("complexity_levels", {})),
             video_output_dir=_expand_env(raw.get("video_output_dir", "data/video")),
+            output_root_uri=_expand_env(raw.get("output_root_uri", "")),
+            event_list_uri=_expand_env(raw.get("event_list_uri", "")),
+            video_output_uri=_expand_env(raw.get("video_output_uri", "")),
+            lake=lake,
         )
 
     def resolve_from_config(self, value: str) -> Path:

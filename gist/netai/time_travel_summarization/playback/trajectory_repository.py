@@ -37,35 +37,11 @@ class TrajectoryRepository:
 
         Detection: by URI extension (case-insensitive).
         """
-        from ..storage import from_uri
-
         self.clear()
-        lower_uri = uri.lower()
-        if not lower_uri.endswith((".csv", ".parquet")):
+        if not uri.lower().endswith((".csv", ".parquet")):
             return False
 
-        adapter = from_uri(uri)
-        with adapter.open_read(uri) as stream:
-            if lower_uri.endswith(".csv"):
-                text = stream.read().decode("utf-8")
-                reader = csv.DictReader(io.StringIO(text))
-                rows = reader
-            else:
-                import pyarrow.parquet as pq
-
-                table = pq.read_table(io.BytesIO(stream.read()))
-                rows = table.to_pylist()
-
-        for row in rows:
-            timestamp = row["timestamp"]
-            self._data.setdefault(timestamp, {})[row["objid"]] = (
-                float(row["x"]),
-                float(row["y"]),
-                float(row["z"]),
-            )
-
-        # bisect 사용을 위해 정렬 보장. CSV가 시간순이라도 안전 차원에서 명시 정렬.
-        self._timestamps = sorted(self._data.keys())
+        self._data, self._timestamps = self._rows_to_data(self._read_rows(uri))
         if self._timestamps:
             self._data_start_time = self.parse_timestamp(self._timestamps[0])
             self._data_end_time = self.parse_timestamp(self._timestamps[-1])
@@ -206,6 +182,34 @@ class TrajectoryRepository:
         return dt.strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
 
     @staticmethod
+    def _read_rows(uri: str) -> List[dict]:
+        """URI(.csv|.parquet)를 읽어 dict row 리스트로 반환. storage.from_uri로 백엔드 자동 선택."""
+        from ..storage import from_uri
+
+        adapter = from_uri(uri)
+        with adapter.open_read(uri) as stream:
+            raw = stream.read()
+        if uri.lower().endswith(".csv"):
+            return list(csv.DictReader(io.StringIO(raw.decode("utf-8"))))
+        import pyarrow.parquet as pq  # parquet일 때만 필요 (선택 의존성)
+
+        return pq.read_table(io.BytesIO(raw)).to_pylist()
+
+    @staticmethod
+    def _rows_to_data(
+        rows: List[dict],
+    ) -> Tuple[Dict[str, Dict[str, Tuple[float, float, float]]], List[str]]:
+        """row 리스트 -> ({ts: {objid:(x,y,z)}}, 정렬된 ts 리스트). bisect 위해 정렬 보장."""
+        data: Dict[str, Dict[str, Tuple[float, float, float]]] = {}
+        for row in rows:
+            data.setdefault(row["timestamp"], {})[row["objid"]] = (
+                float(row["x"]),
+                float(row["y"]),
+                float(row["z"]),
+            )
+        return data, sorted(data.keys())
+
+    @staticmethod
     def parse_unique_objids(csv_path: str) -> List[str]:
         objids = set()
         with open(csv_path, "r", encoding="utf-8") as file:
@@ -214,4 +218,19 @@ class TrajectoryRepository:
                 objid = row.get("objid")
                 if objid:
                     objids.add(objid)
+        return sorted(objids)
+
+    @staticmethod
+    def parse_unique_objids_from_uri(uri: str) -> List[str]:
+        from ..storage import from_uri
+
+        objids = set()
+        adapter = from_uri(uri)
+        with adapter.open_read(uri) as stream:
+            raw = stream.read()
+        reader = csv.DictReader(io.StringIO(raw.decode("utf-8")))
+        for row in reader:
+            objid = row.get("objid")
+            if objid:
+                objids.add(objid)
         return sorted(objids)
