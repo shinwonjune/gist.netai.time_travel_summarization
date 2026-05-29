@@ -17,7 +17,7 @@ class EventProcessingWindow:
         self._ext_id = ext_id
         self._window = None
         self._ui_dispatcher = UiTaskDispatcher("EventProcessingWindowUiDispatcher")
-        self._paths = ExtensionPaths(Path(__file__).parent)
+        self._paths = ExtensionPaths(Path(__file__).resolve().parent.parent)
         
         # UI state
         self._json_filename_model = ui.SimpleStringModel("video_18_20251113_232343.json")

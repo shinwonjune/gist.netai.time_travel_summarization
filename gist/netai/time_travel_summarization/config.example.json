@@ -24,7 +24,7 @@
     "Abstract": ["GROUPS_1", "GROUPS_2", "GROUPS_3", "GROUPS_4", "GROUPS_5"] 
   },
 
-  "video_output_dir": "data/video",
+  "video_output_dir": "artifacts/video",
 
   "output_root_uri": "s3://${MINIO_BUCKET}/timetravel",
   "event_list_uri": "s3://${MINIO_BUCKET}/timetravel/event_list",

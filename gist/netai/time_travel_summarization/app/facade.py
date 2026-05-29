@@ -312,8 +312,12 @@ class TimeTravelCore:
             if video_output_uri:
                 output_path = f"{video_output_uri.rstrip('/')}/capture_{ts}.mp4"
             else:
-                # config의 video_output_dir 사용. 없으면 default "data/video"
-                output_dir_str = getattr(self._config, "video_output_dir", "data/video") if self._config else "data/video"
+                # config의 video_output_dir 사용. 없으면 default "artifacts/video"
+                output_dir_str = (
+                    getattr(self._config, "video_output_dir", "artifacts/video")
+                    if self._config
+                    else "artifacts/video"
+                )
                 output_dir = Path(output_dir_str)
                 if not output_dir.is_absolute():
                     output_dir = self._module_dir / output_dir
@@ -428,7 +432,9 @@ class TimeTravelCore:
 
         if output_path is None:
             ts = _dt.now().strftime("%Y%m%dT%H%M%S")
-            output_path = str(self._module_dir / "data" / f"physics_trace_{ts}.csv")
+            trace_dir = self._paths.artifacts_dir / "trace"
+            trace_dir.mkdir(parents=True, exist_ok=True)
+            output_path = str(trace_dir / f"physics_trace_{ts}.csv")
 
         resolved = {}
         stage = omni.usd.get_context().get_stage()
@@ -801,7 +807,7 @@ class TimeTravelCore:
             f"per_call={result['per_call_us']:.3f}us"
         )
         try:
-            out_dir = self._module_dir / "data"
+            out_dir = self._paths.artifacts_dir / "benchmarks"
             out_dir.mkdir(parents=True, exist_ok=True)
             csv_path = out_dir / "lookup_runtime_benchmark.csv"
             is_new = not csv_path.exists()

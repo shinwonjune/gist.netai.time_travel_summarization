@@ -25,7 +25,7 @@ class VLMClientCore:
         self._last_upload_response = None
         self._last_generation_response = None
 
-        self._paths = ExtensionPaths(Path(__file__).parent)
+        self._paths = ExtensionPaths(Path(__file__).resolve().parent.parent)
         self._videos_base_path = self._paths.videos_dir
         self._outputs_base_path = self._paths.vlm_outputs_dir
         

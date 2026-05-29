@@ -40,7 +40,7 @@ class ExtensionConfig:
     event_summary: List[str] = field(default_factory=list)
     visibility_groups: Dict[str, List[str]] = field(default_factory=dict)
     complexity_levels: Dict[str, List[str]] = field(default_factory=dict)
-    video_output_dir: str = "data/video"
+    video_output_dir: str = "artifacts/video"
     output_root_uri: str = ""
     event_list_uri: str = ""
     video_output_uri: str = ""
@@ -86,7 +86,7 @@ class ExtensionConfig:
             event_summary=list(raw.get("event_summary", [])),
             visibility_groups=dict(raw.get("visibility_groups", {})),
             complexity_levels=dict(raw.get("complexity_levels", {})),
-            video_output_dir=_expand_env(raw.get("video_output_dir", "data/video")),
+            video_output_dir=_expand_env(raw.get("video_output_dir", "artifacts/video")),
             output_root_uri=_expand_env(raw.get("output_root_uri", "")),
             event_list_uri=_expand_env(raw.get("event_list_uri", "")),
             video_output_uri=_expand_env(raw.get("video_output_uri", "")),
