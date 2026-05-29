@@ -28,20 +28,49 @@ class TimeTravelWindow:
                 with ui.HStack(height=30):
                     ui.Label("Time Travel Control", style={"font_size": 18, "font_weight": "bold"})
                 
-                # Dataset time range display
-                with ui.VStack(spacing=3):
-                    ui.Label("Dataset Range:", style={"font_size": 14, "font_weight": "bold"})
-                    with ui.HStack(height=20):
-                        ui.Label("Start:", width=50)
-                        start_str = self._core.get_start_time().strftime("%Y-%m-%d %H:%M:%S")
-                        self._start_label = ui.Label(start_str, style={"color": 0xFF888888})
-                    
-                    with ui.HStack(height=20):
-                        ui.Label("End:", width=50)
-                        end_str = self._core.get_end_time().strftime("%Y-%m-%d %H:%M:%S")
-                        self._end_label = ui.Label(end_str, style={"color": 0xFF888888})
-                
-                # Separator
+                with ui.HStack(height=30, spacing=8):
+                    ui.Label("Data Source:", width=85)
+                    self._source_local_button = ui.Button("Local", width=90)
+                    self._source_local_button.set_clicked_fn(self._on_source_local_clicked)
+                    self._source_lake_button = ui.Button("Data Lake", width=90)
+                    self._source_lake_button.set_clicked_fn(self._on_source_lake_clicked)
+                    self._source_status = ui.Label("", style={"color": 0xFF888888})
+
+                ui.Label("Load Time Range:", style={"font_size": 14, "font_weight": "bold"})
+                with ui.HStack(height=55, spacing=8):
+                    with ui.VStack(spacing=3):
+                        with ui.HStack(height=25):
+                            ui.Label("Start:", width=40)
+                            self._range_start_year = ui.IntField(width=50)
+                            ui.Label("/", width=8)
+                            self._range_start_month = ui.IntField(width=34)
+                            ui.Label("/", width=8)
+                            self._range_start_day = ui.IntField(width=34)
+                            ui.Spacer(width=10)
+                            self._range_start_hour = ui.IntField(width=34)
+                            ui.Label(":", width=8)
+                            self._range_start_minute = ui.IntField(width=34)
+                            ui.Label(":", width=8)
+                            self._range_start_second = ui.IntField(width=34)
+                        with ui.HStack(height=25):
+                            ui.Label("End:", width=40)
+                            self._range_end_year = ui.IntField(width=50)
+                            ui.Label("/", width=8)
+                            self._range_end_month = ui.IntField(width=34)
+                            ui.Label("/", width=8)
+                            self._range_end_day = ui.IntField(width=34)
+                            ui.Spacer(width=10)
+                            self._range_end_hour = ui.IntField(width=34)
+                            ui.Label(":", width=8)
+                            self._range_end_minute = ui.IntField(width=34)
+                            ui.Label(":", width=8)
+                            self._range_end_second = ui.IntField(width=34)
+                    ui.Spacer(width=10) # 1) 간격을 줄이기 위해 Spacer를 고정 크기로 둡니다.
+                    self._load_range_button = ui.Button("Load Range", width=90)
+                    self._load_range_button.set_clicked_fn(self._on_load_range_clicked)
+                    ui.Spacer() # 2) 버튼 우측에 동적 Spacer를 두어 여백을 오른쪽으로 밀어냅니다.
+                self._set_range_fields(self._core.get_start_time(), self._core.get_end_time())
+
                 ui.Spacer(height=5)
                 with ui.HStack(height=2):
                     ui.Line(style={"color": 0xFF666666})
@@ -75,28 +104,6 @@ class TimeTravelWindow:
                     self._goto_button = ui.Button("Go", width=50)
                     self._goto_button.set_clicked_fn(self._on_goto_clicked)
 
-                with ui.HStack(height=30, spacing=8):
-                    ui.Label("Data Source:", width=85)
-                    self._source_local_button = ui.Button("Local", width=90)
-                    self._source_local_button.set_clicked_fn(self._on_source_local_clicked)
-                    self._source_lake_button = ui.Button("Data Lake", width=90)
-                    self._source_lake_button.set_clicked_fn(self._on_source_lake_clicked)
-                    self._source_status = ui.Label("", style={"color": 0xFF888888})
-
-                # Load time range (data lake / minIO windowed load)
-                ui.Label("Load Time Range (minIO):", style={"font_size": 14, "font_weight": "bold"})
-                _fmt = "%Y-%m-%d %H:%M:%S"
-                with ui.HStack(height=25, spacing=5):
-                    ui.Label("Start:", width=40)
-                    self._range_start_field = ui.StringField(width=160)
-                    self._range_start_field.model.set_value(self._core.get_start_time().strftime(_fmt))
-                    ui.Label("End:", width=30)
-                    self._range_end_field = ui.StringField(width=160)
-                    self._range_end_field.model.set_value(self._core.get_end_time().strftime(_fmt))
-                    ui.Spacer(width=10)
-                    self._load_range_button = ui.Button("Load Range", width=90)
-                    self._load_range_button.set_clicked_fn(self._on_load_range_clicked)
-
                 # Event Summary checkbox with Next Event button
                 with ui.HStack(height=25, spacing=10):
                     self._event_checkbox = ui.CheckBox(width=20)
@@ -120,7 +127,7 @@ class TimeTravelWindow:
                 # Current stage time display
                 with ui.HStack(height=25):
                     ui.Label("Stage Time:", width=80, style={"font_size": 14, "font_weight": "bold"})
-                    self._stage_time_label = ui.Label("", style={"font_size": 20, "color": 0xFF00AA00})
+                    self._stage_time_label = ui.Label("", style={"font_size": 20, "color": 0xFFFFFFFF})
                 
                 # Playback controls
                 with ui.HStack(height=30):
@@ -137,7 +144,7 @@ class TimeTravelWindow:
 
                     # Capture controls
                     ui.Spacer(width=10)
-                    self._capture_button = ui.Button("● Capture", width=90)
+                    self._capture_button = ui.Button("Capture", width=90)
                     self._capture_button.set_clicked_fn(self._on_capture_clicked)
 
                     ui.Label("Length(s):", width=70)
@@ -207,12 +214,11 @@ class TimeTravelWindow:
 
         Lake 모드에서는 해당 구간 청크만 minIO에서 윈도우로 로드된다(프리페치로 무지연).
         """
-        fmt = "%Y-%m-%d %H:%M:%S"
         try:
-            start = datetime.datetime.strptime(self._range_start_field.model.get_value_as_string().strip(), fmt)
-            end = datetime.datetime.strptime(self._range_end_field.model.get_value_as_string().strip(), fmt)
+            start = self._get_range_time("start")
+            end = self._get_range_time("end")
         except ValueError as e:
-            carb.log_error(f"[TimeTravel] Invalid range (use 'YYYY-MM-DD HH:MM:SS'): {e}")
+            carb.log_error(f"[TimeTravel] Invalid range: {e}")
             return
         if self._core.load_time_range(start, end):
             self._time_slider.model.set_value(self._core.get_progress())
@@ -320,13 +326,13 @@ class TimeTravelWindow:
     def _on_capture_clicked(self):
         if self._core.is_capturing():
             self._core.stop_capture()
-            self._capture_button.text = "● Capture"
+            self._capture_button.text = "Capture"
         else:
             duration_s = self._capture_length_field.model.get_value_as_float()
             if duration_s < 0:
                 duration_s = 0.0
             self._core.start_capture(duration_s=duration_s)
-            self._capture_button.text = "■ Stop"
+            self._capture_button.text = "Stop"
 
     def _on_trace_toggle(self):
         if self._core.is_tracing():
@@ -441,17 +447,33 @@ class TimeTravelWindow:
         self._goto_minute.model.set_value(current.minute)
         self._goto_second.model.set_value(current.second)
 
+    def _get_range_time(self, prefix: str) -> datetime.datetime:
+        return datetime.datetime(
+            getattr(self, f"_range_{prefix}_year").model.get_value_as_int(),
+            getattr(self, f"_range_{prefix}_month").model.get_value_as_int(),
+            getattr(self, f"_range_{prefix}_day").model.get_value_as_int(),
+            getattr(self, f"_range_{prefix}_hour").model.get_value_as_int(),
+            getattr(self, f"_range_{prefix}_minute").model.get_value_as_int(),
+            getattr(self, f"_range_{prefix}_second").model.get_value_as_int(),
+        )
+
+    def _set_range_time(self, prefix: str, value: datetime.datetime):
+        getattr(self, f"_range_{prefix}_year").model.set_value(value.year)
+        getattr(self, f"_range_{prefix}_month").model.set_value(value.month)
+        getattr(self, f"_range_{prefix}_day").model.set_value(value.day)
+        getattr(self, f"_range_{prefix}_hour").model.set_value(value.hour)
+        getattr(self, f"_range_{prefix}_minute").model.set_value(value.minute)
+        getattr(self, f"_range_{prefix}_second").model.set_value(value.second)
+
+    def _set_range_fields(self, start_time: datetime.datetime, end_time: datetime.datetime):
+        self._set_range_time("start", start_time)
+        self._set_range_time("end", end_time)
+
     def _refresh_after_source_switch(self):
         """Refresh time controls after changing repository-backed data."""
-        fmt = "%Y-%m-%d %H:%M:%S"
         start_time = self._core.get_start_time()
         end_time = self._core.get_end_time()
-        self._start_label.text = start_time.strftime(fmt)
-        self._end_label.text = end_time.strftime(fmt)
-        if hasattr(self, "_range_start_field"):
-            self._range_start_field.model.set_value(start_time.strftime(fmt))
-        if hasattr(self, "_range_end_field"):
-            self._range_end_field.model.set_value(end_time.strftime(fmt))
+        self._set_range_fields(start_time, end_time)
         self._time_slider.model.set_value(self._core.get_progress())
         self._update_goto_fields()
         self._update_source_controls()
@@ -480,7 +502,7 @@ class TimeTravelWindow:
         self._update_move_trace_controls()
         # sync capture button label with facade state
         if hasattr(self, "_capture_button"):
-            expected = "■ Stop" if self._core.is_capturing() else "● Capture"
+            expected = "Stop" if self._core.is_capturing() else "Capture"
             if self._capture_button.text != expected:
                 self._capture_button.text = expected
     
