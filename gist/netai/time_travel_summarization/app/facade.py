@@ -31,6 +31,7 @@ class TimeTravelCore:
         self._stage_objects = StageObjectController()
         self._events = EventSummaryService(self._module_dir, self._repository)
         self._wander = None
+        self._wander_speed = 120.0
         self._trace = None
         self._stage_objects.ensure_summarization_camera()
         self._capture_active: bool = False
@@ -273,6 +274,16 @@ class TimeTravelCore:
     def get_data_at_time(self, timestamp: datetime.datetime) -> Dict:
         return self._repository.get_data_at_time(timestamp)
 
+    def get_current_object_positions(self) -> Dict[str, tuple]:
+        """Return live stage object positions, falling back to repository data."""
+        positions = self._stage_objects.get_world_positions(self._prim_map)
+        if positions:
+            return positions
+        current_time = self._playback.get_current_time()
+        if not current_time:
+            return {}
+        return self.get_data_at_time(current_time)
+
     def update_stage_objects(self):
         current_time = self._playback.get_current_time()
         if not current_time:
@@ -408,6 +419,25 @@ class TimeTravelCore:
             carb.log_warn("[TimeTravel] set_velocity_mode: Physics 모드 아님")
             return False
         return self._wander.set_velocity_mode(mode)
+
+    def get_wander_speed(self) -> float:
+        if self._wander:
+            return self._wander.get_speed()
+        return float(getattr(self, "_wander_speed", 120.0))
+
+    def set_wander_speed(self, speed: float) -> bool:
+        try:
+            speed = float(speed)
+        except (TypeError, ValueError):
+            carb.log_warn(f"[TimeTravel] invalid wander speed: {speed!r}")
+            return False
+        if speed <= 0.0:
+            carb.log_warn(f"[TimeTravel] invalid wander speed: {speed:g}")
+            return False
+        self._wander_speed = speed
+        if self._wander:
+            return self._wander.set_speed(speed)
+        return True
 
     def stop_wander(self) -> bool:
         if not self._wander:
@@ -547,7 +577,7 @@ class TimeTravelCore:
             rigid_prims.append(wrap_with_collision_proxy(stage, prim, shape="cylinder", visible=True))
 
         # wander는 사용자가 Move 버튼으로 명시 시작. 여기서는 인스턴스만 생성.
-        self._wander = WanderController(rigid_prims)
+        self._wander = WanderController(rigid_prims, speed=self._wander_speed)
 
         try:
             import omni.timeline

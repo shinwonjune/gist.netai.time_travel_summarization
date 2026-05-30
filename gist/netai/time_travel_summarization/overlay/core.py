@@ -28,6 +28,7 @@ class ViewOverlay:
         )
 
         self._time_overlay.build(visible=self._visible)
+        self._ensure_update_subscription()
 
         if self._usd_context.get_stage():
             self._build_scene_for_stage()
@@ -63,7 +64,6 @@ class ViewOverlay:
             self._cleanup_scene()
 
     def _cleanup_scene(self):
-        self._update_sub = None
         self._registry.clear()
 
         if self._scene_view:
@@ -94,14 +94,27 @@ class ViewOverlay:
             self._viewport_window.viewport_api.add_scene_view(self._scene_view)
 
         self._set_scene_visible(self._labels_visible)
+        self._ensure_update_subscription()
 
+    def _ensure_update_subscription(self):
         if not self._update_sub:
             self._update_sub = omni.kit.app.get_app().get_update_event_stream().create_subscription_to_pop(
                 self._on_update, name="ViewOverlayFrameUpdate"
             )
 
+    def _ensure_scene_current(self):
+        stage = self._usd_context.get_stage()
+        if not stage:
+            return
+        parent_prim = stage.GetPrimAtPath("/World/TimeTravel_Objects")
+        if not parent_prim.IsValid():
+            return
+        if not self._scene_view or not self._registry.matches_parent(parent_prim):
+            self._build_scene_for_stage()
+
     def _on_update(self, _event):
         if self._labels_visible:
+            self._ensure_scene_current()
             self._registry.update_positions()
 
         if self._time_visible:

@@ -76,6 +76,25 @@ class StageObjectController:
             x, y, z = data[objid]
             translate_op.Set(Gf.Vec3d(x, y, z))
 
+    def get_world_positions(self, prim_map: Dict[str, str]) -> Dict[str, Tuple[float, float, float]]:
+        stage = self.get_stage()
+        if not stage:
+            return {}
+
+        positions = {}
+        xform_cache = UsdGeom.XformCache(0)
+        for objid, prim_path in prim_map.items():
+            prim = stage.GetPrimAtPath(prim_path)
+            if not prim or not prim.IsValid():
+                continue
+            try:
+                translation = xform_cache.GetLocalToWorldTransform(prim).ExtractTranslation()
+            except Exception as exc:
+                carb.log_warn(f"[TimeTravel] Failed to read world position for {objid}: {exc}")
+                continue
+            positions[objid] = (float(translation[0]), float(translation[1]), float(translation[2]))
+        return positions
+
     def clear_timetravel_objects(self):
         stage = self.get_stage()
         if not stage:

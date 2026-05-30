@@ -20,6 +20,22 @@ class ObjectIdManipulator(sc.Manipulator):
         self._stage = stage
         self._prim = stage.GetPrimAtPath(self._prim_path) if stage else None
 
+    def has_current_prim(self) -> bool:
+        if not self._stage:
+            return False
+        current = self._stage.GetPrimAtPath(self._prim_path)
+        return bool(current and current.IsValid() and self._prim and self._prim.IsValid() and current == self._prim)
+
+    def rebind_current_prim(self) -> bool:
+        if not self._stage:
+            return False
+        prim = self._stage.GetPrimAtPath(self._prim_path)
+        if not prim or not prim.IsValid():
+            return False
+        self._prim = prim
+        self._last_position = None
+        return True
+
     def on_build(self):
         if not self._prim or not self._prim.IsValid():
             return
@@ -46,7 +62,9 @@ class ObjectIdManipulator(sc.Manipulator):
         self._last_position = tuple(translation)
 
     def update_position(self):
-        if not self._prim or not self._prim.IsValid() or not self._transform:
+        if (not self._prim or not self._prim.IsValid()) and not self.rebind_current_prim():
+            return
+        if not self._transform:
             return
 
         translation = self._get_world_translation()
@@ -69,12 +87,14 @@ class ObjectIdManipulator(sc.Manipulator):
 class PrimLabelRegistry:
     def __init__(self):
         self._manipulators = []
+        self._prim_paths = set()
 
     def clear(self):
         for manipulator in self._manipulators:
             if hasattr(manipulator, "invalidate"):
                 manipulator.invalidate()
         self._manipulators = []
+        self._prim_paths = set()
 
     def build_for_parent(self, parent_prim):
         self.clear()
@@ -90,8 +110,20 @@ class PrimLabelRegistry:
             manipulator = ObjectIdManipulator(prim_path=str(prim.GetPath()), label_text=label_id)
             manipulator.bind_stage(stage)
             self._manipulators.append(manipulator)
+            self._prim_paths.add(str(prim.GetPath()))
 
         return self._manipulators
+
+    def matches_parent(self, parent_prim) -> bool:
+        if not parent_prim or not parent_prim.IsValid():
+            return not self._prim_paths
+        current_paths = set()
+        for prim in parent_prim.GetChildren():
+            if self._extract_id(prim.GetName()):
+                current_paths.add(str(prim.GetPath()))
+        return current_paths == self._prim_paths and all(
+            manipulator.has_current_prim() for manipulator in self._manipulators
+        )
 
     def update_positions(self):
         for manipulator in self._manipulators:

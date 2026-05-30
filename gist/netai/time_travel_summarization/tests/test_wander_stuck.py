@@ -1,6 +1,11 @@
 import unittest
 from gist.netai.time_travel_summarization.physics import WanderController
-from gist.netai.time_travel_summarization.physics.wander_controller import PrimState
+from gist.netai.time_travel_summarization.physics.wander_controller import (
+    PrimState,
+    _angle_delta_degrees,
+    _angle_between_vectors_degrees,
+    _max_rotation_delta_degrees,
+)
 
 
 class _FakePrim:
@@ -34,6 +39,14 @@ class WanderStuckTest(unittest.TestCase):
         self.assertTrue(wc.set_velocity_mode("on_enter"))
         self.assertEqual(wc._velocity_mode, "on_enter")
         self.assertFalse(wc.set_velocity_mode("nope"))
+
+    def test_set_speed(self):
+        wc = WanderController(prims=[], speed=120.0)
+        self.assertEqual(wc.get_speed(), 120.0)
+        self.assertTrue(wc.set_speed(80.0))
+        self.assertEqual(wc.get_speed(), 80.0)
+        self.assertFalse(wc.set_speed(0.0))
+        self.assertEqual(wc.get_speed(), 80.0)
 
     def test_check_stuck_triggers_after_k_frames(self):
         prim = _FakePrim("/W/test")
@@ -81,6 +94,28 @@ class WanderStuckTest(unittest.TestCase):
         wc._check_stuck(prim, str(prim), 1.032)  # progress=10 -> reset
         self.assertEqual(wc._stuck_count[str(prim)], 0)
 
+    def test_angle_delta_wraps(self):
+        self.assertEqual(_angle_delta_degrees(350.0, 10.0), 20.0)
+        self.assertEqual(_angle_delta_degrees(10.0, 350.0), 20.0)
+        self.assertEqual(_max_rotation_delta_degrees((0.0, 45.0, 0.0), (0.0, 0.0, 350.0)), 45.0)
+        self.assertAlmostEqual(_angle_between_vectors_degrees((1, 0, 0), (0, 1, 0)), 90.0)
+        self.assertAlmostEqual(_angle_between_vectors_degrees((1, 0, 0), (1, 0, 0)), 0.0)
+
+    def test_check_fallen_triggers_after_k_frames(self):
+        prim = _FakePrim("/W/fallen")
+        wc = WanderController(prims=[prim], fallen_angle_deg=30.0, fallen_frames=2)
+        wc._rotation_delta_from_original = lambda p, path: 45.0
+        self.assertFalse(wc._check_fallen(prim, str(prim)))
+        self.assertTrue(wc._check_fallen(prim, str(prim)))
+
+    def test_check_fallen_resets_when_upright(self):
+        prim = _FakePrim("/W/upright")
+        wc = WanderController(prims=[prim], fallen_angle_deg=30.0, fallen_frames=2)
+        deltas = [45.0, 5.0, 45.0]
+        wc._rotation_delta_from_original = lambda p, path: deltas.pop(0)
+        self.assertFalse(wc._check_fallen(prim, str(prim)))
+        self.assertFalse(wc._check_fallen(prim, str(prim)))
+        self.assertFalse(wc._check_fallen(prim, str(prim)))
 
     def test_velocity_mode_default_is_horizontal_per_tick(self):
         wc = WanderController(prims=[])

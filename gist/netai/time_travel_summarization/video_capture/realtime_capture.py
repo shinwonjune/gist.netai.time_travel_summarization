@@ -189,7 +189,11 @@ class RealtimeCaptureRunner:
                 _log_once("sim_time=None (playback not started?)")
                 return OverlayFrame(timestamp_text=ts_text, object_labels=(), misc_text=())
 
-            data = self._core.get_data_at_time(sim_time)
+            get_live_positions = getattr(self._core, "get_current_object_positions", None)
+            if callable(get_live_positions):
+                data = get_live_positions()
+            else:
+                data = self._core.get_data_at_time(sim_time)
             if not data:
                 _log_once(f"data empty at sim_time={sim_time}")
                 return OverlayFrame(timestamp_text=ts_text, object_labels=(), misc_text=())

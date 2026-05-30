@@ -10,6 +10,27 @@ class PrimState(Enum):
     STANDING_UP = "standing_up"
 
 
+def _angle_delta_degrees(current: float, target: float) -> float:
+    """Smallest absolute angular distance between two Euler components."""
+    return abs((float(current) - float(target) + 180.0) % 360.0 - 180.0)
+
+
+def _max_rotation_delta_degrees(current, target) -> float:
+    return max(_angle_delta_degrees(current[i], target[i]) for i in range(3))
+
+
+def _angle_between_vectors_degrees(a, b) -> float:
+    ax, ay, az = float(a[0]), float(a[1]), float(a[2])
+    bx, by, bz = float(b[0]), float(b[1]), float(b[2])
+    al = math.sqrt(ax * ax + ay * ay + az * az)
+    bl = math.sqrt(bx * bx + by * by + bz * bz)
+    if al <= 1e-9 or bl <= 1e-9:
+        return 0.0
+    dot = (ax * bx + ay * by + az * bz) / (al * bl)
+    dot = max(-1.0, min(1.0, dot))
+    return math.degrees(math.acos(dot))
+
+
 class WanderController:
     """Drive rigid body prims with a per-prim wander state machine."""
 
@@ -18,10 +39,12 @@ class WanderController:
         prims: list,
         speed: float = 120.0,
         stun_duration_s: float = 1.0,
-        standup_duration_s: float = 1.0,
+        standup_duration_s: float = 0.0,
         velocity_mode: str = "horizontal_per_tick",
         stuck_ratio: float = 0.3,
         stuck_frames: int = 5,
+        fallen_angle_deg: float = 35.0,
+        fallen_frames: int = 1,
     ):
         self._prims = list(prims)
         self._speed = float(speed)
@@ -29,6 +52,8 @@ class WanderController:
         self._standup_duration_s = max(0.0, float(standup_duration_s))
         self._stuck_ratio = float(stuck_ratio)
         self._stuck_frames = int(stuck_frames)
+        self._fallen_angle_deg = max(0.0, float(fallen_angle_deg))
+        self._fallen_frames = max(1, int(fallen_frames))
 
         if velocity_mode not in ("per_tick", "on_enter", "horizontal_per_tick"):
             self._log_warn(f"[Wander] invalid velocity_mode: {velocity_mode}")
@@ -50,7 +75,9 @@ class WanderController:
         self._contact_log_paths = set()
         self._last_blocked_direction: dict = {}
         self._original_rotation: dict = {}
+        self._original_basis: dict = {}
         self._vertical_position_history: dict = {}
+        self._fallen_count = {}
 
         self._initialize_states()
         self._capture_original_rotations()
@@ -61,6 +88,30 @@ class WanderController:
             return False
         self._velocity_mode = mode
         self._log_warn(f"[Wander] velocity_mode set to {mode}")
+        return True
+
+    def get_speed(self) -> float:
+        return self._speed
+
+    def set_speed(self, speed: float) -> bool:
+        try:
+            speed = float(speed)
+        except (TypeError, ValueError):
+            self._log_warn(f"[Wander] invalid speed: {speed!r}")
+            return False
+        if speed <= 0.0:
+            self._log_warn(f"[Wander] invalid speed: {speed:g}")
+            return False
+        self._speed = speed
+        if self._active:
+            for prim in self._valid_prims():
+                prim_path = str(prim.GetPath())
+                if self._state.get(prim_path) == PrimState.MOVING:
+                    if self._velocity_mode in ("on_enter", "per_tick"):
+                        self._apply_velocity_once(prim, prim_path)
+                    elif self._velocity_mode == "horizontal_per_tick":
+                        self._apply_horizontal_velocity(prim, prim_path)
+        self._log_warn(f"[Wander] speed set to {self._speed:g} units/sec")
         return True
 
     def start(self) -> None:
@@ -128,6 +179,10 @@ class WanderController:
                     self._original_rotation[prim_path] = Gf.Vec3f(0.0, 0.0, 0.0)
             except Exception:
                 self._original_rotation[prim_path] = Gf.Vec3f(0.0, 0.0, 0.0)
+            try:
+                self._original_basis[prim_path] = self._world_basis_vectors(prim)
+            except Exception:
+                pass
 
     def _is_grounded(self, prim, prim_path: str) -> bool:
         pos = self._world_position(prim)
@@ -160,8 +215,11 @@ class WanderController:
                     self._last_velocity[prim_path] = velocity
                 elif self._velocity_mode == "horizontal_per_tick":
                     self._apply_horizontal_velocity(prim, prim_path)
+                if self._check_fallen(prim, prim_path):
+                    self._transition(prim_path, PrimState.STANDING_UP, prim=prim)
+                    continue
                 if self._check_stuck(prim, prim_path, now):
-                    self._transition(prim_path, PrimState.STUNNED, prim=prim)
+                    self._transition(prim_path, PrimState.STANDING_UP, prim=prim)
                     continue
             elif state == PrimState.STUNNED:
                 if elapsed >= self._stun_duration_s:
@@ -237,6 +295,61 @@ class WanderController:
             return True
         return False
 
+    def _check_fallen(self, prim, prim_path: str) -> bool:
+        delta = self._rotation_delta_from_original(prim, prim_path)
+        if delta is None:
+            return False
+        if delta >= self._fallen_angle_deg:
+            self._fallen_count[prim_path] = self._fallen_count.get(prim_path, 0) + 1
+        else:
+            self._fallen_count[prim_path] = 0
+        if self._fallen_count.get(prim_path, 0) >= self._fallen_frames:
+            self._log_warn(f"[Wander] FALLEN prim={prim_path} rotation_delta={delta:.1f}deg")
+            return True
+        return False
+
+    def _rotation_delta_from_original(self, prim, prim_path: str):
+        current_basis = self._world_basis_vectors(prim)
+        target_basis = self._original_basis.get(prim_path)
+        if current_basis is not None and target_basis is not None:
+            return max(
+                _angle_between_vectors_degrees(current_basis[idx], target_basis[idx])
+                for idx in range(3)
+            )
+        current = self._current_rotate_xyz(prim)
+        target = self._original_rotation.get(prim_path)
+        if current is None or target is None:
+            return None
+        return _max_rotation_delta_degrees(current, target)
+
+    def _world_basis_vectors(self, prim):
+        try:
+            from pxr import Gf, UsdGeom
+
+            cache = UsdGeom.XformCache(0)
+            rotation = cache.GetLocalToWorldTransform(prim).ExtractRotation()
+            return (
+                rotation.TransformDir(Gf.Vec3d(1.0, 0.0, 0.0)),
+                rotation.TransformDir(Gf.Vec3d(0.0, 1.0, 0.0)),
+                rotation.TransformDir(Gf.Vec3d(0.0, 0.0, 1.0)),
+            )
+        except Exception:
+            return None
+
+    def _current_rotate_xyz(self, prim):
+        try:
+            from pxr import UsdGeom
+
+            xformable = UsdGeom.Xformable(prim)
+            for op in xformable.GetOrderedXformOps():
+                if op.GetOpType() == UsdGeom.XformOp.TypeRotateXYZ:
+                    value = op.Get()
+                    if value is not None:
+                        return value
+        except Exception:
+            return None
+        return None
+
     def _valid_prims(self):
         for prim in self._prims:
             if prim and prim.IsValid():
@@ -276,12 +389,15 @@ class WanderController:
         self._last_position.pop(prim_path, None)
         self._last_tick_time.pop(prim_path, None)
         self._stuck_count[prim_path] = 0
+        self._fallen_count[prim_path] = 0
         self._stuck_logged.discard(prim_path)
         if state == PrimState.STUNNED:
             self._vertical_position_history.pop(prim_path, None)
         if prim is not None:
             if state == PrimState.STANDING_UP:
+                self._set_all_motion_zero(prim)
                 self._set_kinematic(prim, True)
+                self._restore_upright(prim, 1.0)
             elif state == PrimState.MOVING:
                 self._set_kinematic(prim, False)
                 self._set_angular_velocity_zero(prim)
@@ -383,10 +499,17 @@ class WanderController:
         zero = Gf.Vec3f(0.0, 0.0, 0.0)
         for prim in self._valid_prims():
             try:
-                self._set_velocity(prim, zero)
-                self._set_angular_velocity_zero(prim)
+                self._set_all_motion_zero(prim, zero)
             except Exception:
                 pass
+
+    def _set_all_motion_zero(self, prim, zero=None) -> None:
+        if zero is None:
+            from pxr import Gf
+
+            zero = Gf.Vec3f(0.0, 0.0, 0.0)
+        self._set_velocity(prim, zero)
+        self._set_angular_velocity_zero(prim)
 
     def _subscribe_contact_events(self) -> None:
         try:
@@ -408,7 +531,8 @@ class WanderController:
                 if len(self._contact_log_paths) < 5:
                     self._contact_log_paths.add(prim_path)
                     self._log_warn(f"[Wander] CONTACT prim={prim_path}")
-                self._transition(prim_path, PrimState.STUNNED)
+                prim = next((p for p in self._valid_prims() if str(p.GetPath()) == prim_path), None)
+                self._transition(prim_path, PrimState.STANDING_UP, prim=prim)
 
     def _on_contact(self, contact_info) -> None:
         self._on_contact_event(contact_info)

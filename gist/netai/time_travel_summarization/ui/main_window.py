@@ -20,7 +20,7 @@ class TimeTravelWindow:
         self._ui_dispatcher = UiTaskDispatcher("TimeTravelWindowUiDispatcher")
         
         # Create window
-        self._window = ui.Window("Time Travel", width=500, height=480)
+        self._window = ui.Window("Time Travel", width=500, height=510)
         
         with self._window.frame:
             with ui.VStack(spacing=5):
@@ -158,6 +158,14 @@ class TimeTravelWindow:
                     self._physics_mode_button = ui.Button("Physics", width=90)
                     self._physics_mode_button.set_clicked_fn(self._on_physics_mode_clicked)
                     self._mode_label = ui.Label("", style={"color": 0xFF888888})
+
+                with ui.HStack(height=25, spacing=8):
+                    ui.Label("Move Speed:", width=85)
+                    self._wander_speed_field = ui.FloatField(width=70)
+                    self._wander_speed_field.model.set_value(self._core.get_wander_speed())
+                    self._wander_speed_field.model.add_end_edit_fn(self._on_wander_speed_changed)
+                    ui.Label("units/s", width=55)
+                    ui.Spacer()
 
                 with ui.HStack(height=28, spacing=8):
                     self._move_button = ui.Button("Move", width=0)
@@ -358,6 +366,12 @@ class TimeTravelWindow:
         """Handle speed value change."""
         speed = model.get_value_as_float()
         self._core.set_playback_speed(speed)
+
+    def _on_wander_speed_changed(self, model):
+        """Handle physics wander speed value change."""
+        speed = model.get_value_as_float()
+        if not self._core.set_wander_speed(speed):
+            model.set_value(self._core.get_wander_speed())
     
     def _on_event_checkbox_changed(self, model):
         """Handle event summary checkbox change."""
