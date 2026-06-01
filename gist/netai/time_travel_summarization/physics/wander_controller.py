@@ -31,6 +31,10 @@ def _angle_between_vectors_degrees(a, b) -> float:
     return math.degrees(math.acos(dot))
 
 
+def _delta_to_target_y(current_y: float, target_y: float) -> float:
+    return float(target_y) - float(current_y)
+
+
 class WanderController:
     """Drive rigid body prims with a per-prim wander state machine."""
 
@@ -45,6 +49,8 @@ class WanderController:
         stuck_frames: int = 5,
         fallen_angle_deg: float = 35.0,
         fallen_frames: int = 1,
+        ground_y: float = 89.5,
+        upright_clearance: float = 0.0,
     ):
         self._prims = list(prims)
         self._speed = float(speed)
@@ -54,6 +60,8 @@ class WanderController:
         self._stuck_frames = int(stuck_frames)
         self._fallen_angle_deg = max(0.0, float(fallen_angle_deg))
         self._fallen_frames = max(1, int(fallen_frames))
+        self._ground_y = float(ground_y)
+        self._upright_clearance = float(upright_clearance)
 
         if velocity_mode not in ("per_tick", "on_enter", "horizontal_per_tick"):
             self._log_warn(f"[Wander] invalid velocity_mode: {velocity_mode}")
@@ -231,6 +239,7 @@ class WanderController:
                 duration = self._standup_duration_s
                 normalized = 1.0 if duration <= 0.0 else min(elapsed / duration, 1.0)
                 self._restore_upright(prim, normalized)
+                self._set_world_origin_y(prim, self._standing_world_y())
                 self._set_angular_velocity_zero(prim)
                 if elapsed >= duration:
                     avoid = self._last_blocked_direction.get(prim_path)
@@ -398,7 +407,10 @@ class WanderController:
                 self._set_all_motion_zero(prim)
                 self._set_kinematic(prim, True)
                 self._restore_upright(prim, 1.0)
+                self._set_world_origin_y(prim, self._standing_world_y())
+                self._set_all_motion_zero(prim)
             elif state == PrimState.MOVING:
+                self._set_world_origin_y(prim, self._standing_world_y())
                 self._set_kinematic(prim, False)
                 self._set_angular_velocity_zero(prim)
                 if self._velocity_mode == "horizontal_per_tick":
@@ -462,6 +474,45 @@ class WanderController:
                 float(current[2]) * (1.0 - t) + float(target[2]) * t,
             )
         )
+
+    def _standing_world_y(self) -> float:
+        return self._ground_y + self._upright_clearance
+
+    def _set_world_origin_y(self, prim, target_y: float) -> None:
+        """Move the prim origin to a target world Y while preserving local X/Z.
+
+        The astronaut asset uses its prim origin at the sole. The room floor is
+        fixed at y=89.5, so standing up should restore the origin to that plane
+        instead of relying on collider bounds after the body has already fallen.
+        """
+        try:
+            from pxr import Gf, UsdGeom
+
+            current_world = self._world_position(prim)
+            if current_world is None:
+                return
+            delta_y = _delta_to_target_y(float(current_world[1]), target_y)
+            if abs(delta_y) <= 1e-4:
+                return
+
+            xformable = UsdGeom.Xformable(prim)
+            translate_op = None
+            for op in xformable.GetOrderedXformOps():
+                if op.GetOpType() == UsdGeom.XformOp.TypeTranslate:
+                    translate_op = op
+                    break
+            if translate_op is None:
+                translate_op = xformable.AddTranslateOp()
+            current_local = translate_op.Get() or Gf.Vec3d(0.0, 0.0, 0.0)
+            translate_op.Set(
+                Gf.Vec3d(
+                    float(current_local[0]),
+                    float(current_local[1]) + delta_y,
+                    float(current_local[2]),
+                )
+            )
+        except Exception as exc:
+            self._log_warn(f"[Wander] ground-y restore failed for {prim.GetPath()}: {exc}")
 
     def _set_velocity(self, prim, velocity) -> None:
         from pxr import Sdf, UsdPhysics

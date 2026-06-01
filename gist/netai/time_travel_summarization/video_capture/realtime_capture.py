@@ -1,6 +1,8 @@
 import ctypes
+import os
 import shutil
 import tempfile
+import threading
 import time
 from datetime import datetime
 from pathlib import Path
@@ -14,6 +16,31 @@ from .overlay_composer import CircleLabel, OverlayComposer, OverlayFrame, TextIt
 
 # True로 두면 마커가 반투명 + 4-방향 tick으로 렌더되어 객체 중심과 투영 픽셀의 일치 여부를 시각 확인할 수 있다
 DEBUG_OVERLAY_MARKERS = False
+
+
+def _apply_radial_overlay_scale(px: float, py: float, width: int, height: int, scale: float):
+    """Move projected overlay points radially from the frame center.
+
+    Default scale 1.0 preserves current projection. Values greater than 1.0
+    compensate labels that are biased toward the center of the captured image.
+    """
+    scale = float(scale)
+    if abs(scale - 1.0) <= 1e-9:
+        return px, py
+    cx = float(width) * 0.5
+    cy = float(height) * 0.5
+    return cx + (float(px) - cx) * scale, cy + (float(py) - cy) * scale
+
+
+def _overlay_radial_scale() -> float:
+    raw = os.environ.get("TTS_OVERLAY_RADIAL_SCALE", "1.0")
+    try:
+        scale = float(raw)
+    except (TypeError, ValueError):
+        return 1.0
+    if scale <= 0.0:
+        return 1.0
+    return scale
 
 
 def _extract_objid_number(objid: str) -> str:
@@ -157,6 +184,7 @@ def _project_world_to_pixel(world_xyz, view, proj, width: int, height: int):
     p_clip = proj.Transform(p_view)
     px = (p_clip[0] * 0.5 + 0.5) * width
     py = (1.0 - (p_clip[1] * 0.5 + 0.5)) * height
+    px, py = _apply_radial_overlay_scale(px, py, width, height, _overlay_radial_scale())
     return (int(px), int(py))
 
 
@@ -269,10 +297,11 @@ class RealtimeCaptureRunner:
             "resolution": f"{req.width}x{req.height}",
             "fps": req.fps,
             "duration_s": req.duration_s,
+            "frame_clock": "async_capture_reordered",
         }
         tmp_dir = Path(tempfile.mkdtemp(prefix="ttsum_a2_"))
         tmp_mp4 = tmp_dir / f"a2_{datetime.now().strftime('%Y%m%dT%H%M%S')}.mp4"
-        queue = FrameQueue(maxsize=8)
+        queue = FrameQueue(maxsize=32, drop_oldest=False)
         encoder = FrameEncoder(tmp_mp4, req.width, req.height, req.fps)
 
         try:
@@ -318,42 +347,147 @@ class RealtimeCaptureRunner:
             encoder.start(queue)
 
             target_frames = int(req.duration_s * req.fps)
-            received = 0
+            requested = 0
+            completed_count = 0
+            failed_count = 0
+            encoded_input_count = 0
+            duplicate_count = 0
             frame_interval = 1.0 / req.fps
+            callback_timeout_s = max(2.0, frame_interval * 10.0)
+            reorder_wait_s = max(0.05, frame_interval * 3.0)
             next_due = time.perf_counter()
+            completed_frames = {}
+            failed_frames = set()
+            completed_cond = threading.Condition()
+            next_to_encode = 0
+            last_encoded_item = None
 
-            def _on_frame(buf, buf_size, width, height, fmt):
-                nonlocal received
-                try:
-                    rgba = _buf_to_bytes(buf, buf_size)
-                except Exception as e:
-                    # 첫 프레임에서 한 번만 로그
-                    if received == 0:
-                        print(f"[A2] frame buffer conversion failed: {e!r} (type={type(buf).__name__})")
-                    return
-                if provider is not None:
+            def _make_on_frame(seq, overlay_snapshot):
+                def _on_frame(buf, buf_size, width, height, fmt):
+                    nonlocal completed_count, failed_count
+                    item = None
+                    failed = False
                     try:
-                        # callback의 width/height는 viewport 디스플레이 크기(고DPI 시 2×)일 수 있어
-                        # 실제 buf와 안 맞음. 우리가 강제한 req.width/req.height를 사용.
-                        overlay_frame = provider(req.width, req.height)
-                        rgba = composer.compose(rgba, overlay_frame)
-                    except Exception as e:
-                        if received == 0:
-                            print(f"[A2] overlay compose failed: {e!r}; continuing without overlay")
-                queue.push((received, rgba, width, height))
-                received += 1
+                        try:
+                            rgba = _buf_to_bytes(buf, buf_size)
+                        except Exception as e:
+                            # 첫 프레임에서 한 번만 로그
+                            if seq == 0:
+                                print(f"[A2] frame buffer conversion failed: {e!r} (type={type(buf).__name__})")
+                            failed = True
+                            return
+                        if overlay_snapshot is not None:
+                            try:
+                                rgba = composer.compose(rgba, overlay_snapshot)
+                            except Exception as e:
+                                if seq == 0:
+                                    print(f"[A2] overlay compose failed: {e!r}; continuing without overlay")
+                        item = (seq, rgba, width, height)
+                    finally:
+                        with completed_cond:
+                            if item is not None:
+                                if seq >= next_to_encode:
+                                    completed_frames[seq] = item
+                                completed_count += 1
+                            elif failed:
+                                if seq >= next_to_encode:
+                                    failed_frames.add(seq)
+                                failed_count += 1
+                            completed_cond.notify_all()
+
+                return _on_frame
+
+            def _make_duplicate_item(seq, source_item):
+                return (seq, source_item[1], source_item[2], source_item[3])
+
+            def _flush_ordered_ready():
+                nonlocal next_to_encode, last_encoded_item, encoded_input_count
+                flushed = 0
+                while True:
+                    with completed_cond:
+                        item = completed_frames.pop(next_to_encode, None)
+                        if item is None:
+                            break
+                    queue.push(item)
+                    last_encoded_item = item
+                    next_to_encode += 1
+                    encoded_input_count += 1
+                    flushed += 1
+                return flushed
 
             stopped_early = False
-            while received < target_frames:
+            request_started_at = time.perf_counter()
+            request_deadline = request_started_at + req.duration_s
+            while requested < target_frames:
                 if stop_event is not None and stop_event.is_set():
                     stopped_early = True
                     break
                 now = time.perf_counter()
+                if now >= request_deadline:
+                    break
                 if now < next_due:
+                    _flush_ordered_ready()
                     time.sleep(min(0.005, next_due - now))
                     continue
-                capture_viewport_to_buffer(viewport, _on_frame)
+
+                overlay_snapshot = None
+                if provider is not None:
+                    try:
+                        # Tie overlay state to request order, not callback completion order.
+                        overlay_snapshot = provider(req.width, req.height)
+                    except Exception as e:
+                        if requested == 0:
+                            print(f"[A2] overlay snapshot failed: {e!r}; continuing without overlay")
+
+                capture_viewport_to_buffer(viewport, _make_on_frame(requested, overlay_snapshot))
+                requested += 1
+                _flush_ordered_ready()
                 next_due += frame_interval
+            request_finished_at = time.perf_counter()
+
+            def _handle_failed_head():
+                nonlocal next_to_encode, last_encoded_item, encoded_input_count, duplicate_count
+                with completed_cond:
+                    if next_to_encode not in failed_frames:
+                        return False
+                    failed_frames.discard(next_to_encode)
+                if last_encoded_item is not None:
+                    queue.push(_make_duplicate_item(next_to_encode, last_encoded_item))
+                    last_encoded_item = _make_duplicate_item(next_to_encode, last_encoded_item)
+                    duplicate_count += 1
+                    encoded_input_count += 1
+                next_to_encode += 1
+                return True
+
+            while next_to_encode < requested:
+                if _flush_ordered_ready():
+                    continue
+                if _handle_failed_head():
+                    continue
+
+                wait_deadline = time.perf_counter() + (
+                    callback_timeout_s if last_encoded_item is None else reorder_wait_s
+                )
+                while time.perf_counter() < wait_deadline:
+                    if _flush_ordered_ready() or _handle_failed_head():
+                        break
+                    with completed_cond:
+                        completed_cond.wait(timeout=min(0.01, max(0.0, wait_deadline - time.perf_counter())))
+                else:
+                    if last_encoded_item is not None:
+                        queue.push(_make_duplicate_item(next_to_encode, last_encoded_item))
+                        last_encoded_item = _make_duplicate_item(next_to_encode, last_encoded_item)
+                        duplicate_count += 1
+                        encoded_input_count += 1
+                    next_to_encode += 1
+
+            target_output_frames = requested if stopped_early else target_frames
+            while next_to_encode < target_output_frames and last_encoded_item is not None:
+                queue.push(_make_duplicate_item(next_to_encode, last_encoded_item))
+                last_encoded_item = _make_duplicate_item(next_to_encode, last_encoded_item)
+                duplicate_count += 1
+                encoded_input_count += 1
+                next_to_encode += 1
 
             queue.close()
             encoder.join(timeout=30.0)
@@ -377,9 +511,16 @@ class RealtimeCaptureRunner:
             wall = time.perf_counter() - start_wall
             metadata.update(
                 {
-                    "frames_received": received,
+                    "frames_received": completed_count,
+                    "frames_requested": requested,
+                    "frames_completed": completed_count,
+                    "frames_failed": failed_count,
+                    "frames_queued_for_encoding": encoded_input_count,
                     "frames_written": encoder.frames_written,
-                    "drop_rate": queue.dropped / max(received, 1),
+                    "duplicate_frames": duplicate_count,
+                    "drop_rate": queue.dropped / max(encoded_input_count, 1),
+                    "request_wall_clock_s": request_finished_at - request_started_at,
+                    "stopped_early": stopped_early,
                 }
             )
             return CaptureResult(
@@ -387,7 +528,7 @@ class RealtimeCaptureRunner:
                 output_uri=req.output_uri,
                 wall_clock_s=wall,
                 output_size_bytes=size,
-                sim_fps_avg=received / max(wall, 1e-9),
+                sim_fps_avg=encoder.frames_written / max(wall, 1e-9),
                 dropped_frames=queue.dropped,
                 metadata=metadata,
             )

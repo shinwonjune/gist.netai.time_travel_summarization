@@ -26,6 +26,27 @@ class FrameQueueTest(unittest.TestCase):
         self.assertEqual(queue.pop(), 3)
         self.assertEqual(queue.pop(), 4)
 
+    def test_no_drop_mode_blocks_until_space(self):
+        queue = FrameQueue(maxsize=1, drop_oldest=False)
+        queue.push("a")
+        pushed = []
+
+        def _producer():
+            queue.push("b")
+            pushed.append(True)
+
+        producer = threading.Thread(target=_producer)
+        producer.start()
+        time.sleep(0.1)
+        self.assertEqual(pushed, [])
+        self.assertEqual(queue.pop(), "a")
+        producer.join(timeout=1.0)
+
+        self.assertFalse(producer.is_alive())
+        self.assertEqual(pushed, [True])
+        self.assertEqual(queue.pop(), "b")
+        self.assertEqual(queue.dropped, 0)
+
     def test_pop_blocks_then_unblocks_on_close(self):
         queue = FrameQueue()
         result = []

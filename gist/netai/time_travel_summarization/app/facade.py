@@ -374,9 +374,14 @@ class TimeTravelCore:
                 req = CaptureRequest(duration_s=duration, output_uri=output_uri, label="ui_capture")
                 res = runner.capture(req, stop_event=self._capture_stop_event)
                 if res.success:
+                    meta = res.metadata or {}
                     carb.log_warn(
                         f"[Capture] done {res.wall_clock_s:.1f}s "
-                        f"{res.output_size_bytes // 1024}KB drop={res.dropped_frames}"
+                        f"{res.output_size_bytes // 1024}KB "
+                        f"frames={meta.get('frames_written', '?')}/{meta.get('frames_requested', '?')} "
+                        f"completed={meta.get('frames_completed', '?')} "
+                        f"dup={meta.get('duplicate_frames', '?')} "
+                        f"drop={res.dropped_frames}"
                     )
                 else:
                     carb.log_warn(f"[Capture] FAILED: {res.error}")

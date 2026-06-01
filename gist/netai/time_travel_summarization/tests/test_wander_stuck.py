@@ -4,6 +4,7 @@ from gist.netai.time_travel_summarization.physics.wander_controller import (
     PrimState,
     _angle_delta_degrees,
     _angle_between_vectors_degrees,
+    _delta_to_target_y,
     _max_rotation_delta_degrees,
 )
 
@@ -47,6 +48,12 @@ class WanderStuckTest(unittest.TestCase):
         self.assertEqual(wc.get_speed(), 80.0)
         self.assertFalse(wc.set_speed(0.0))
         self.assertEqual(wc.get_speed(), 80.0)
+
+    def test_ground_y_defaults_to_floor_origin(self):
+        wc = WanderController(prims=[])
+        self.assertEqual(wc._standing_world_y(), 89.5)
+        self.assertEqual(_delta_to_target_y(80.0, 89.5), 9.5)
+        self.assertEqual(_delta_to_target_y(100.0, 89.5), -10.5)
 
     def test_check_stuck_triggers_after_k_frames(self):
         prim = _FakePrim("/W/test")

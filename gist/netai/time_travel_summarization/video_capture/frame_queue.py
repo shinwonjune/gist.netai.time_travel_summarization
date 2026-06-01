@@ -9,8 +9,9 @@ class FrameQueue:
     When full, push() drops the oldest entry and increments dropped count.
     """
 
-    def __init__(self, maxsize: int = 8):
+    def __init__(self, maxsize: int = 8, drop_oldest: bool = True):
         self._maxsize = maxsize
+        self._drop_oldest = bool(drop_oldest)
         self._deque: deque = deque()
         self._lock = threading.Lock()
         self._cond = threading.Condition(self._lock)
@@ -21,11 +22,17 @@ class FrameQueue:
         with self._cond:
             if self._closed:
                 return
-            if len(self._deque) >= self._maxsize:
-                self._deque.popleft()
-                self._dropped += 1
+            if self._drop_oldest:
+                if len(self._deque) >= self._maxsize:
+                    self._deque.popleft()
+                    self._dropped += 1
+            else:
+                while len(self._deque) >= self._maxsize and not self._closed:
+                    self._cond.wait(timeout=0.1)
+                if self._closed:
+                    return
             self._deque.append(item)
-            self._cond.notify()
+            self._cond.notify_all()
 
     def pop(self, timeout: Optional[float] = None):
         with self._cond:
@@ -33,7 +40,9 @@ class FrameQueue:
                 if not self._cond.wait(timeout=timeout):
                     return None
             if self._deque:
-                return self._deque.popleft()
+                item = self._deque.popleft()
+                self._cond.notify_all()
+                return item
             return None
 
     def close(self) -> None:
