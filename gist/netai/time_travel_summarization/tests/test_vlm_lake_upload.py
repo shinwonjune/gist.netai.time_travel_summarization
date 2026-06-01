@@ -2,6 +2,7 @@ import json
 import sys
 import tempfile
 import types
+from io import BytesIO
 from pathlib import Path
 
 
@@ -70,6 +71,43 @@ def test_upload_video_file_uri_uses_temp_file_and_cleans_it_up():
     finally:
         if source_path and source_path.exists():
             source_path.unlink()
+
+
+def test_upload_video_s3_uri_uses_storage_adapter_temp_bridge(monkeypatch):
+    fake_bytes = b"\x00\x00\x00\x18ftypmp42fake-minio-video"
+    fake_client = FakeVSSClient()
+    source_uri = "s3://time-travel-summarization/timetravel/video/capture.mp4"
+
+    class FakeStorageAdapter:
+        def __init__(self):
+            self.exists_calls = []
+            self.open_read_calls = []
+
+        def exists(self, uri):
+            self.exists_calls.append(uri)
+            return uri == source_uri
+
+        def open_read(self, uri):
+            self.open_read_calls.append(uri)
+            return BytesIO(fake_bytes)
+
+    adapter = FakeStorageAdapter()
+
+    import gist.netai.time_travel_summarization.storage as storage_module
+
+    monkeypatch.setattr(storage_module, "from_uri", lambda uri: adapter)
+
+    core = VLMClientCore()
+    core._client = fake_client
+
+    assert core.upload_video(source_uri) is True
+    assert core._current_video_id == "vid-123"
+    assert adapter.exists_calls == [source_uri]
+    assert adapter.open_read_calls == [source_uri]
+    assert fake_client.observed_bytes == fake_bytes
+    assert fake_client.uploaded_path is not None
+    assert fake_client.uploaded_path.suffix == ".mp4"
+    assert not fake_client.uploaded_path.exists()
 
 
 def test_upload_video_missing_file_uri_returns_false():

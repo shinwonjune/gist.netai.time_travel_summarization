@@ -1,6 +1,7 @@
 import datetime
 from pathlib import Path
 from typing import Dict, List, Optional
+from urllib.parse import urlparse
 
 import carb
 
@@ -321,7 +322,7 @@ class TimeTravelCore:
             ts = _dt.now().strftime("%Y%m%dT%H%M%S")
             video_output_uri = self.get_video_output_uri_for_active_mode()
             if video_output_uri:
-                output_path = f"{video_output_uri.rstrip('/')}/capture_{ts}.mp4"
+                output_path = f"{video_output_uri.rstrip('/')}/video_{ts}.mp4"
             else:
                 # config의 video_output_dir 사용. 없으면 default "artifacts/video"
                 output_dir_str = (
@@ -333,7 +334,7 @@ class TimeTravelCore:
                 if not output_dir.is_absolute():
                     output_dir = self._module_dir / output_dir
                 output_dir.mkdir(parents=True, exist_ok=True)
-                output_path = str(output_dir / f"capture_{ts}.mp4")
+                output_path = str(output_dir / f"video_{ts}.mp4")
         self._capture_active = True
         self._capture_duration_s = effective_duration
         self._capture_output_path = output_path
@@ -375,6 +376,8 @@ class TimeTravelCore:
                 res = runner.capture(req, stop_event=self._capture_stop_event)
                 if res.success:
                     meta = res.metadata or {}
+                    parsed_output = urlparse(res.output_uri)
+                    video_name = Path(parsed_output.path or res.output_uri).name
                     carb.log_warn(
                         f"[Capture] done {res.wall_clock_s:.1f}s "
                         f"{res.output_size_bytes // 1024}KB "
@@ -383,6 +386,9 @@ class TimeTravelCore:
                         f"dup={meta.get('duplicate_frames', '?')} "
                         f"drop={res.dropped_frames}"
                     )
+                    carb.log_warn(f"[Capture] video_uri={res.output_uri}")
+                    carb.log_warn(f"[Capture] video_name={video_name}")
+                    carb.log_warn(f"[Capture] paste_to_vlm_client={res.output_uri}")
                 else:
                     carb.log_warn(f"[Capture] FAILED: {res.error}")
             except Exception as exc:
