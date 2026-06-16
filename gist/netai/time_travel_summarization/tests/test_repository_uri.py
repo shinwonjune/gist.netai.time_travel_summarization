@@ -77,6 +77,20 @@ class RepositoryUriTest(unittest.TestCase):
         self.assertTrue(config.data_uri.startswith("file://"))
         self.assertTrue(config.data_uri.endswith(".csv"))
 
+    def test_parse_timestamp_accepts_millisecond_and_second_precision(self):
+        self.assertEqual(
+            TrajectoryRepository.parse_timestamp("2025-01-01 00:00:01.000").microsecond,
+            0,
+        )
+        self.assertEqual(
+            TrajectoryRepository.parse_timestamp("2025-01-01 00:00:01").second,
+            1,
+        )
+        self.assertEqual(
+            TrajectoryRepository.parse_timestamp("2025-01-01 00:00:01.123").microsecond,
+            123000,
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

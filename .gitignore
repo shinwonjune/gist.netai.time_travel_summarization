@@ -39,3 +39,7 @@ docs/
 .env
 ./docs/
 video/
+
+# --- Antigravity CLI & Agents tooling --------------------------------------
+.antigravitycli/
+.agents/

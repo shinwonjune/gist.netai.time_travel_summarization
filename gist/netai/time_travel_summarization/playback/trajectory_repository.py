@@ -172,10 +172,17 @@ class TrajectoryRepository:
 
     @staticmethod
     def parse_timestamp(timestamp_str: str) -> datetime.datetime:
-        try:
-            return datetime.datetime.fromisoformat(timestamp_str.replace("Z", "+00:00"))
-        except ValueError:
-            return datetime.datetime.strptime(timestamp_str, "%Y-%m-%d %H:%M:%S.%f")
+        candidate = (timestamp_str or "").strip().replace("Z", "+00:00")
+        for parser in (
+            datetime.datetime.fromisoformat,
+            lambda value: datetime.datetime.strptime(value, "%Y-%m-%d %H:%M:%S.%f"),
+            lambda value: datetime.datetime.strptime(value, "%Y-%m-%d %H:%M:%S"),
+        ):
+            try:
+                return parser(candidate)
+            except ValueError:
+                continue
+        raise ValueError(f"Unsupported timestamp format: {timestamp_str!r}")
 
     @staticmethod
     def format_timestamp(dt: datetime.datetime) -> str:

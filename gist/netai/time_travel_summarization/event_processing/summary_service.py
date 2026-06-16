@@ -1,5 +1,6 @@
 import json
 from pathlib import Path
+from urllib.parse import urlparse
 from typing import Dict, List, Optional, Tuple
 
 from ..app.paths import ExtensionPaths
@@ -77,18 +78,21 @@ class EventSummaryService:
         return event_timestamps
 
     def process_event_json(self, json_path: str) -> bool:
-        from .core import consolidate_events, load_json, save_jsonl
+        from .core import consolidate_events
 
-        source_path = Path(json_path)
-        if not source_path.exists():
+        source_uri, source_name = self._normalize_input_uri(json_path)
+        if not source_uri:
             return False
 
-        vlm_data = load_json(str(source_path))
+        vlm_data = self._load_json_from_uri(source_uri)
+        if vlm_data is None:
+            return False
+
         events = consolidate_events(vlm_data, base_date="2025-01-01")
 
         output_jsonl_uri = self._resolve_output_uri(
             "intermediate_results",
-            f"{source_path.stem}_intermediate.jsonl",
+            f"{source_name}_intermediate.jsonl",
         )
         serialized_events = "".join(
             json.dumps({timestamp: events[timestamp]}, ensure_ascii=False) + "\n"
@@ -106,7 +110,7 @@ class EventSummaryService:
 
         output_eventlist_uri = self._resolve_output_uri(
             "event_list",
-            f"{source_path.stem}_eventlist.jsonl",
+            f"{source_name}_eventlist.jsonl",
         )
         serialized_event_list = "".join(
             json.dumps(entry, ensure_ascii=False) + "\n"
@@ -127,6 +131,32 @@ class EventSummaryService:
             for entry in event_list
         }
         return True
+
+    def _normalize_input_uri(self, json_path: str) -> Tuple[Optional[str], Optional[str]]:
+        candidate = (json_path or "").strip()
+        if not candidate:
+            return None, None
+
+        parsed = urlparse(candidate)
+        if parsed.scheme in ("s3", "minio", "file"):
+            return candidate, Path(parsed.path or candidate).stem
+
+        source_path = Path(candidate)
+        if not source_path.exists():
+            return None, None
+        return source_path.resolve().as_uri(), source_path.stem
+
+    def _load_json_from_uri(self, source_uri: str):
+        adapter = from_uri(source_uri)
+        if not adapter.exists(source_uri):
+            return None
+        with adapter.open_read(source_uri) as file:
+            raw = file.read()
+        if isinstance(raw, bytes):
+            text = raw.decode("utf-8")
+        else:
+            text = str(raw)
+        return json.loads(text)
 
     def _resolve_output_uri(self, subdir: str, filename: str) -> str:
         """Return URI for writing an artifact. Falls back to local Path's file:// URI."""

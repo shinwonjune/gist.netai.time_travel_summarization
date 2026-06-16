@@ -2,6 +2,7 @@ import json
 import sys
 import tempfile
 import types
+from io import BytesIO
 from pathlib import Path
 
 
@@ -51,29 +52,86 @@ def test_load_events_from_file_event_list_uri_preserves_order_and_positions():
 
 
 def test_resolve_output_uri_uses_lake_root_for_event_list():
-    service = EventSummaryService(
-        module_dir=Path.cwd(),
-        repository=None,
-        output_root_uri="s3://bucket/prefix",
-    )
+    with tempfile.TemporaryDirectory() as tmpdir:
+        service = EventSummaryService(
+            module_dir=Path(tmpdir),
+            repository=None,
+            output_root_uri="s3://bucket/prefix",
+        )
 
-    assert (
-        service._resolve_output_uri("event_list", "x_eventlist.jsonl")
-        == "s3://bucket/prefix/event_list/x_eventlist.jsonl"
-    )
+        assert (
+            service._resolve_output_uri("event_list", "x_eventlist.jsonl")
+            == "s3://bucket/prefix/event_list/x_eventlist.jsonl"
+        )
 
 
 def test_resolve_output_uri_falls_back_to_file_uri_for_backward_compatibility():
-    service = EventSummaryService(
-        module_dir=Path.cwd(),
-        repository=None,
-        output_root_uri=None,
-    )
+    with tempfile.TemporaryDirectory() as tmpdir:
+        service = EventSummaryService(
+            module_dir=Path(tmpdir),
+            repository=None,
+            output_root_uri=None,
+        )
 
-    uri = service._resolve_output_uri("event_list", "x_eventlist.jsonl")
+        uri = service._resolve_output_uri("event_list", "x_eventlist.jsonl")
 
-    assert uri.startswith("file://")
-    assert uri.endswith("/x_eventlist.jsonl")
+        assert uri.startswith("file://")
+        assert uri.endswith("/x_eventlist.jsonl")
+
+
+def test_process_event_json_accepts_s3_uri_and_writes_event_outputs():
+    source_uri = "s3://bucket/vlm_outputs/example.json"
+    payload = {
+        "chunk_responses": [
+            {"content": '[{"00:00:01": [1, 2]}]'},
+            {"content": '[{"00:00:02": [3]}]'},
+        ]
+    }
+
+    class DummyRepository:
+        def parse_timestamp(self, timestamp):
+            return timestamp
+
+        def get_data_at_time(self, timestamp):
+            return {
+                "obj001": (1.0, 2.0, 3.0),
+                "obj002": (4.0, 5.0, 6.0),
+                "obj003": (7.0, 8.0, 9.0),
+            }
+
+    class FakeStorageAdapter:
+        def __init__(self):
+            self.written = {}
+
+        def exists(self, uri):
+            return uri == source_uri
+
+        def open_read(self, uri):
+            return BytesIO(json.dumps(payload).encode("utf-8"))
+
+        def put_bytes(self, uri, data, content_type=None):
+            self.written[uri] = data.decode("utf-8")
+
+    adapter = FakeStorageAdapter()
+    import gist.netai.time_travel_summarization.event_processing.summary_service as summary_module
+
+    original_from_uri = summary_module.from_uri
+    summary_module.from_uri = lambda uri: adapter
+    try:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            service = EventSummaryService(
+                module_dir=Path(tmpdir),
+                repository=DummyRepository(),
+                output_root_uri="s3://bucket/prefix",
+            )
+
+            assert service.process_event_json(source_uri) is True
+            assert "s3://bucket/prefix/intermediate_results/example_intermediate.jsonl" in adapter.written
+            assert "s3://bucket/prefix/event_list/example_eventlist.jsonl" in adapter.written
+            assert service.get_event_position("2025-01-01 00:00:01.000") == (1.0, 2.0, 3.0)
+            assert service.get_event_position("2025-01-01 00:00:02.000") == (7.0, 8.0, 9.0)
+    finally:
+        summary_module.from_uri = original_from_uri
 
 
 def _run_test(name, func):
