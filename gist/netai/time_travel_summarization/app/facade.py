@@ -34,6 +34,7 @@ class TimeTravelCore:
         self._wander = None
         self._wander_speed = 120.0
         self._trace = None
+        self._collisions = None
         self._stage_objects.ensure_summarization_camera()
         self._capture_active: bool = False
         self._capture_start_time = None
@@ -421,8 +422,36 @@ class TimeTravelCore:
         if not self._wander:
             carb.log_warn("[TimeTravel] start_wander: Physics mode is not active")
             return False
+        self._start_collision_recorder()
         self._wander.start()
         return True
+
+    def _on_collision_event(self, prim_path: str, position, kind: str) -> None:
+        """WanderController callback: persist a collision as a ground-truth label."""
+        if self._collisions is not None:
+            self._collisions.record(prim_path, position, kind)
+
+    def _start_collision_recorder(self) -> None:
+        from datetime import datetime as _dt
+
+        from ..physics import CollisionRecorder
+
+        if self._collisions is not None:
+            return
+        prim_to_objid = {str(path): objid for objid, path in self._prim_map.items()}
+        ts = _dt.now().strftime("%Y%m%dT%H%M%S")
+        output_path = self._paths.artifacts_dir / "collisions" / f"collisions_{ts}.csv"
+        self._collisions = CollisionRecorder(output_path, prim_to_objid)
+        self._collisions.start()
+        carb.log_warn(f"[Collision] recording started -> {output_path}")
+
+    def _stop_collision_recorder(self) -> None:
+        if self._collisions is None:
+            return
+        out = self._collisions.stop()
+        rows = self._collisions.row_count
+        self._collisions = None
+        carb.log_warn(f"[Collision] recording stopped ({rows} events) -> {out}")
 
     def set_velocity_mode(self, mode: str) -> bool:
         """콘솔에서 velocity 모드 즉시 토글 (per_tick / on_enter)."""
@@ -454,6 +483,7 @@ class TimeTravelCore:
         if not self._wander:
             return False
         self._wander.stop()
+        self._stop_collision_recorder()
         return True
 
     def is_wandering(self) -> bool:
@@ -585,10 +615,12 @@ class TimeTravelCore:
                 )
             except Exception as e:
                 carb.log_warn(f"[Physics] failed to log world_pos for objid={objid}: {e}")
-            rigid_prims.append(wrap_with_collision_proxy(stage, prim, shape="cylinder", visible=True))
+            rigid_prims.append(wrap_with_collision_proxy(stage, prim, shape="cylinder", visible=False))
 
         # wander는 사용자가 Move 버튼으로 명시 시작. 여기서는 인스턴스만 생성.
-        self._wander = WanderController(rigid_prims, speed=self._wander_speed)
+        self._wander = WanderController(
+            rigid_prims, speed=self._wander_speed, on_collision=self._on_collision_event
+        )
 
         try:
             import omni.timeline
@@ -606,6 +638,7 @@ class TimeTravelCore:
         if self._wander:
             self._wander.stop()
             self._wander = None
+        self._stop_collision_recorder()
 
         stage = omni.usd.get_context().get_stage()
         if stage:
