@@ -150,6 +150,94 @@ class WanderStuckTest(unittest.TestCase):
         dot = new_dir[0] * 1.0
         self.assertTrue(dot <= 0.5 or dot == -1.0, f"heading not redirected: {new_dir}")
 
+    def test_wall_hug_triggers_near_boundary(self):
+        prim = _FakePrim("/W/wall")
+        wc = WanderController(
+            prims=[prim], bounds_center=(0.0, 0.0, 0.0), bounds_half=(10.0, 5.0, 10.0),
+            wall_margin=1.0, wall_frames=2,
+        )
+        # x=9.5 → +x 벽까지 거리 0.5 < margin 1.0
+        wc._world_position = lambda p: _FixedVec((9.5, 0.0, 0.0))
+        self.assertFalse(wc._check_wall_hug(prim, str(prim)))  # count=1
+        self.assertTrue(wc._check_wall_hug(prim, str(prim)))   # count=2 → trigger
+
+    def test_wall_hug_resets_in_open_space(self):
+        prim = _FakePrim("/W/open")
+        wc = WanderController(
+            prims=[prim], bounds_center=(0.0, 0.0, 0.0), bounds_half=(10.0, 5.0, 10.0),
+            wall_margin=1.0, wall_frames=2,
+        )
+        wc._world_position = lambda p: _FixedVec((0.0, 0.0, 0.0))  # 중앙, 벽에서 멀다
+        self.assertFalse(wc._check_wall_hug(prim, str(prim)))
+        self.assertEqual(wc._wall_count[str(prim)], 0)
+
+    def test_wall_hug_disabled_without_bounds(self):
+        prim = _FakePrim("/W/nb")
+        wc = WanderController(prims=[prim])  # bounds 미전달
+        wc._world_position = lambda p: _FixedVec((100.0, 0.0, 0.0))
+        self.assertFalse(wc._check_wall_hug(prim, str(prim)))
+
+    def test_heading_to_center_points_inward(self):
+        prim = _FakePrim("/W/h")
+        wc = WanderController(prims=[prim], bounds_center=(0.0, 0.0, 0.0), bounds_half=(10.0, 5.0, 10.0))
+        wc._world_position = lambda p: _FixedVec((9.0, 0.0, 0.0))  # +x 벽 근처
+        for _ in range(50):
+            h = wc._heading_to_center(prim)
+            # 중앙(원점)은 -x 방향 → x 성분은 항상 음수(±35° jitter 안에서도)
+            self.assertLess(h[0], 0.0, f"heading not inward: {h}")
+
+
+class ObjectCollisionTest(unittest.TestCase):
+    def _wc(self, posmap, **kw):
+        prims = [_FakePrim(p) for p in posmap]
+        wc = WanderController(prims=prims, collision_distance=kw.pop("collision_distance", 1.0), **kw)
+        wc._world_position = lambda p: _FixedVec(posmap[str(p)])
+        return wc, prims
+
+    def test_pairwise_collision_pauses_and_redirects_both(self):
+        events = []
+        wc, _ = self._wc(
+            {"/W/a": (0.0, 0.0, 0.0), "/W/b": (0.5, 0.0, 0.0)},  # 0.5 < 1.0 → 충돌
+            on_collision=lambda *a: events.append(a),
+        )
+        wc._handle_object_collisions(100.0)
+        self.assertIn("/W/a", wc._paused_until)
+        self.assertIn("/W/b", wc._paused_until)
+        # 서로 반대 방향(a는 -x, b는 +x)으로 재출발
+        self.assertLess(wc._redirect_heading["/W/a"][0], 0.0)
+        self.assertGreater(wc._redirect_heading["/W/b"][0], 0.0)
+        self.assertEqual(len(events), 2)
+
+    def test_far_apart_no_collision(self):
+        wc, _ = self._wc({"/W/a": (0.0, 0.0, 0.0), "/W/b": (5.0, 0.0, 0.0)})
+        wc._handle_object_collisions(100.0)
+        self.assertEqual(wc._paused_until, {})
+
+    def test_collision_disabled_when_distance_zero(self):
+        wc, _ = self._wc({"/W/a": (0.0, 0.0, 0.0), "/W/b": (0.1, 0.0, 0.0)}, collision_distance=0.0)
+        wc._handle_object_collisions(100.0)
+        self.assertEqual(wc._paused_until, {})
+
+    def test_no_retrigger_during_post_pause_cooldown(self):
+        # pause가 끝나도 cooldown 동안은 재발동 금지 → 서로 멀어질 시간 확보(무한 정지 방지).
+        wc, _ = self._wc(
+            {"/W/a": (0.0, 0.0, 0.0), "/W/b": (0.5, 0.0, 0.0)},
+            collision_cooldown_s=1.0, collision_impact_s=0.0, collision_pause_s=0.5,
+        )
+        wc._handle_object_collisions(100.0)             # 최초 충돌: pause_until=100.5
+        wc._redirect_heading.clear()                    # 재발동 감지용 초기화
+        wc._handle_object_collisions(100.6)             # pause 끝났지만 guard=101.5 → 재발동 X
+        self.assertEqual(wc._redirect_heading, {})
+        wc._handle_object_collisions(101.6)             # cooldown 경과 + 여전히 근접 → 재발동 O
+        self.assertIn("/W/a", wc._redirect_heading)
+
+    def test_already_paused_pair_not_retriggered(self):
+        wc, _ = self._wc({"/W/a": (0.0, 0.0, 0.0), "/W/b": (0.5, 0.0, 0.0)})
+        wc._paused_until["/W/a"] = 200.0  # 아직 pause 중
+        wc._handle_object_collisions(100.0)
+        # b는 새로 pause되지 않아야 함 (a가 pause 중이므로 쌍 스킵)
+        self.assertNotIn("/W/b", wc._paused_until)
+
 
 class CollisionRecorderTest(unittest.TestCase):
     def test_writes_rows_with_objid_mapping(self):

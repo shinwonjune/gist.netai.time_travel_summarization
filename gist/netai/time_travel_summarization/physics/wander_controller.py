@@ -30,6 +30,13 @@ class WanderController:
         stuck_frames: int = 5,
         collision_cooldown_s: float = 0.5,
         on_collision=None,
+        bounds_center=None,
+        bounds_half=None,
+        wall_margin: float = 0.0,
+        wall_frames: int = 5,
+        collision_distance: float = 0.0,
+        collision_impact_s: float = 0.2,
+        collision_pause_s: float = 1.0,
     ):
         self._prims = list(prims)
         self._speed = float(speed)
@@ -37,6 +44,19 @@ class WanderController:
         self._stuck_frames = int(stuck_frames)
         self._collision_cooldown_s = max(0.0, float(collision_cooldown_s))
         self._on_collision = on_collision
+        # 경계(벽) 근접 탐지: 벽을 따라 미끄러지면 중앙으로 redirect.
+        self._bounds_center = tuple(float(v) for v in bounds_center) if bounds_center is not None else None
+        self._bounds_half = tuple(float(v) for v in bounds_half) if bounds_half is not None else None
+        self._wall_margin = max(0.0, float(wall_margin))
+        self._wall_frames = max(1, int(wall_frames))
+        self._wall_count: dict = {}
+        # 객체-객체 충돌: 중심 간 거리 < collision_distance면 충돌로 간주.
+        # 충돌 시 자연 반동을 잠깐 두고 정지한 뒤 서로 멀어지는 방향으로 재출발.
+        self._collision_distance = max(0.0, float(collision_distance))
+        self._collision_impact_s = max(0.0, float(collision_impact_s))
+        self._collision_pause_s = max(0.0, float(collision_pause_s))
+        self._paused_until: dict = {}
+        self._redirect_heading: dict = {}
 
         if velocity_mode not in self._VELOCITY_MODES:
             self._log_warn(f"[Wander] invalid velocity_mode: {velocity_mode}")
@@ -130,23 +150,49 @@ class WanderController:
 
         now = time.time()
         self._initialize_directions()
+        self._handle_object_collisions(now)
         for prim in self._valid_prims():
             prim_path = str(prim.GetPath())
+
+            # 충돌 직후: 앞 impact 구간은 PhysX 반동(restitution) 그대로 두어 자연스럽게
+            # 튕기고, 뒤 pause 구간은 완전 정지.
+            paused_until = self._paused_until.get(prim_path, 0.0)
+            if now < paused_until:
+                if (paused_until - now) <= self._collision_pause_s:
+                    self._set_all_motion_zero(prim)
+                continue
+
+            # pause 종료 직후: 멀어지는 방향으로 재출발.
+            heading = self._redirect_heading.pop(prim_path, None)
+            if heading is not None:
+                self._direction[prim_path] = heading
+                self._apply_current_velocity(prim, prim_path)
+
             if self._velocity_mode in ("per_tick", "horizontal_per_tick"):
                 self._apply_current_velocity(prim, prim_path)
             if self._check_stuck(prim, prim_path, now):
                 self._redirect(prim, prim_path, kind="stuck")
+            elif self._check_wall_hug(prim, prim_path):
+                self._redirect(prim, prim_path, kind="wall", new_direction=self._heading_to_center(prim))
 
-    def _redirect(self, prim, prim_path: str, kind: str) -> None:
-        """Pick a new heading away from the blocking direction and record the hit."""
+    def _redirect(self, prim, prim_path: str, kind: str, new_direction=None) -> None:
+        """Pick a new heading and record the hit.
+
+        ``new_direction`` lets callers steer (e.g. toward the box center for
+        wall-hugging); otherwise a random heading away from the block is chosen.
+        """
         now = time.time()
         if now - self._last_collision_time.get(prim_path, 0.0) < self._collision_cooldown_s:
             return
         self._last_collision_time[prim_path] = now
 
-        avoid = self._last_blocked_direction.get(prim_path)
-        self._direction[prim_path] = self._random_horizontal_direction(prim.GetStage(), avoid_dir=avoid)
+        if new_direction is not None:
+            self._direction[prim_path] = new_direction
+        else:
+            avoid = self._last_blocked_direction.get(prim_path)
+            self._direction[prim_path] = self._random_horizontal_direction(prim.GetStage(), avoid_dir=avoid)
         self._stuck_count[prim_path] = 0
+        self._wall_count[prim_path] = 0
         self._last_position.pop(prim_path, None)
         self._last_tick_time.pop(prim_path, None)
         self._stuck_logged.discard(prim_path)
@@ -241,6 +287,118 @@ class WanderController:
                 self._last_blocked_direction[prim_path] = direction
             return True
         return False
+
+    # ---- object-object collision ----------------------------------------
+
+    def _horizontal_axes(self, stage):
+        return (0, 2) if self._is_y_up(stage) else (0, 1)
+
+    def _handle_object_collisions(self, now: float) -> None:
+        """Pairwise proximity check: when two managed prims overlap, bump them.
+
+        Contact reports are unreliable in this Kit build, so we detect
+        object-object collisions by center distance using known positions.
+        """
+        if self._collision_distance <= 0.0:
+            return
+        prims = list(self._valid_prims())
+        if len(prims) < 2:
+            return
+        a, b = self._horizontal_axes(prims[0].GetStage())
+        entries = []
+        for prim in prims:
+            pos = self._world_position(prim)
+            if pos is not None:
+                entries.append((str(prim.GetPath()), prim, pos))
+        threshold_sq = self._collision_distance * self._collision_distance
+        for i in range(len(entries)):
+            for j in range(i + 1, len(entries)):
+                path_a, prim_a, pos_a = entries[i]
+                path_b, prim_b, pos_b = entries[j]
+                # pause 종료 후 cooldown 동안은 재발동 금지.
+                # (안 그러면 아직 붙어있는 동안 매 틱 재pause되어 영원히 멈춤)
+                guard_a = self._paused_until.get(path_a, 0.0) + self._collision_cooldown_s
+                guard_b = self._paused_until.get(path_b, 0.0) + self._collision_cooldown_s
+                if now < guard_a or now < guard_b:
+                    continue
+                da = float(pos_a[a]) - float(pos_b[a])
+                db = float(pos_a[b]) - float(pos_b[b])
+                if da * da + db * db < threshold_sq:
+                    self._begin_object_collision(path_a, prim_a, pos_a, path_b, prim_b, pos_b, a, b, now)
+
+    def _begin_object_collision(self, path_a, prim_a, pos_a, path_b, prim_b, pos_b, a, b, now) -> None:
+        self._log_warn(f"[Wander] OBJECT-COLLISION {path_a} <-> {path_b}")
+        self._pause_and_redirect(path_a, prim_a, self._away_heading(pos_a, pos_b, a, b), now)
+        self._pause_and_redirect(path_b, prim_b, self._away_heading(pos_b, pos_a, a, b), now)
+
+    def _pause_and_redirect(self, prim_path, prim, heading, now) -> None:
+        """Stop the prim for a beat, then resume along ``heading`` (away from the hit)."""
+        self._last_collision_time[prim_path] = now
+        # 전체 정지 윈도우 = 반동(impact) + 멈춤(pause).
+        self._paused_until[prim_path] = now + self._collision_impact_s + self._collision_pause_s
+        self._redirect_heading[prim_path] = heading
+        self._stuck_count[prim_path] = 0
+        self._wall_count[prim_path] = 0
+        self._last_position.pop(prim_path, None)
+        self._last_tick_time.pop(prim_path, None)
+        self._stuck_logged.discard(prim_path)
+        self._emit_collision(prim, prim_path, "object")
+
+    def _away_heading(self, pos_self, pos_other, a, b, jitter_deg: float = 30.0):
+        """Horizontal unit heading pointing from ``pos_other`` toward ``pos_self``."""
+        da = float(pos_self[a]) - float(pos_other[a])
+        db = float(pos_self[b]) - float(pos_other[b])
+        if da * da + db * db <= 1e-12:
+            return self._random_horizontal_direction()
+        angle = math.atan2(db, da) + math.radians(random.uniform(-jitter_deg, jitter_deg))
+        vec = [0.0, 0.0, 0.0]
+        vec[a] = math.cos(angle)
+        vec[b] = math.sin(angle)
+        return tuple(vec)
+
+    # ---- wall-hug detection ---------------------------------------------
+
+    def _check_wall_hug(self, prim, prim_path: str) -> bool:
+        """True when the prim has hugged a boundary wall for ``wall_frames``.
+
+        Stuck detection misses shallow-angle wall slides (the body keeps making
+        progress along its heading while pinned to the wall). Here we instead
+        measure distance to the nearest wall using the known box bounds.
+        """
+        if self._bounds_center is None or self._bounds_half is None or self._wall_margin <= 0.0:
+            return False
+        pos = self._world_position(prim)
+        if pos is None:
+            return False
+        a, b = (0, 2) if self._is_y_up(prim.GetStage()) else (0, 1)
+        nearest = min(
+            self._bounds_half[a] - abs(float(pos[a]) - self._bounds_center[a]),
+            self._bounds_half[b] - abs(float(pos[b]) - self._bounds_center[b]),
+        )
+        if nearest < self._wall_margin:
+            self._wall_count[prim_path] = self._wall_count.get(prim_path, 0) + 1
+        else:
+            self._wall_count[prim_path] = 0
+        if self._wall_count.get(prim_path, 0) >= self._wall_frames:
+            self._log_warn(f"[Wander] WALL-HUG prim={prim_path} nearest={nearest:.2f} -> redirect to center")
+            return True
+        return False
+
+    def _heading_to_center(self, prim, jitter_deg: float = 35.0):
+        """Horizontal unit heading from the prim toward the box center, plus jitter."""
+        pos = self._world_position(prim)
+        if pos is None or self._bounds_center is None:
+            return self._random_horizontal_direction(prim.GetStage())
+        a, b = (0, 2) if self._is_y_up(prim.GetStage()) else (0, 1)
+        da = self._bounds_center[a] - float(pos[a])
+        db = self._bounds_center[b] - float(pos[b])
+        if da * da + db * db <= 1e-12:
+            return self._random_horizontal_direction(prim.GetStage())
+        angle = math.atan2(db, da) + math.radians(random.uniform(-jitter_deg, jitter_deg))
+        vec = [0.0, 0.0, 0.0]
+        vec[a] = math.cos(angle)
+        vec[b] = math.sin(angle)
+        return tuple(vec)
 
     # ---- heading ---------------------------------------------------------
 

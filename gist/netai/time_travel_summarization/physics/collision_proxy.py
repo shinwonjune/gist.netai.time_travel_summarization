@@ -226,7 +226,8 @@ def wrap_with_collision_proxy(
     # PhysxContactReportAPI: 이 Kit 버전에서 어디에 붙여도 startup PhysX abort 발생.
     # WanderController의 position-displacement stuck detection이 충돌 트리거를 cover.
     _bind_physics_material(stage, target_prim, proxy_prim, restitution)
-    return target_prim
+    # proxy_radius(스테이지 단위)를 함께 반환 → 호출부가 객체 간 충돌 거리 산정에 사용.
+    return target_prim, proxy_radius
 
 
 def unwrap(stage, target_prim) -> None:

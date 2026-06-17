@@ -32,7 +32,7 @@ class TimeTravelCore:
         self._stage_objects = StageObjectController()
         self._events = EventSummaryService(self._module_dir, self._repository)
         self._wander = None
-        self._wander_speed = 120.0
+        self._wander_speed = 240.0
         self._trace = None
         self._collisions = None
         self._stage_objects.ensure_summarization_camera()
@@ -597,6 +597,7 @@ class TimeTravelCore:
         create_bounding_box(stage, center=box_center, size=box_size)
 
         rigid_prims = []
+        proxy_radii = []
         for objid, prim_path in self._prim_map.items():
             prim = stage.GetPrimAtPath(prim_path)
             if not prim or not prim.IsValid():
@@ -615,11 +616,26 @@ class TimeTravelCore:
                 )
             except Exception as e:
                 carb.log_warn(f"[Physics] failed to log world_pos for objid={objid}: {e}")
-            rigid_prims.append(wrap_with_collision_proxy(stage, prim, shape="cylinder", visible=False))
+            wrapped, proxy_radius = wrap_with_collision_proxy(stage, prim, shape="cylinder", visible=False)
+            rigid_prims.append(wrapped)
+            proxy_radii.append(proxy_radius)
 
         # wander는 사용자가 Move 버튼으로 명시 시작. 여기서는 인스턴스만 생성.
+        # 벽 근접 탐지를 위해 박스 bounds 전달 (margin = 작은 수평 변의 5% → 벽에 더 붙은 뒤 회전).
+        bounds_half = (box_size[0] / 2.0, box_size[1] / 2.0, box_size[2] / 2.0)
+        horiz = (box_size[0], box_size[2]) if is_y_up else (box_size[0], box_size[1])
+        wall_margin = 0.05 * min(horiz)
+        # 객체 간 충돌 거리: 두 실린더가 닿는 중심 거리는 2r. 스치는 접촉까지 잡도록
+        # 2r에 약간의 여유를 둔 2.2r 사용(임의 상수 대신 실제 프록시 반지름에 묶음).
+        collision_distance = 2.2 * max(proxy_radii) if proxy_radii else 1.0 * m_to_units
         self._wander = WanderController(
-            rigid_prims, speed=self._wander_speed, on_collision=self._on_collision_event
+            rigid_prims,
+            speed=self._wander_speed,
+            on_collision=self._on_collision_event,
+            bounds_center=box_center,
+            bounds_half=bounds_half,
+            wall_margin=wall_margin,
+            collision_distance=collision_distance,
         )
 
         try:
