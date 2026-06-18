@@ -239,6 +239,26 @@ class ObjectCollisionTest(unittest.TestCase):
         self.assertNotIn("/W/b", wc._paused_until)
 
 
+    def test_use_contact_reports_defaults_true(self):
+        self.assertTrue(WanderController(prims=[])._use_contact_reports)
+        self.assertFalse(WanderController(prims=[], use_contact_reports=False)._use_contact_reports)
+
+    def test_contact_collision_pauses_and_redirects_both(self):
+        # contact report 경유 충돌도 거리 기반과 동일한 멈춤+분리를 내야 함.
+        events = []
+        wc, prims = self._wc(
+            {"/W/a": (0.0, 0.0, 0.0), "/W/b": (0.5, 0.0, 0.0)},
+            on_collision=lambda *a: events.append(a),
+        )
+        pa, pb = prims
+        wc._object_collision_from_contact(pa, "/W/a", pb, "/W/b", 100.0)
+        self.assertIn("/W/a", wc._paused_until)
+        self.assertIn("/W/b", wc._paused_until)
+        self.assertLess(wc._redirect_heading["/W/a"][0], 0.0)
+        self.assertGreater(wc._redirect_heading["/W/b"][0], 0.0)
+        self.assertEqual(len(events), 2)
+
+
 class CollisionRecorderTest(unittest.TestCase):
     def test_writes_rows_with_objid_mapping(self):
         with tempfile.TemporaryDirectory() as d:

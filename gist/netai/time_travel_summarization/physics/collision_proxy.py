@@ -223,8 +223,19 @@ def wrap_with_collision_proxy(
         physx_api.CreateLockedRotAxisAttr().Set(lock_rot_mask)
     except Exception as exc:
         carb.log_warn(f"[Physics] PhysxRigidBodyAPI damping/lock setup failed: {exc}")
-    # PhysxContactReportAPI: 이 Kit 버전에서 어디에 붙여도 startup PhysX abort 발생.
-    # WanderController의 position-displacement stuck detection이 충돌 트리거를 cover.
+    # PhysxContactReportAPI: rigid body prim에 적용해야 contact 콜백이 동작함.
+    # threshold=0 → 모든 접촉 보고. Kit 109+에서 abort 없음 확인됨.
+    try:
+        from pxr import PhysxSchema
+        contact_api = PhysxSchema.PhysxContactReportAPI.Apply(target_prim)
+        # threshold 메서드명이 Kit 버전마다 다름 → 있는 것만 0(=모두 보고) 설정.
+        for fn_name in ("CreateThresholdAttr", "CreatePhysxContactReportThresholdAttr"):
+            fn = getattr(contact_api, fn_name, None)
+            if fn is not None:
+                fn().Set(0)
+                break
+    except Exception as exc:
+        carb.log_warn(f"[Physics] PhysxContactReportAPI setup failed: {exc}")
     _bind_physics_material(stage, target_prim, proxy_prim, restitution)
     # proxy_radius(스테이지 단위)를 함께 반환 → 호출부가 객체 간 충돌 거리 산정에 사용.
     return target_prim, proxy_radius

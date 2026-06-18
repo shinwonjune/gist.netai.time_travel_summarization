@@ -37,6 +37,7 @@ class WanderController:
         collision_distance: float = 0.0,
         collision_impact_s: float = 0.2,
         collision_pause_s: float = 1.0,
+        use_contact_reports: bool = True,
     ):
         self._prims = list(prims)
         self._speed = float(speed)
@@ -57,6 +58,8 @@ class WanderController:
         self._collision_pause_s = max(0.0, float(collision_pause_s))
         self._paused_until: dict = {}
         self._redirect_heading: dict = {}
+        # 객체-객체 충돌 탐지원: True면 PhysX contact report, False면 거리 기반.
+        self._use_contact_reports = bool(use_contact_reports)
 
         if velocity_mode not in self._VELOCITY_MODES:
             self._log_warn(f"[Wander] invalid velocity_mode: {velocity_mode}")
@@ -119,7 +122,8 @@ class WanderController:
         self._active = True
         app = omni.kit.app.get_app()
         self._update_sub = app.get_update_event_stream().create_subscription_to_pop(self._on_update)
-        self._subscribe_contact_events()
+        if self._use_contact_reports:
+            self._subscribe_contact_events()
         self._initialize_directions(reset=True)
         for prim in self._valid_prims():
             self._set_kinematic(prim, False)
@@ -150,7 +154,9 @@ class WanderController:
 
         now = time.time()
         self._initialize_directions()
-        self._handle_object_collisions(now)
+        # contact report ON이면 객체충돌은 콜백이 처리 → 거리 기반은 OFF일 때만.
+        if not self._use_contact_reports:
+            self._handle_object_collisions(now)
         for prim in self._valid_prims():
             prim_path = str(prim.GetPath())
 
@@ -522,31 +528,45 @@ class WanderController:
         except Exception as exc:
             self._log_contact_warning(f"PhysX contact event subscription unavailable: {exc}")
 
-    def _on_contact_event(self, event) -> None:
-        for prim_path in self._contact_prim_paths(event):
-            prim = next((p for p in self._valid_prims() if str(p.GetPath()) == prim_path), None)
-            if prim is None:
+    def _on_contact_event(self, contact_headers, contact_data) -> None:
+        """subscribe_contact_report_events 콜백. 시그니처는 반드시 (headers, data) 2개.
+
+        두 관리 객체끼리의 접촉만 처리(멈춤+분리). 벽 충돌은 거리 기반 wall-hug가
+        '중앙으로 redirect'로 따로 처리하므로 여기선 무시.
+        """
+        from omni.physx.scripts.physicsUtils import PhysicsSchemaTools
+
+        managed = {str(p.GetPath()): p for p in self._valid_prims()}
+        now = time.time()
+        for header in contact_headers:
+            # CONTACT_LOST 등 데이터 없는 이벤트 스킵(구버전 crash 방어 겸용)
+            if header.num_contact_data == 0:
                 continue
-            if len(self._contact_log_paths) < 5:
-                self._contact_log_paths.add(prim_path)
-                self._log_warn(f"[Wander] CONTACT prim={prim_path}")
-            self._redirect(prim, prim_path, kind="contact")
+            try:
+                path_a = str(PhysicsSchemaTools.intToSdfPath(header.actor0))
+                path_b = str(PhysicsSchemaTools.intToSdfPath(header.actor1))
+            except Exception:
+                continue
+            prim_a = managed.get(path_a)
+            prim_b = managed.get(path_b)
+            if prim_a is not None and prim_b is not None:
+                self._object_collision_from_contact(prim_a, path_a, prim_b, path_b, now)
 
-    def _on_contact(self, contact_info) -> None:
-        self._on_contact_event(contact_info)
-
-    def _contact_prim_paths(self, event):
-        managed_paths = {str(prim.GetPath()) for prim in self._valid_prims()}
-        event_paths = set()
-        for attr_name in ("actor0", "actor1", "prim0", "prim1", "path0", "path1"):
-            value = getattr(event, attr_name, None)
-            if value:
-                event_paths.add(str(value))
-
-        event_text = str(event)
-        for prim_path in managed_paths:
-            if prim_path in event_paths or prim_path in event_text or prim_path.split("/")[-1] in event_text:
-                yield prim_path
+    def _object_collision_from_contact(self, prim_a, path_a, prim_b, path_b, now) -> None:
+        """contact report로 받은 객체 쌍 충돌 → 거리 기반과 동일한 멈춤+분리 로직 재사용."""
+        guard_a = self._paused_until.get(path_a, 0.0) + self._collision_cooldown_s
+        guard_b = self._paused_until.get(path_b, 0.0) + self._collision_cooldown_s
+        if now < guard_a or now < guard_b:
+            return
+        pos_a = self._world_position(prim_a)
+        pos_b = self._world_position(prim_b)
+        if pos_a is None or pos_b is None:
+            return
+        a, b = self._horizontal_axes(prim_a.GetStage())
+        if len(self._contact_log_paths) < 5:
+            self._contact_log_paths.add(path_a)
+            self._log_warn(f"[Wander] CONTACT(report) {path_a} <-> {path_b}")
+        self._begin_object_collision(path_a, prim_a, pos_a, path_b, prim_b, pos_b, a, b, now)
 
     # ---- logging ---------------------------------------------------------
 
