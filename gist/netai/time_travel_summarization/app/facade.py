@@ -554,7 +554,7 @@ class TimeTravelCore:
 
         meters_per_unit = UsdGeom.GetStageMetersPerUnit(stage) or 1.0
         m_to_units = 1.0 / meters_per_unit
-        carb.log_warn(f"[Physics] stage metersPerUnit={meters_per_unit} m_to_units={m_to_units}")
+        carb.log_info(f"[Physics] stage metersPerUnit={meters_per_unit} m_to_units={m_to_units}")
 
         # walls 위치·크기를 trajectory 좌표 범위 + margin으로 자동 결정
         # (hardcoded 5×3×5 / origin은 사용자 trajectory 범위와 안 맞을 수 있음)
@@ -564,7 +564,7 @@ class TimeTravelCore:
         min_height = 3.0 * m_to_units      # 최소 천장 높이 (m)
         if coord_range:
             mins, maxs = coord_range
-            carb.log_warn(f"[Physics] coord_range mins={mins} maxs={maxs}")
+            carb.log_info(f"[Physics] coord_range mins={mins} maxs={maxs}")
             cx = (mins[0] + maxs[0]) / 2.0
             cy = (mins[1] + maxs[1]) / 2.0
             cz = (mins[2] + maxs[2]) / 2.0
@@ -603,19 +603,6 @@ class TimeTravelCore:
             if not prim or not prim.IsValid():
                 carb.log_warn(f"[Physics] skip invalid prim: objid={objid} path={prim_path}")
                 continue
-            proxy_path = prim.GetPath().AppendChild("__phys_proxy__")
-            has_collision_proxy = bool(stage.GetPrimAtPath(proxy_path))
-            try:
-                xform_cache = UsdGeom.XformCache(0)
-                world_xform = xform_cache.GetLocalToWorldTransform(prim)
-                translate = world_xform.ExtractTranslation()
-                carb.log_warn(
-                    f"[Physics] wrap objid={objid} prim={prim_path} "
-                    f"world_pos=({translate[0]:.2f}, {translate[1]:.2f}, {translate[2]:.2f}) "
-                    f"has_collision_proxy={has_collision_proxy}"
-                )
-            except Exception as e:
-                carb.log_warn(f"[Physics] failed to log world_pos for objid={objid}: {e}")
             wrapped, proxy_radius = wrap_with_collision_proxy(stage, prim, shape="cylinder", visible=False)
             rigid_prims.append(wrapped)
             proxy_radii.append(proxy_radius)

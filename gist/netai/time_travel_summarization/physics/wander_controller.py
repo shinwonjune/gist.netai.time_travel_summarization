@@ -89,7 +89,7 @@ class WanderController:
             self._log_warn(f"[Wander] invalid velocity_mode: {mode}")
             return False
         self._velocity_mode = mode
-        self._log_warn(f"[Wander] velocity_mode set to {mode}")
+        self._log_info(f"[Wander] velocity_mode set to {mode}")
         return True
 
     def get_speed(self) -> float:
@@ -108,7 +108,7 @@ class WanderController:
         if self._active:
             for prim in self._valid_prims():
                 self._apply_current_velocity(prim, str(prim.GetPath()))
-        self._log_warn(f"[Wander] speed set to {self._speed:g} units/sec")
+        self._log_info(f"[Wander] speed set to {self._speed:g} units/sec")
         return True
 
     # ---- lifecycle -------------------------------------------------------
@@ -128,7 +128,7 @@ class WanderController:
         for prim in self._valid_prims():
             self._set_kinematic(prim, False)
             self._apply_current_velocity(prim, str(prim.GetPath()))
-        self._log_warn(f"[Wander] started (speed={self._speed:g} units/sec, mode={self._velocity_mode})")
+        self._log_info(f"[Wander] started (speed={self._speed:g} units/sec, mode={self._velocity_mode})")
 
     def stop(self) -> None:
         if not self._active:
@@ -141,7 +141,7 @@ class WanderController:
         for prim in self._valid_prims():
             self._set_kinematic(prim, False)
         self._last_velocity.clear()
-        self._log_warn("[Wander] stopped")
+        self._log_info("[Wander] stopped")
 
     def is_active(self) -> bool:
         return self._active
@@ -286,7 +286,7 @@ class WanderController:
         if self._stuck_count.get(prim_path, 0) >= self._stuck_frames:
             if prim_path not in self._stuck_logged:
                 self._stuck_logged.add(prim_path)
-                self._log_warn(
+                self._log_info(
                     f"[Wander] STUCK prim={prim_path} progress={progress:.2f}/{expected:.2f} dir={direction}"
                 )
             if direction is not None:
@@ -333,7 +333,7 @@ class WanderController:
                     self._begin_object_collision(path_a, prim_a, pos_a, path_b, prim_b, pos_b, a, b, now)
 
     def _begin_object_collision(self, path_a, prim_a, pos_a, path_b, prim_b, pos_b, a, b, now) -> None:
-        self._log_warn(f"[Wander] OBJECT-COLLISION {path_a} <-> {path_b}")
+        self._log_info(f"[Wander] OBJECT-COLLISION {path_a} <-> {path_b}")
         self._pause_and_redirect(path_a, prim_a, self._away_heading(pos_a, pos_b, a, b), now)
         self._pause_and_redirect(path_b, prim_b, self._away_heading(pos_b, pos_a, a, b), now)
 
@@ -386,7 +386,7 @@ class WanderController:
         else:
             self._wall_count[prim_path] = 0
         if self._wall_count.get(prim_path, 0) >= self._wall_frames:
-            self._log_warn(f"[Wander] WALL-HUG prim={prim_path} nearest={nearest:.2f} -> redirect to center")
+            self._log_info(f"[Wander] WALL-HUG prim={prim_path} nearest={nearest:.2f} -> redirect to center")
             return True
         return False
 
@@ -565,7 +565,7 @@ class WanderController:
         a, b = self._horizontal_axes(prim_a.GetStage())
         if len(self._contact_log_paths) < 5:
             self._contact_log_paths.add(path_a)
-            self._log_warn(f"[Wander] CONTACT(report) {path_a} <-> {path_b}")
+            self._log_info(f"[Wander] CONTACT(report) {path_a} <-> {path_b}")
         self._begin_object_collision(path_a, prim_a, pos_a, path_b, prim_b, pos_b, a, b, now)
 
     # ---- logging ---------------------------------------------------------
@@ -583,3 +583,12 @@ class WanderController:
             carb.log_warn(message)
         except Exception:
             print(message)
+
+    def _log_info(self, message: str) -> None:
+        """일상/이벤트 로그용 — info 레벨(기본 콘솔에 안 보임). carb 없으면 무시."""
+        try:
+            import carb
+
+            carb.log_info(message)
+        except Exception:
+            pass

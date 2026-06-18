@@ -91,13 +91,13 @@ def wrap_with_collision_proxy(
         sx = (col0[0] ** 2 + col0[1] ** 2 + col0[2] ** 2) ** 0.5
         sy = (col1[0] ** 2 + col1[1] ** 2 + col1[2] ** 2) ** 0.5
         sz = (col2[0] ** 2 + col2[1] ** 2 + col2[2] ** 2) ** 0.5
-        carb.log_warn(
+        carb.log_info(
             f"[Physics] prim transform diag for {target_prim.GetPath()}: "
             f"rot_axis=({rot_axis[0]:.3f}, {rot_axis[1]:.3f}, {rot_axis[2]:.3f}) "
             f"rot_angle_deg={rot_angle_deg:.2f} scale=({sx:.3f}, {sy:.3f}, {sz:.3f})"
         )
     except Exception as _diag_err:
-        carb.log_warn(f"[Physics] prim transform diag failed for {target_prim.GetPath()}: {_diag_err!r}")
+        carb.log_info(f"[Physics] prim transform diag failed for {target_prim.GetPath()}: {_diag_err!r}")
     bbox_valid = not range_.IsEmpty() and _is_finite_vec(bb_min) and _is_finite_vec(bb_max)
 
     proxy_radius = radius_units
@@ -132,7 +132,7 @@ def wrap_with_collision_proxy(
         else:
             local_translate = inv_xform.Transform(bb_center)
 
-    carb.log_warn(
+    carb.log_info(
         f"[Physics] proxy for {target_prim.GetPath()}: "
         f"prim_world_pos={tuple(prim_world_pos)} "
         f"bbox_size={tuple(bb_size)} bbox_center={tuple(bb_center)} "
