@@ -55,6 +55,15 @@ def parse_ts(s: str) -> datetime.datetime:
             return p(s)
         except ValueError:
             continue
+    # collisions CSV may be date-less (timefmt seconds/ms); anchor to today.
+    # Trace (high-rate reference) stays date-ful, so its rows hit the branch above.
+    # NOTE: assumes same-day analysis; cross-midnight collisions would need t0 anchoring.
+    for fmt in ("%H:%M:%S.%f", "%H:%M:%S"):
+        try:
+            t = datetime.datetime.strptime(s, fmt).time()
+            return datetime.datetime.combine(datetime.date.today(), t)
+        except ValueError:
+            continue
     raise ValueError(f"unparseable timestamp: {s!r}")
 
 

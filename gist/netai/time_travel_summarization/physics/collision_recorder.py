@@ -40,7 +40,9 @@ class CollisionRecorder:
         if self._writer is None:
             return
         objid = self._prim_to_objid.get(prim_path, prim_path)
-        timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
+        # 오버레이와 동일 형식(timefmt.PRECISION) → 추론(오버레이 읽기)↔라벨(CSV) 정합.
+        from ..timefmt import format_event_time
+        timestamp = format_event_time(datetime.datetime.now())
         x, y, z = position if position is not None else (0.0, 0.0, 0.0)
         self._writer.writerow([timestamp, objid, f"{x:.3f}", f"{y:.3f}", f"{z:.3f}", kind])
         self._row_count += 1

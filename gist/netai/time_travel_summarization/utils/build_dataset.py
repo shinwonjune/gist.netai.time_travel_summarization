@@ -42,12 +42,15 @@ from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
-# Reuse the EXACT inference prompts so training input == inference input.
+# Reuse the EXACT inference prompts so training input == inference input, and the
+# SHARED event-time format so CSV labels match the overlay the VLM reads.
 try:
     from vlm_client.prompts import PROMPTS
+    from timefmt import format_event_time, parse_event_time
 except ImportError:  # running as a loose script: add the extension root to path
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
     from vlm_client.prompts import PROMPTS
+    from timefmt import format_event_time, parse_event_time
 
 
 # --------------------------------------------------------------------------- #
@@ -123,16 +126,20 @@ def _label_for_objid(objid: str, objid_to_label: Dict[str, str]) -> str:
 
 
 def load_collisions(
-    csv_path: Path, kinds: set, objid_to_label: Dict[str, str]
+    csv_path: Path, kinds: set, objid_to_label: Dict[str, str], t0: datetime
 ) -> List[Tuple[datetime, str]]:
-    """Return [(wall_clock_dt, numeric_label)] for rows whose kind is in ``kinds``."""
+    """Return [(wall_clock_dt, numeric_label)] for rows whose kind is in ``kinds``.
+
+    Timestamps may be date-less (HH:MM:SS[.mmm]); ``t0`` (capture_start) anchors the
+    date so the offset math against the video timeline is correct.
+    """
     out: List[Tuple[datetime, str]] = []
     with open(csv_path, newline="", encoding="utf-8") as f:
         for row in csv.DictReader(f):
             if kinds and row.get("kind") not in kinds:
                 continue
             try:
-                dt = datetime.strptime(row["timestamp"], "%Y-%m-%d %H:%M:%S.%f")
+                dt = parse_event_time(row["timestamp"], t0)
             except (ValueError, KeyError):
                 continue
             out.append((dt, _label_for_objid(row["objid"], objid_to_label)))
@@ -161,7 +168,7 @@ def clip_targets(
         idx = int(offset // clip_sec)
         if idx >= n_clips:
             continue
-        sec = dt.strftime("%H:%M:%S")
+        sec = format_event_time(dt)  # 라벨 키 = 오버레이 형식(추론 출력과 동일)
         grouped.setdefault(idx, {}).setdefault(sec, set()).add(label)
 
     targets: Dict[int, list] = {}
@@ -214,7 +221,7 @@ def process_episode(
         if not csv_path.exists():
             csv_path = meta_path.parent / Path(csv_rel).name
         if csv_path.exists():
-            collisions = load_collisions(csv_path, set(args.kinds), objid_to_label)
+            collisions = load_collisions(csv_path, set(args.kinds), objid_to_label, t0)
         else:
             print(f"  ! collisions csv not found for {episode_id}: {csv_rel}")
 

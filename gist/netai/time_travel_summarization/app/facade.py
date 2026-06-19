@@ -342,6 +342,10 @@ class TimeTravelCore:
         self._capture_active = True
         self._capture_duration_s = effective_duration
         self._capture_output_path = output_path
+        # 충돌 기록 창 == 캡처 창: physics 모드면 캡처와 함께 recorder 시작(사이드카 전에
+        # 시작해야 collisions_csv 경로가 링크됨). → CSV 길이가 영상 길이와 일치.
+        if self._playback.get_mode() == "physics":
+            self._start_collision_recorder()
         # Sidecar links this video to its collision labels + an exact t0 so the
         # offline dataset builder can slice clips and assign labels deterministically.
         self._write_capture_sidecar(output_path, effective_duration)
@@ -456,12 +460,15 @@ class TimeTravelCore:
                     output_dir = self._module_dir / output_dir
                 output_dir.mkdir(parents=True, exist_ok=True)
                 output_path = str(output_dir / f"video_{ts}.mp4")
+        if self._playback.get_mode() == "physics":
+            self._start_collision_recorder()
         self._write_capture_sidecar(output_path, effective_duration)
         from pathlib import Path as _P
         from ..video_capture import CaptureRequest, RealtimeCaptureRunner
         output_uri = output_path if "://" in output_path else _P(output_path).resolve().as_uri()
         req = CaptureRequest(duration_s=effective_duration, output_uri=output_uri, label="headless_capture")
         res = RealtimeCaptureRunner(core=self).capture_headless(req)
+        self._stop_collision_recorder()  # 캡처 종료 == 충돌 기록 종료
         if not res.success:
             carb.log_warn(f"[Capture] headless FAILED: {res.error}")
             return None
@@ -519,6 +526,7 @@ class TimeTravelCore:
                 self._capture_active = False
                 self._capture_pipeline = None
                 self._capture_stop_event = None
+                self._stop_collision_recorder()  # 캡처 종료 == 충돌 기록 종료
 
         thread = threading.Thread(target=_worker, daemon=True)
         thread.start()
@@ -543,14 +551,16 @@ class TimeTravelCore:
         if not self._wander:
             carb.log_warn("[TimeTravel] start_wander: Physics mode is not active")
             return False
-        self._start_collision_recorder()
+        # 충돌 기록은 Capture가 소유(start_capture에서 시작) → 여기선 시작하지 않음.
+        # Move만 누르면 객체는 움직이지만 CSV는 안 남고, Capture를 눌러야 기록 시작.
         self._wander.start()
         return True
 
     def _on_collision_event(self, prim_path: str, position, kind: str) -> None:
         """WanderController callback: persist a collision as a ground-truth label."""
-        if self._collisions is not None:
-            self._collisions.record(prim_path, position, kind)
+        rec = self._collisions  # capture-thread가 None으로 바꾸는 경쟁 대비 로컬 참조
+        if rec is not None:
+            rec.record(prim_path, position, kind)
 
     def _start_collision_recorder(self) -> None:
         from datetime import datetime as _dt
@@ -604,7 +614,7 @@ class TimeTravelCore:
         if not self._wander:
             return False
         self._wander.stop()
-        self._stop_collision_recorder()
+        # recorder는 Capture가 소유 → 여기서 멈추지 않음(캡처 창과 분리되지 않게).
         return True
 
     def is_wandering(self) -> bool:
@@ -814,11 +824,14 @@ class TimeTravelCore:
         return self._playback.get_current_time()
 
     def get_stage_time_string(self) -> str:
+        # 오버레이 형식 = timefmt.PRECISION (collisions CSV와 공유 → 추론↔라벨 정합).
+        from ..timefmt import format_event_time
+
         if self._playback.get_mode() == "physics":
-            return datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
+            return format_event_time(datetime.datetime.now())
         current_time = self._playback.get_current_time()
         if current_time:
-            return current_time.strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
+            return format_event_time(current_time)
         return "No time set"
 
     def is_playing(self) -> bool:

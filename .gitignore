@@ -39,6 +39,7 @@ docs/
 .env
 ./docs/
 video/
+ultraplan/
 
 # --- Antigravity CLI & Agents tooling --------------------------------------
 .antigravitycli/
