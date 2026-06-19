@@ -187,6 +187,106 @@ def calculate_metrics(ground_truth: Dict[str, Set[int]],
     return precision, recall, f1, details
 
 
+def parse_pred_entries(value) -> List[Set[int]]:
+    """Parse one clip's model output into a list of {timestamp: set(ids)} entries.
+
+    Accepts either an already-parsed list (from test_gt.json / parsed predictions)
+    or a raw model string (optionally wrapped in a ```json code block).
+    Returns a list of (timestamp, set) handled by the caller; here we return the
+    raw list of dicts normalized to {ts: set}.
+    """
+    items = value
+    if isinstance(value, str):
+        text = value.strip()
+        m = re.search(r'```json\s*(\[.*?\])\s*```', text, re.DOTALL)
+        if m:
+            text = m.group(1)
+        if not (text.startswith('[') and text.endswith(']')):
+            return []
+        try:
+            items = json.loads(text)
+        except json.JSONDecodeError:
+            return []
+    out = []
+    for item in items or []:
+        if isinstance(item, dict):
+            out.append({ts: set(ids) for ts, ids in item.items()})
+    return out
+
+
+def _flatten_clip(entries: List[Dict[str, Set[int]]]) -> Dict[str, Set[int]]:
+    """Merge a clip's entries into {timestamp: set(ids)} (union on duplicate ts)."""
+    merged: Dict[str, Set[int]] = {}
+    for entry in entries:
+        for ts, ids in entry.items():
+            merged.setdefault(ts, set()).update(ids)
+    return merged
+
+
+def evaluate_clip_level(gt_path: str, pred_path: str) -> Dict:
+    """Clip-level evaluation: STRICT (exact id-set per HH:MM:SS) + RELAXED (binary).
+
+    gt_path:   test_gt.json  -> {clip: [{"HH:MM:SS": [ids]}, ...]}
+    pred_path: predictions   -> {clip: <model output: list or raw string>}
+
+    STRICT reuses calculate_metrics by namespacing timestamps with the clip id
+    ("clip|HH:MM:SS") so the exact same TP/FP/FN logic runs across all clips.
+    RELAXED scores each clip as collision-present (1) vs none (0).
+    """
+    with open(gt_path, encoding='utf-8') as f:
+        gt_raw = json.load(f)
+    with open(pred_path, encoding='utf-8') as f:
+        pred_raw = json.load(f)
+
+    gt_by_clip = {c: _flatten_clip(parse_pred_entries(v)) for c, v in gt_raw.items()}
+    pred_by_clip = {c: _flatten_clip(parse_pred_entries(v)) for c, v in pred_raw.items()}
+
+    # --- STRICT: namespaced timestamps, reuse calculate_metrics ---------------
+    gt_ns: Dict[str, Set[int]] = {}
+    pred_ns: Dict[str, List[Set[int]]] = {}
+    for clip in gt_by_clip:  # GT defines the clip universe
+        for ts, ids in gt_by_clip[clip].items():
+            gt_ns[f"{clip}|{ts}"] = ids
+        for ts, ids in pred_by_clip.get(clip, {}).items():
+            pred_ns.setdefault(f"{clip}|{ts}", []).append(ids)
+    precision, recall, f1, details = calculate_metrics(gt_ns, pred_ns)
+
+    # --- RELAXED: per-clip binary collision presence --------------------------
+    tp = fp = fn = tn = 0
+    for clip in gt_by_clip:
+        gt_pos = bool(gt_by_clip[clip])
+        pred_pos = bool(pred_by_clip.get(clip))
+        if gt_pos and pred_pos:
+            tp += 1
+        elif pred_pos and not gt_pos:
+            fp += 1
+        elif gt_pos and not pred_pos:
+            fn += 1
+        else:
+            tn += 1
+    r_prec = tp / (tp + fp) if (tp + fp) else 0.0
+    r_rec = tp / (tp + fn) if (tp + fn) else 0.0
+    r_f1 = 2 * r_prec * r_rec / (r_prec + r_rec) if (r_prec + r_rec) else 0.0
+    r_acc = (tp + tn) / (tp + fp + fn + tn) if (tp + fp + fn + tn) else 0.0
+
+    return {
+        'num_clips': len(gt_by_clip),
+        'metrics': {  # 'metrics' key kept for calculate_average_metrics.py compatibility
+            'precision': round(precision, 4),
+            'recall': round(recall, 4),
+            'f1_score': round(f1, 4),
+        },
+        'relaxed_metrics': {
+            'precision': round(r_prec, 4),
+            'recall': round(r_rec, 4),
+            'f1_score': round(r_f1, 4),
+            'accuracy': round(r_acc, 4),
+            'tp': tp, 'fp': fp, 'fn': fn, 'tn': tn,
+        },
+        'details': details,
+    }
+
+
 def print_comparison_report(precision: float, recall: float, f1: float, details: Dict):
     """비교 결과 리포트 출력"""
     print("=" * 80)
@@ -286,9 +386,40 @@ def main():
         default=None,
         help='특정 JSON 파일만 처리 (파일명만 입력, 예: video_19.json)'
     )
-    
+    # Clip-level evaluation (LoRA dataset): strict + relaxed metrics.
+    parser.add_argument('--clips-gt', type=str, default=None,
+                        help='test_gt.json 경로 (clip -> [{HH:MM:SS:[ids]}]).')
+    parser.add_argument('--clips-pred', type=str, default=None,
+                        help='예측 json 경로 (clip -> model output). --clips-gt와 함께 사용.')
+    parser.add_argument('--label', type=str, default='model',
+                        help='클립 평가 결과 파일 라벨 (예: base, lora).')
+
     args = parser.parse_args()
-    
+
+    # --- clip-level evaluation mode ------------------------------------------
+    if args.clips_gt:
+        if not args.clips_pred:
+            print("⚠️  --clips-gt 사용 시 --clips-pred 가 필요합니다.")
+            return
+        result = evaluate_clip_level(args.clips_gt, args.clips_pred)
+        m, r = result['metrics'], result['relaxed_metrics']
+        print("=" * 80)
+        print(f"클립 단위 평가 [{args.label}]  (clips={result['num_clips']})")
+        print("=" * 80)
+        print("STRICT  (HH:MM:SS별 객체ID 집합 완전일치):")
+        print(f"  P {m['precision']:.4f}  R {m['recall']:.4f}  F1 {m['f1_score']:.4f}")
+        print("RELAXED (클립당 충돌 유무 이진):")
+        print(f"  P {r['precision']:.4f}  R {r['recall']:.4f}  F1 {r['f1_score']:.4f}  "
+              f"Acc {r['accuracy']:.4f}  (tp{r['tp']} fp{r['fp']} fn{r['fn']} tn{r['tn']})")
+        print("=" * 80)
+        out_dir = Path(__file__).parent.parent / "compare_outputs"
+        out_dir.mkdir(exist_ok=True)
+        out_file = out_dir / f"clips_{args.label}__comparison_result.json"
+        result['source_file'] = f"{args.label} ({Path(args.clips_pred).name})"
+        out_file.write_text(json.dumps(result, indent=2, ensure_ascii=False), encoding='utf-8')
+        print(f"📁 결과 저장: {out_file}")
+        return
+
     # Ground truth 데이터 가져오기
     ground_truth_texts = get_ground_truth_texts()
     selected_gt_text = ground_truth_texts[args.ground_truth]

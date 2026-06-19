@@ -35,6 +35,9 @@ class TimeTravelCore:
         self._wander_speed = 240.0
         self._trace = None
         self._collisions = None
+        self._collision_distance = None
+        self._physics_bounds = None
+        self._prim_map_full = {}
         self._stage_objects.ensure_summarization_camera()
         self._capture_active: bool = False
         self._capture_start_time = None
@@ -339,6 +342,9 @@ class TimeTravelCore:
         self._capture_active = True
         self._capture_duration_s = effective_duration
         self._capture_output_path = output_path
+        # Sidecar links this video to its collision labels + an exact t0 so the
+        # offline dataset builder can slice clips and assign labels deterministically.
+        self._write_capture_sidecar(output_path, effective_duration)
         import threading
         import time as _time
         self._capture_stop_event = threading.Event()
@@ -346,6 +352,121 @@ class TimeTravelCore:
         self._start_capture_backend(output_path)
         carb.log_warn(f"[Capture] started duration={effective_duration:g}s output={output_path}")
         return True
+
+    def _write_capture_sidecar(self, output_path: str, duration_s: float) -> None:
+        """Write ``<video>.meta.json`` next to the captured video.
+
+        Records the capture-start wall-clock (t0, the anchor the offline builder
+        uses to map collision timestamps -> 2s clips), the active collisions CSV,
+        and the objid->numeric-label map (matching the overlay's drawn labels).
+        Best-effort: only for local file paths; never blocks the capture.
+        """
+        import json as _json
+        import re as _re
+
+        from ..video_capture import CaptureRequest
+
+        try:
+            if "://" in output_path:
+                # Remote/omniverse URIs: skip (builder runs on local artifacts).
+                carb.log_warn(f"[Capture] sidecar skipped for non-local path {output_path}")
+                return
+            meta_path = Path(output_path).with_suffix(".meta.json")
+            collisions_csv = (
+                str(self._collisions.output_path) if self._collisions is not None else None
+            )
+            # objid -> numeric label, same rule as the burned-in overlay labels.
+            objid_to_label = {}
+            for objid in self._prim_map.keys():
+                m = _re.search(r"(\d+)$", str(objid))
+                objid_to_label[str(objid)] = str(int(m.group(1))) if m else str(objid)
+            meta = {
+                "capture_start": datetime.datetime.now().isoformat(),
+                "duration_s": float(duration_s),
+                "fps": CaptureRequest.fps,
+                "width": CaptureRequest.width,
+                "height": CaptureRequest.height,
+                "mode": self.get_mode(),
+                "video": str(Path(output_path).name),
+                "collisions_csv": collisions_csv,
+                "collision_distance": getattr(self, "_collision_distance", None),
+                "objid_to_label": objid_to_label,
+            }
+            meta_path.parent.mkdir(parents=True, exist_ok=True)
+            with open(meta_path, "w", encoding="utf-8") as f:
+                _json.dump(meta, f, indent=2, ensure_ascii=False)
+            carb.log_warn(f"[Capture] sidecar -> {meta_path}")
+        except Exception as exc:
+            carb.log_warn(f"[Capture] sidecar write failed: {exc!r}")
+
+    def get_physics_bounds(self) -> Optional[dict]:
+        """Bounds computed at set_physics_mode: {center, size, is_y_up}. None if not set."""
+        return self._physics_bounds
+
+    def set_active_objects(self, objids) -> int:
+        """Restrict physics/capture to the given objids; hide the rest.
+
+        Call BEFORE set_physics_mode so only the active subset gets rigid bodies,
+        collision proxies, overlay labels and collision recording. Enables varying
+        the object count (4-6) per episode. Returns the active count.
+        """
+        if not self._prim_map_full:
+            self._prim_map_full = dict(self._prim_map)
+        want = {str(o) for o in objids}
+        new_map = {}
+        try:
+            import omni.usd
+            from pxr import UsdGeom
+            stage = omni.usd.get_context().get_stage()
+        except Exception:
+            stage = None
+        for objid, path in self._prim_map_full.items():
+            active = str(objid) in want
+            if stage is not None:
+                prim = stage.GetPrimAtPath(path)
+                if prim and prim.IsValid():
+                    img = UsdGeom.Imageable(prim)
+                    img.MakeVisible() if active else img.MakeInvisible()
+            if active:
+                new_map[objid] = path
+        self._prim_map = new_map
+        return len(new_map)
+
+    def run_capture_headless(self, duration_s: float = 0.0, output_path: Optional[str] = None) -> Optional[str]:
+        """Blocking offscreen capture for headless automation (no viewport).
+
+        Writes the same <video>.meta.json sidecar as start_capture, then runs the
+        render-product capture synchronously (it pumps the app so physics advances
+        and frames render). Returns the output path on success, else None.
+        """
+        effective_duration = float(duration_s) if duration_s > 0 else 60.0
+        if output_path is None:
+            from datetime import datetime as _dt
+            ts = _dt.now().strftime("%Y%m%dT%H%M%S")
+            video_output_uri = self.get_video_output_uri_for_active_mode()
+            if video_output_uri:
+                output_path = f"{video_output_uri.rstrip('/')}/video_{ts}.mp4"
+            else:
+                output_dir_str = (
+                    getattr(self._config, "video_output_dir", "artifacts/video")
+                    if self._config else "artifacts/video"
+                )
+                output_dir = Path(output_dir_str)
+                if not output_dir.is_absolute():
+                    output_dir = self._module_dir / output_dir
+                output_dir.mkdir(parents=True, exist_ok=True)
+                output_path = str(output_dir / f"video_{ts}.mp4")
+        self._write_capture_sidecar(output_path, effective_duration)
+        from pathlib import Path as _P
+        from ..video_capture import CaptureRequest, RealtimeCaptureRunner
+        output_uri = output_path if "://" in output_path else _P(output_path).resolve().as_uri()
+        req = CaptureRequest(duration_s=effective_duration, output_uri=output_uri, label="headless_capture")
+        res = RealtimeCaptureRunner(core=self).capture_headless(req)
+        if not res.success:
+            carb.log_warn(f"[Capture] headless FAILED: {res.error}")
+            return None
+        carb.log_warn(f"[Capture] headless done -> {res.output_uri}")
+        return output_path
 
     def stop_capture(self) -> Optional[str]:
         if not self._capture_active:
@@ -595,6 +716,12 @@ class TimeTravelCore:
 
         carb.log_info(f"[Physics] bounding box center={box_center} size={box_size} up_axis={'Y' if is_y_up else 'Z'}")
         create_bounding_box(stage, center=box_center, size=box_size)
+        # Persist bounds so automation can place objects at random in-bounds positions.
+        self._physics_bounds = {
+            "center": tuple(float(v) for v in box_center),
+            "size": tuple(float(v) for v in box_size),
+            "is_y_up": bool(is_y_up),
+        }
 
         rigid_prims = []
         proxy_radii = []
@@ -615,6 +742,9 @@ class TimeTravelCore:
         # 객체 간 충돌 거리: 두 실린더가 닿는 중심 거리는 2r. 스치는 접촉까지 잡도록
         # 2r에 약간의 여유를 둔 2.2r 사용(임의 상수 대신 실제 프록시 반지름에 묶음).
         collision_distance = 2.2 * max(proxy_radii) if proxy_radii else 1.0 * m_to_units
+        # Persist so the capture sidecar can record the exact contact distance,
+        # letting offline observability analysis replicate the contact condition.
+        self._collision_distance = collision_distance
         self._wander = WanderController(
             rigid_prims,
             speed=self._wander_speed,
@@ -675,9 +805,17 @@ class TimeTravelCore:
         return self._playback.get_current_time() or datetime.datetime.now()
 
     def get_simulation_time(self) -> Optional[datetime.datetime]:
+        # In physics (wander) mode the trajectory clock does not advance, so the
+        # overlay/timestamp would be static. Fall back to wall-clock, which is the
+        # SAME clock CollisionRecorder stamps events with -> the burned-in
+        # timestamp equals the collision label, enabling offline clip labeling.
+        if self._playback.get_mode() == "physics":
+            return datetime.datetime.now()
         return self._playback.get_current_time()
 
     def get_stage_time_string(self) -> str:
+        if self._playback.get_mode() == "physics":
+            return datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
         current_time = self._playback.get_current_time()
         if current_time:
             return current_time.strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]

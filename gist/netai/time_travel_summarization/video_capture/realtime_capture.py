@@ -555,3 +555,135 @@ class RealtimeCaptureRunner:
             except Exception as _e:
                 print(f"[A2] viewport 해상도 복원 실패: {_e!r}")
             shutil.rmtree(tmp_dir, ignore_errors=True)
+
+    def capture_headless(self, req: CaptureRequest, stop_event=None) -> CaptureResult:
+        """Offscreen capture for headless Kit (no active viewport).
+
+        Renders ``/World/summarization_camera`` via a Replicator render product and
+        reads frames from an LdrColor annotator. Runs SYNCHRONOUSLY on the calling
+        thread, pumping ``omni.kit.app`` once per frame so physics advances and the
+        frame renders. Reuses the same overlay (timestamp + projected ID labels via
+        a camera-path shim), encoder, and real-time pacing as ``capture()``.
+
+        NOTE: requires Kit + GPU + omni.replicator.core; verify on hardware.
+        """
+        import asyncio
+        try:
+            asyncio.get_event_loop()
+        except RuntimeError:
+            asyncio.set_event_loop(asyncio.new_event_loop())
+
+        start_wall = time.perf_counter()
+        metadata = {
+            "runner": "A2_headless_render_product",
+            "resolution": f"{req.width}x{req.height}",
+            "fps": req.fps,
+            "duration_s": req.duration_s,
+            "frame_clock": "headless_sync_app_pump",
+        }
+        tmp_dir = Path(tempfile.mkdtemp(prefix="ttsum_hl_"))
+        tmp_mp4 = tmp_dir / f"hl_{datetime.now().strftime('%Y%m%dT%H%M%S')}.mp4"
+        queue = FrameQueue(maxsize=32, drop_oldest=False)
+        encoder = FrameEncoder(tmp_mp4, req.width, req.height, req.fps)
+        camera_path = "/World/summarization_camera"
+        rp = None
+        annot = None
+        try:
+            import numpy as np
+            import omni.usd
+            import omni.kit.app
+            import omni.replicator.core as rep
+
+            stage = omni.usd.get_context().get_stage()
+            rp = rep.create.render_product(camera_path, (req.width, req.height))
+            annot = rep.AnnotatorRegistry.get_annotator("LdrColor")
+            annot.attach([rp])
+
+            # Shim exposing camera_path so the overlay's _get_camera_matrices works
+            # without a viewport (matrices come from the camera prim, not the viewport).
+            class _CamShim:
+                camera_path = "/World/summarization_camera"
+
+            composer = OverlayComposer(req.width, req.height, debug=DEBUG_OVERLAY_MARKERS)
+            provider = self._overlay_provider or (
+                self._default_provider_from_core(_CamShim(), stage) if self._core else None
+            )
+            encoder.start(queue)
+
+            app = omni.kit.app.get_app()
+            target_frames = int(req.duration_s * req.fps)
+            frame_interval = 1.0 / req.fps
+            next_due = time.perf_counter()
+            deadline = next_due + req.duration_s
+            pushed = 0
+            for seq in range(target_frames):
+                if stop_event is not None and stop_event.is_set():
+                    break
+                # advance simulation + render one frame
+                app.update()
+                rgba = None
+                try:
+                    arr = np.asarray(annot.get_data(), dtype=np.uint8)
+                    if arr.size:
+                        rgba = arr.tobytes()
+                except Exception as e:
+                    if seq == 0:
+                        print(f"[HL] annotator get_data failed: {e!r}")
+                if rgba is not None:
+                    overlay_snapshot = provider(req.width, req.height) if provider else None
+                    if overlay_snapshot is not None:
+                        try:
+                            rgba = composer.compose(rgba, overlay_snapshot)
+                        except Exception as e:
+                            if seq == 0:
+                                print(f"[HL] overlay compose failed: {e!r}; continuing")
+                    queue.push((seq, rgba, req.width, req.height))
+                    pushed += 1
+                now = time.perf_counter()
+                if now < next_due:
+                    time.sleep(min(0.05, next_due - now))
+                next_due += frame_interval
+                if time.perf_counter() >= deadline:
+                    break
+
+            queue.close()
+            encoder.join(timeout=30.0)
+            if encoder.error:
+                return CaptureResult(
+                    success=False, output_uri=req.output_uri,
+                    wall_clock_s=time.perf_counter() - start_wall, output_size_bytes=0,
+                    error=encoder.error, dropped_frames=queue.dropped, metadata=metadata,
+                )
+
+            from gist.netai.time_travel_summarization.storage import from_uri
+
+            adapter = from_uri(req.output_uri)
+            adapter.put_file(req.output_uri, tmp_mp4, content_type="video/mp4")
+            size = adapter.stat(req.output_uri).size
+            wall = time.perf_counter() - start_wall
+            metadata.update({"frames_written": encoder.frames_written, "frames_pushed": pushed})
+            return CaptureResult(
+                success=True, output_uri=req.output_uri, wall_clock_s=wall,
+                output_size_bytes=size, sim_fps_avg=encoder.frames_written / max(wall, 1e-9),
+                dropped_frames=queue.dropped, metadata=metadata,
+            )
+        except Exception as exc:
+            queue.close()
+            try:
+                encoder.join(timeout=5.0)
+            except Exception:
+                pass
+            return CaptureResult(
+                success=False, output_uri=req.output_uri,
+                wall_clock_s=time.perf_counter() - start_wall, output_size_bytes=0,
+                error=repr(exc), dropped_frames=queue.dropped, metadata=metadata,
+            )
+        finally:
+            try:
+                if annot is not None and rp is not None:
+                    annot.detach([rp])
+                if rp is not None:
+                    rp.destroy()
+            except Exception:
+                pass
+            shutil.rmtree(tmp_dir, ignore_errors=True)

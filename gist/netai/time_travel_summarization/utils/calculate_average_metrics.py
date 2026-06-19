@@ -54,6 +54,9 @@ def load_metrics_from_files(file_pattern: str) -> List[Dict[str, float]]:
             # 필요한 키가 있는지 확인
             required_keys = ['precision', 'recall', 'f1_score']
             if all(key in metrics for key in required_keys):
+                # carry relaxed (clip-level) metrics through if present
+                if 'relaxed_metrics' in data:
+                    metrics = {**metrics, 'relaxed_metrics': data['relaxed_metrics']}
                 metrics_list.append(metrics)
             else:
                 missing = [key for key in required_keys if key not in metrics]
@@ -85,13 +88,24 @@ def calculate_average_metrics(metrics_list: List[Dict[str, float]]) -> Dict[str,
     avg_precision = sum(m['precision'] for m in metrics_list) / n
     avg_recall = sum(m['recall'] for m in metrics_list) / n
     avg_f1 = sum(m['f1_score'] for m in metrics_list) / n
-    
-    return {
+
+    result = {
         'precision': avg_precision,
         'recall': avg_recall,
         'f1_score': avg_f1,
         'num_files': n
     }
+
+    # Average relaxed (binary collision-presence) metrics too, if every file has them.
+    relaxed = [m['relaxed_metrics'] for m in metrics_list if 'relaxed_metrics' in m]
+    if len(relaxed) == n:
+        result['relaxed_metrics'] = {
+            'precision': sum(r['precision'] for r in relaxed) / n,
+            'recall': sum(r['recall'] for r in relaxed) / n,
+            'f1_score': sum(r['f1_score'] for r in relaxed) / n,
+            'accuracy': sum(r.get('accuracy', 0.0) for r in relaxed) / n,
+        }
+    return result
 
 
 def print_results(avg_metrics: Dict[str, float], metrics_list: List[Dict[str, float]]):
@@ -108,6 +122,12 @@ def print_results(avg_metrics: Dict[str, float], metrics_list: List[Dict[str, fl
     print(f"Average Precision: {avg_metrics['precision']:.4f}")
     print(f"Average Recall:    {avg_metrics['recall']:.4f}")
     print(f"Average F1 Score:  {avg_metrics['f1_score']:.4f}")
+    if 'relaxed_metrics' in avg_metrics:
+        r = avg_metrics['relaxed_metrics']
+        print("-" * 60)
+        print("Relaxed (collision present/absent):")
+        print(f"  P {r['precision']:.4f}  R {r['recall']:.4f}  "
+              f"F1 {r['f1_score']:.4f}  Acc {r['accuracy']:.4f}")
     print("=" * 60)
     
     # 개별 파일 결과도 표시
@@ -133,6 +153,8 @@ def save_results(avg_metrics: Dict[str, float], metrics_list: List[Dict[str, flo
         'num_files': avg_metrics['num_files'],
         'individual_metrics': metrics_list
     }
+    if 'relaxed_metrics' in avg_metrics:
+        result['average_relaxed_metrics'] = avg_metrics['relaxed_metrics']
     
     with open(output_file, 'w', encoding='utf-8') as f:
         json.dump(result, f, indent=2, ensure_ascii=False)

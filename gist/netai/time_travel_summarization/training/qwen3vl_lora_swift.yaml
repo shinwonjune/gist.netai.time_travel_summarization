@@ -1,0 +1,48 @@
+# Declarative spec mirroring qwen3vl_lora_swift.sh (reviewable record of the run).
+# The .sh is the executable source of truth; this file documents the same settings
+# and the rationale lives in training/METHODOLOGY.md.
+
+model: Qwen/Qwen3-VL-8B-Instruct
+task: collision-event detection on 2s BEV clips (output [{"HH:MM:SS": [ids]}])
+
+dataset:
+  train: artifacts/dataset/train.jsonl     # ShareGPT, one 2s clip per sample
+  val:   artifacts/dataset/val.jsonl
+  test:  artifacts/dataset/test.jsonl      # held-out; evaluated, not trained
+  system_prompt: artifacts/dataset/system_prompt.txt   # identical to inference
+
+# Video frame budget — pinned to inference (VSS feeds a FIXED 20 frames / 2s chunk).
+video:
+  nframes: 20                 # env NFRAMES; train==infer frame count
+  video_max_pixels: 345600    # 720x480 native; lower first on OOM
+  size_factor: 28
+
+lora:
+  train_type: lora
+  rank: 16
+  alpha: 32
+  dropout: 0.05
+  target_modules: all-linear  # LLM + multimodal merger
+  freeze_vit: true            # vision encoder frozen (small data, save memory)
+
+optimization:
+  torch_dtype: bfloat16
+  num_train_epochs: 2         # small data -> few epochs; pick best by val
+  per_device_train_batch_size: 1
+  gradient_accumulation_steps: 16   # effective batch ~16
+  learning_rate: 1.0e-4
+  lr_scheduler_type: cosine
+  warmup_ratio: 0.05
+  gradient_checkpointing: true
+  seed: 42
+
+eval:
+  eval_strategy: epoch
+  save_strategy: epoch
+  save_total_limit: 2
+
+# OOM fallback: QLoRA (bnb 4-bit) — see commented block in qwen3vl_lora_swift.sh.
+qlora_fallback:
+  quant_method: bnb
+  quant_bits: 4
+  bnb_4bit_compute_dtype: bfloat16
