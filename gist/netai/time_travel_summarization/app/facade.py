@@ -664,6 +664,38 @@ class TimeTravelCore:
     def is_tracing(self) -> bool:
         return bool(self._trace and self._trace.active)
 
+    # 캡처 부하에서 sim이 실시간을 따라잡게 하는 설정(슬로모션·stuck 오발동 완화).
+    # minFrameRate를 낮추면 느린 프레임에서도 물리가 substep을 더 돌려 elapsed 시간을 따라잡음.
+    # 낮을수록 catch-up↑(=정확)·캡처 느려짐. 너무 낮으면 한 프레임에 과도한 substep 위험 → 5 정도.
+    _CAPTURE_MIN_FRAME_RATE = 5
+    _MIN_FRAME_RATE_KEY = "/persistent/simulation/minFrameRate"
+
+    def _lower_min_frame_rate(self) -> None:
+        try:
+            import carb.settings
+            s = carb.settings.get_settings()
+            self._saved_min_frame_rate = s.get(self._MIN_FRAME_RATE_KEY)
+            s.set(self._MIN_FRAME_RATE_KEY, int(self._CAPTURE_MIN_FRAME_RATE))
+            carb.log_warn(
+                f"[Physics] minFrameRate {self._saved_min_frame_rate} -> "
+                f"{s.get(self._MIN_FRAME_RATE_KEY)} (캡처 dilation 완화; playback 복귀 시 원복)"
+            )
+        except Exception as exc:
+            carb.log_warn(f"[Physics] minFrameRate 조정 실패: {exc}")
+
+    def _restore_min_frame_rate(self) -> None:
+        if getattr(self, "_saved_min_frame_rate", None) is None:
+            return
+        try:
+            import carb.settings
+            s = carb.settings.get_settings()
+            s.set(self._MIN_FRAME_RATE_KEY, self._saved_min_frame_rate)
+            carb.log_warn(f"[Physics] minFrameRate 원복 -> {s.get(self._MIN_FRAME_RATE_KEY)}")
+        except Exception as exc:
+            carb.log_warn(f"[Physics] minFrameRate 원복 실패: {exc}")
+        finally:
+            self._saved_min_frame_rate = None
+
     def set_physics_mode(self) -> None:
         """Enable PhysX-driven wandering for the configured astronaut prims."""
         import omni.usd
@@ -675,6 +707,7 @@ class TimeTravelCore:
         if not stage:
             carb.log_warn("[TimeTravel] Cannot enable Physics mode without an active stage")
             return
+        self._lower_min_frame_rate()
 
         if self._wander:
             self._wander.stop()
@@ -782,6 +815,7 @@ class TimeTravelCore:
             self._wander.stop()
             self._wander = None
         self._stop_collision_recorder()
+        self._restore_min_frame_rate()
 
         stage = omni.usd.get_context().get_stage()
         if stage:
