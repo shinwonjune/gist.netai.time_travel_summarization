@@ -141,6 +141,66 @@ def apply_positions(core, positions: Dict[str, Tuple[float, float, float]]) -> N
             UsdGeom.XformCommonAPI(prim).SetTranslate(Gf.Vec3d(float(xyz[0]), float(xyz[1]), float(xyz[2])))
 
 
+def _ensure_stage(core, stage_url: Optional[str] = None) -> None:
+    """Headless bootstrap: open the requested USD (또는 빈 스테이지) + BEV 카메라 재보장.
+
+    stage_url이 주어지면(로컬 경로 또는 omniverse:// Nucleus URL) 그 씬을 연다 —
+    GUI에서 쓰던 실제 씬으로 headless 촬영 가능. 없으면 빈 스테이지(바닥/벽은
+    set_physics_mode의 create_bounding_box가 생성). summarization 카메라는 확장
+    시작 시(스테이지 없음) 생성 실패했을 수 있어 재보장.
+    """
+    import omni.usd
+
+    ctx = omni.usd.get_context()
+    if stage_url:
+        ok = ctx.open_stage(stage_url)
+        if not ok:
+            raise RuntimeError(f"failed to open stage: {stage_url}")
+        print(f"[gen] opened stage: {stage_url}")
+        # 비동기 페이로드 로딩 완료까지 대기: 끝나기 전에 physics를 켜면 아직 콜라이더가
+        # 없는 바닥을 뚫고 무한낙하한다(실측 y=-16594; GUI는 로드 완료 후 조작하므로 정상).
+        import time as _time
+
+        import omni.kit.app
+        app = omni.kit.app.get_app()
+        deadline = _time.time() + 300.0
+        settled, loading = 0, None
+        while _time.time() < deadline:
+            app.update()
+            try:
+                _msg, _loaded, loading = ctx.get_stage_loading_status()
+            except Exception:
+                break
+            settled = settled + 1 if loading == 0 else 0
+            if settled >= 60:  # 로딩 0 상태가 60 update 연속 유지되면 완료로 간주
+                break
+        print(f"[gen] stage loading settled (loading={loading})")
+    elif ctx.get_stage() is None:
+        ctx.new_stage()
+        print("[gen] no active stage -> created a new empty stage")
+    so = getattr(core, "_stage_objects", None)
+    if so is not None and hasattr(so, "ensure_summarization_camera"):
+        so.ensure_summarization_camera()
+
+
+def _resolve_camera(camera: Optional[str]) -> Optional[str]:
+    """카메라 인자를 프림 경로로 해석. '/'로 시작하면 그대로, 아니면 이름으로 스테이지 검색."""
+    if not camera:
+        return None
+    if camera.startswith("/"):
+        return camera
+    import omni.usd
+
+    stage = omni.usd.get_context().get_stage()
+    if stage is not None:
+        for prim in stage.Traverse():
+            if prim.GetName() == camera and prim.GetTypeName() == "Camera":
+                path = str(prim.GetPath())
+                print(f"[gen] camera '{camera}' resolved -> {path}")
+                return path
+    raise RuntimeError(f"camera named {camera!r} not found in stage")
+
+
 def run(args, core=None) -> None:
     import omni.kit.app  # noqa: F401  (ensures Kit context)
 
@@ -148,14 +208,26 @@ def run(args, core=None) -> None:
     out_root = Path(args.out)
     out_root.mkdir(parents=True, exist_ok=True)
 
-    core.load_data()
-    if hasattr(core, "auto_generate_astronauts"):
+    _ensure_stage(core, getattr(args, "stage", None))
+    camera_path = _resolve_camera(getattr(args, "camera", None))
+    ok = core.load_data()
+    _repo = getattr(core, "_repository", None)
+    print(f"[gen] load_data={ok} err={getattr(core, '_last_data_load_error', '')!r} "
+          f"repo_start={getattr(_repo, 'data_start_time', None)}")
+    # GUI와 동일 경로: regenerate...는 repo를 보존하지만 auto_generate...는 내부에서
+    # clear_timetravel_objects()로 _repository까지 지워버린다(facade.py:978) →
+    # 좌표 데이터 소실 → 배치 no-op → 전원 (0,0,0) 겹침 폭발의 근원.
+    if hasattr(core, "regenerate_astronauts_from_loaded_data"):
+        core.regenerate_astronauts_from_loaded_data()
+    elif hasattr(core, "auto_generate_astronauts"):
         core.auto_generate_astronauts()
 
     # Bounds depend only on the trajectory range (constant) -> compute once.
     core.set_physics_mode()
     bounds = core.get_physics_bounds()
     core.set_playback_mode()
+    _repo = getattr(core, "_repository", None)
+    print(f"[gen] after playback_mode: repo_start={getattr(_repo, 'data_start_time', None)}")
     all_objids = list(getattr(core, "_prim_map_full", None) or getattr(core, "_prim_map", {}))
     if not all_objids:
         raise RuntimeError("no objects available (auto_generate failed?)")
@@ -167,14 +239,38 @@ def run(args, core=None) -> None:
     for cfg in cfgs:
         objids = pick_objids(all_objids, cfg.n_objects, cfg.seed)
         core.set_active_objects(objids)
-        apply_positions(core, random_positions(bounds, objids, cfg.seed))
+        if getattr(args, "keep_positions", False):
+            # GUI와 동일: 궤적 데이터 첫 시점 좌표로 벌려놓기. 이걸 안 하면 생성 직후
+            # 전원이 (0,0,0)에 완전히 겹친 채 physics가 켜져 PhysX 겹침해소 폭발로
+            # 벽을 관통해 낙하한다(실측: step30에 z 4->36, 이후 y -13789).
+            core.set_to_earliest_time()
+            # 배치 검증 로그: repository가 비었으면 위 호출이 조용히 no-op이 된다.
+            repo = getattr(core, "_repository", None)
+            start_t = getattr(repo, "data_start_time", None)
+            first_path = next(iter(getattr(core, "_prim_map", {}).values()), None)
+            pos = None
+            try:
+                import omni.usd
+                from pxr import UsdGeom
+                stage_now = omni.usd.get_context().get_stage()
+                prim = stage_now.GetPrimAtPath(first_path) if first_path else None
+                if prim and prim.IsValid():
+                    pos = tuple(round(v, 1) for v in
+                                UsdGeom.XformCache(0).GetLocalToWorldTransform(prim).ExtractTranslation())
+            except Exception:
+                pass
+            print(f"[gen] keep-positions: data_start={start_t} obj1@{pos}")
+        else:
+            apply_positions(core, random_positions(bounds, objids, cfg.seed))
         core.set_wander_speed(cfg.speed)
+        if hasattr(core, "set_wander_seed"):
+            core.set_wander_seed(cfg.seed)  # heading 재현성(페이싱 재현과 별개)
         core.set_physics_mode()
         trace_path = str((out_root / f"_trace_{cfg.idx:04d}.csv").resolve())
         video_path = str((out_root / f"_video_{cfg.idx:04d}.mp4").resolve())
         core.start_trace(trace_path)
         core.start_wander()
-        produced = core.run_capture_headless(cfg.duration, video_path)
+        produced = core.run_capture_headless(cfg.duration, video_path, camera_path=camera_path)
         core.stop_wander()
         core.stop_trace()
         core.set_playback_mode()
@@ -230,12 +326,28 @@ def main() -> None:
     ap.add_argument("--speed-min", type=float, default=200.0)
     ap.add_argument("--speed-max", type=float, default=300.0)
     ap.add_argument("--seed", type=int, default=42)
+    ap.add_argument("--stage", type=str, default=None,
+                    help="USD to open (local path or omniverse:// URL); default: new empty stage")
+    ap.add_argument("--camera", type=str, default=None,
+                    help="capture camera: prim path (/World/..) or prim name to search; "
+                         "default: /World/summarization_camera")
+    ap.add_argument("--keep-positions", action="store_true",
+                    help="skip random start positions; keep data-driven positions (GUI와 동일)")
+    ap.add_argument("--quit", action="store_true", help="quit Kit after finishing (batch/CI)")
     ap.add_argument("--self-test", action="store_true", help="run pure-helper tests without Kit")
     args = ap.parse_args()
     if args.self_test:
         _self_test()
         return
-    run(args)
+    try:
+        run(args)
+    finally:
+        if args.quit:
+            try:
+                import omni.kit.app
+                omni.kit.app.get_app().post_quit(0)
+            except Exception:
+                pass
 
 
 if __name__ == "__main__":

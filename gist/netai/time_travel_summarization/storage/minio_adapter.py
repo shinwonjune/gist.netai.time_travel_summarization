@@ -7,7 +7,9 @@ from urllib.parse import urlparse
 try:
     from minio import Minio
     from minio.error import S3Error
-except ImportError:  # pragma: no cover - exercised only when optional dependency is absent
+except Exception:  # pragma: no cover - optional dependency; import failure must never
+    # kill extension startup (실측: headless에서 pipapi 환경 PermissionError가
+    # ImportError가 아니어서 확장 전체가 죽음). minio는 사용 시점에 RuntimeError로 안내.
     Minio = None
     S3Error = None
 
