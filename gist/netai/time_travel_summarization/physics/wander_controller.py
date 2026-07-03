@@ -1,6 +1,5 @@
 import math
 import random
-import time
 from enum import Enum
 
 
@@ -38,9 +37,17 @@ class WanderController:
         collision_impact_s: float = 0.2,
         collision_pause_s: float = 1.0,
         use_contact_reports: bool = True,
+        seed=None,
     ):
         self._prims = list(prims)
         self._speed = float(speed)
+        # 에피소드 재현성: seed가 주어지면 heading 선택이 결정적이 됨.
+        self._rng = random.Random(seed)
+        # sim-time 마스터 클럭: wall-clock(time.time()) 대신 update 이벤트의 고정 dt를
+        # 누적해 사용. 렌더/캡처 부하로 루프가 느려져도 물리와 같은 시계를 보므로
+        # stuck 오탐(삼각형 진동)·pause 타이밍 왜곡이 사라진다. 단위: sim 초.
+        self._sim_now = 0.0
+        self._last_dt = 1.0 / 60.0
         self._stuck_ratio = float(stuck_ratio)
         self._stuck_frames = int(stuck_frames)
         self._collision_cooldown_s = max(0.0, float(collision_cooldown_s))
@@ -120,6 +127,11 @@ class WanderController:
         import omni.kit.app
 
         self._active = True
+        # 에피소드 시작마다 sim 클럭·충돌 상태 리셋 (seed 재현성 + 이전 run 잔재 제거)
+        self._sim_now = 0.0
+        self._paused_until.clear()
+        self._redirect_heading.clear()
+        self._last_collision_time.clear()
         app = omni.kit.app.get_app()
         self._update_sub = app.get_update_event_stream().create_subscription_to_pop(self._on_update)
         if self._use_contact_reports:
@@ -152,7 +164,15 @@ class WanderController:
         if not self._active:
             return
 
-        now = time.time()
+        # 고정 sim-dt 누적(fixed timestepping이면 payload dt == 고정값). wall-clock 금지.
+        try:
+            dt = float(event.payload["dt"])
+        except Exception:
+            dt = self._last_dt
+        if dt > 0.0:
+            self._last_dt = dt
+            self._sim_now += dt
+        now = self._sim_now
         self._initialize_directions()
         # contact report ON이면 객체충돌은 콜백이 처리 → 거리 기반은 OFF일 때만.
         if not self._use_contact_reports:
@@ -187,8 +207,10 @@ class WanderController:
         ``new_direction`` lets callers steer (e.g. toward the box center for
         wall-hugging); otherwise a random heading away from the block is chosen.
         """
-        now = time.time()
-        if now - self._last_collision_time.get(prim_path, 0.0) < self._collision_cooldown_s:
+        now = self._sim_now
+        # 기본값 -inf: sim 클럭은 0에서 시작하므로 0.0 기본값이면 첫 cooldown 구간의
+        # 정당한 첫 충돌까지 억제된다.
+        if now - self._last_collision_time.get(prim_path, float("-inf")) < self._collision_cooldown_s:
             return
         self._last_collision_time[prim_path] = now
 
@@ -266,7 +288,11 @@ class WanderController:
         self._last_tick_time[prim_path] = now
         if last_pos is None or last_t is None:
             return False
-        dt = max(min(now - last_t, 0.1), 1.0 / 240.0)
+        # now/last_t 모두 sim-time → dt는 실제 물리 전진량과 동일 구간.
+        # (wall-clock이던 시절의 캡처 부하 false-stuck 원인 제거)
+        dt = now - last_t
+        if dt <= 0.0:
+            return False
         expected = self._speed * dt
         if expected <= 0.0:
             return False
@@ -323,8 +349,8 @@ class WanderController:
                 path_b, prim_b, pos_b = entries[j]
                 # pause 종료 후 cooldown 동안은 재발동 금지.
                 # (안 그러면 아직 붙어있는 동안 매 틱 재pause되어 영원히 멈춤)
-                guard_a = self._paused_until.get(path_a, 0.0) + self._collision_cooldown_s
-                guard_b = self._paused_until.get(path_b, 0.0) + self._collision_cooldown_s
+                guard_a = self._paused_until.get(path_a, float("-inf")) + self._collision_cooldown_s
+                guard_b = self._paused_until.get(path_b, float("-inf")) + self._collision_cooldown_s
                 if now < guard_a or now < guard_b:
                     continue
                 da = float(pos_a[a]) - float(pos_b[a])
@@ -356,7 +382,7 @@ class WanderController:
         db = float(pos_self[b]) - float(pos_other[b])
         if da * da + db * db <= 1e-12:
             return self._random_horizontal_direction()
-        angle = math.atan2(db, da) + math.radians(random.uniform(-jitter_deg, jitter_deg))
+        angle = math.atan2(db, da) + math.radians(self._rng.uniform(-jitter_deg, jitter_deg))
         vec = [0.0, 0.0, 0.0]
         vec[a] = math.cos(angle)
         vec[b] = math.sin(angle)
@@ -400,7 +426,7 @@ class WanderController:
         db = self._bounds_center[b] - float(pos[b])
         if da * da + db * db <= 1e-12:
             return self._random_horizontal_direction(prim.GetStage())
-        angle = math.atan2(db, da) + math.radians(random.uniform(-jitter_deg, jitter_deg))
+        angle = math.atan2(db, da) + math.radians(self._rng.uniform(-jitter_deg, jitter_deg))
         vec = [0.0, 0.0, 0.0]
         vec[a] = math.cos(angle)
         vec[b] = math.sin(angle)
@@ -417,7 +443,7 @@ class WanderController:
     def _random_horizontal_direction(self, stage=None, avoid_dir=None) -> tuple:
         is_y_up = self._is_y_up(stage)
         for _ in range(5):
-            angle = random.uniform(0.0, 2.0 * math.pi)
+            angle = self._rng.uniform(0.0, 2.0 * math.pi)
             a, b = math.cos(angle), math.sin(angle)
             cand = (a, 0.0, b) if is_y_up else (a, b, 0.0)
             if avoid_dir is None:
@@ -537,7 +563,7 @@ class WanderController:
         from omni.physx.scripts.physicsUtils import PhysicsSchemaTools
 
         managed = {str(p.GetPath()): p for p in self._valid_prims()}
-        now = time.time()
+        now = self._sim_now
         for header in contact_headers:
             # CONTACT_LOST 등 데이터 없는 이벤트 스킵(구버전 crash 방어 겸용)
             if header.num_contact_data == 0:
@@ -554,8 +580,8 @@ class WanderController:
 
     def _object_collision_from_contact(self, prim_a, path_a, prim_b, path_b, now) -> None:
         """contact report로 받은 객체 쌍 충돌 → 거리 기반과 동일한 멈춤+분리 로직 재사용."""
-        guard_a = self._paused_until.get(path_a, 0.0) + self._collision_cooldown_s
-        guard_b = self._paused_until.get(path_b, 0.0) + self._collision_cooldown_s
+        guard_a = self._paused_until.get(path_a, float("-inf")) + self._collision_cooldown_s
+        guard_b = self._paused_until.get(path_b, float("-inf")) + self._collision_cooldown_s
         if now < guard_a or now < guard_b:
             return
         pos_a = self._world_position(prim_a)

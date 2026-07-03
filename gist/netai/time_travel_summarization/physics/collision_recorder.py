@@ -35,14 +35,19 @@ class CollisionRecorder:
         self._writer.writerow(["timestamp", "objid", "x", "y", "z", "kind"])
         self._row_count = 0
 
-    def record(self, prim_path: str, position, kind: str) -> None:
-        """Write one collision event. Safe to call before start() (no-op)."""
+    def record(self, prim_path: str, position, kind: str, when=None) -> None:
+        """Write one collision event. Safe to call before start() (no-op).
+
+        ``when``: 이벤트 시각(datetime). 캡처 중에는 sim-time 클럭
+        (capture_start + sim 경과)을 넘겨 프레임·오버레이와 같은 시계로 스탬프한다.
+        미지정 시 wall-clock 폴백(비캡처 프리뷰용).
+        """
         if self._writer is None:
             return
         objid = self._prim_to_objid.get(prim_path, prim_path)
         # 오버레이와 동일 형식(timefmt.PRECISION) → 추론(오버레이 읽기)↔라벨(CSV) 정합.
         from ..timefmt import format_event_time
-        timestamp = format_event_time(datetime.datetime.now())
+        timestamp = format_event_time(when if when is not None else datetime.datetime.now())
         x, y, z = position if position is not None else (0.0, 0.0, 0.0)
         self._writer.writerow([timestamp, objid, f"{x:.3f}", f"{y:.3f}", f"{z:.3f}", kind])
         self._row_count += 1
