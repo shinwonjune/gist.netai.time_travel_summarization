@@ -188,6 +188,43 @@ def _project_world_to_pixel(world_xyz, view, proj, width: int, height: int):
     return (int(px), int(py))
 
 
+def _configure_deterministic_clock(stage, fps: float, duration_s: float) -> None:
+    """오프라인 결정론 캡처용 클럭 정합 (4.6).
+
+    headless 루프는 ``app.update()`` 1회 = 인코딩 프레임 1개 구조다. timeCodesPerSecond를
+    fps에 맞추고 fixed timestepping을 켜면 ``app.update()`` 1회 = 1/fps sim 전진 = 프레임 1개가
+    되어, 렌더 부하와 무관하게 프레임당 동일한 물리 전진이 보장된다(슬로모션·드리프트 제거,
+    재현성 확보). 물리 substep 레이트(timeStepsPerSecond)는 physics scene에서 별도 60Hz로
+    두어 정확도를 유지한다.
+
+    타임라인 재생 구간도 명시한다: headless의 새 빈 스테이지는 end time이 사실상 0이라
+    한 프레임 전진 후 루프로 되감겨 물리가 멈춘다(프로브 ratio_t: 1.0 → 0 → -1.0 패턴).
+    start=0, end=duration+여유, looping off, play 재보장으로 캡처 내내 전진을 보장.
+    """
+    try:
+        if stage is not None:
+            stage.SetTimeCodesPerSecond(float(fps))
+    except Exception as e:
+        print(f"[HL] set timeCodesPerSecond({fps}) failed: {e!r}")
+    try:
+        import omni.timeline
+        tl = omni.timeline.get_timeline_interface()
+        if hasattr(tl, "set_time_codes_per_second"):
+            tl.set_time_codes_per_second(float(fps))
+        tl.set_start_time(0.0)
+        tl.set_end_time(float(duration_s) + 3600.0)
+        if hasattr(tl, "set_looping"):
+            tl.set_looping(False)
+        tl.play()
+    except Exception as e:
+        print(f"[HL] timeline range/play setup failed: {e!r}")
+    try:
+        import carb.settings
+        carb.settings.get_settings().set("/app/player/useFixedTimeStepping", True)
+    except Exception as e:
+        print(f"[HL] useFixedTimeStepping set failed: {e!r}")
+
+
 class RealtimeCaptureRunner:
     def __init__(
         self,
@@ -556,7 +593,8 @@ class RealtimeCaptureRunner:
                 print(f"[A2] viewport 해상도 복원 실패: {_e!r}")
             shutil.rmtree(tmp_dir, ignore_errors=True)
 
-    def capture_headless(self, req: CaptureRequest, stop_event=None) -> CaptureResult:
+    def capture_headless(self, req: CaptureRequest, stop_event=None,
+                         camera_path: Optional[str] = None) -> CaptureResult:
         """Offscreen capture for headless Kit (no active viewport).
 
         Renders ``/World/summarization_camera`` via a Replicator render product and
@@ -585,7 +623,7 @@ class RealtimeCaptureRunner:
         tmp_mp4 = tmp_dir / f"hl_{datetime.now().strftime('%Y%m%dT%H%M%S')}.mp4"
         queue = FrameQueue(maxsize=32, drop_oldest=False)
         encoder = FrameEncoder(tmp_mp4, req.width, req.height, req.fps)
-        camera_path = "/World/summarization_camera"
+        camera_path = camera_path or "/World/summarization_camera"
         rp = None
         annot = None
         try:
@@ -595,14 +633,22 @@ class RealtimeCaptureRunner:
             import omni.replicator.core as rep
 
             stage = omni.usd.get_context().get_stage()
+            # replicator가 자체 스케줄링으로 timeline을 정지시키지 않게 (실측: render
+            # product 초기화 직후 timeline stop → ratio_t 1→0→-1 패턴으로 물리 정지).
+            try:
+                rep.orchestrator.set_capture_on_play(False)
+            except Exception:
+                pass
             rp = rep.create.render_product(camera_path, (req.width, req.height))
             annot = rep.AnnotatorRegistry.get_annotator("LdrColor")
             annot.attach([rp])
 
             # Shim exposing camera_path so the overlay's _get_camera_matrices works
             # without a viewport (matrices come from the camera prim, not the viewport).
+            _shim_camera_path = camera_path
+
             class _CamShim:
-                camera_path = "/World/summarization_camera"
+                camera_path = _shim_camera_path
 
             composer = OverlayComposer(req.width, req.height, debug=DEBUG_OVERLAY_MARKERS)
             provider = self._overlay_provider or (
@@ -611,16 +657,161 @@ class RealtimeCaptureRunner:
             encoder.start(queue)
 
             app = omni.kit.app.get_app()
+            # 결정론 클럭 정합: app.update() 1회 = 1/fps sim 전진 = 프레임 1개 (부하 무관).
+            # 실측(4070): 이 Kit의 고정 스텝은 1/60로 고정(timeCodesPerSecond로 안 바뀜)
+            # → 캡처 fps=60이 정합 조건. 저레이트 데이터셋은 build_dataset --content-hz로.
+            _configure_deterministic_clock(stage, req.fps, req.duration_s)
+
+            # 프레임 전진자: Replicator 2.x에서는 맨 app.update()로 annotator 데이터가
+            # 흐르지 않는다(실측: 60초 펌프에도 빈 배열, 이후 'not attached' 에러).
+            # 정석은 orchestrator.step(delta_time=1/fps) — sim을 정확히 delta_time 전진시키고
+            # 렌더+annotator 데이터 준비까지 동기로 보장(결정론적 오프라인 캡처의 표준 경로).
+            # 구버전 호환을 위해 시그니처를 단계적으로 폴백한다.
+            try:
+                import omni.timeline as _otl
+                _wtl = _otl.get_timeline_interface()
+            except Exception:
+                _wtl = None
+            _expected_dt_adv = 1.0 / req.fps
+
+            # Kit 내부에서는 동기 step() 금지(실측 OrchestratorError) → step_async 코루틴을
+            # 걸고 완료될 때까지 app.update()로 런루프를 펌프하는 표준 패턴 사용.
+            def _step_via_async(kwargs):
+                fut = asyncio.ensure_future(rep.orchestrator.step_async(**kwargs))
+                guard = time.perf_counter() + 30.0
+                while not fut.done() and time.perf_counter() < guard:
+                    app.update()
+                if not fut.done():
+                    fut.cancel()
+                    raise RuntimeError("step_async timeout (30s)")
+                exc = fut.exception()
+                if exc is not None:
+                    raise exc
+
+            _adv_state = {"mode": "discover", "kwargs": None}
+
+            def _advance():
+                if _adv_state["mode"] == "step_async":
+                    try:
+                        _step_via_async(_adv_state["kwargs"])
+                        return "step_async"
+                    except Exception as e:
+                        print(f"[HL] step_async failed mid-run: {e!r} -> app.update fallback")
+                        _adv_state["mode"] = "app_update"
+                elif _adv_state["mode"] == "discover":
+                    step_async = getattr(getattr(rep, "orchestrator", None), "step_async", None)
+                    if callable(step_async):
+                        # 버전별 시그니처 차이를 단계적으로 시도, 성공한 kwargs를 캐시.
+                        # pause_timeline=True 필수: False면 step의 delta_time 전진에 더해
+                        # 재생 중인 타임라인이 렌더 대기 update 동안 자유 전진 → 실측 2배속.
+                        for kw in ({"delta_time": _expected_dt_adv, "pause_timeline": True},
+                                   {"delta_time": _expected_dt_adv},
+                                   {}):
+                            try:
+                                _step_via_async(kw)
+                                _adv_state["mode"] = "step_async"
+                                _adv_state["kwargs"] = kw
+                                print(f"[HL] advance mode=step_async kwargs={kw}")
+                                return "step_async"
+                            except TypeError:
+                                continue
+                            except Exception as e:
+                                print(f"[HL] step_async{tuple(kw.items())} error: {e!r}")
+                                continue
+                    _adv_state["mode"] = "app_update"
+                    print("[HL] orchestrator.step_async unavailable -> app.update fallback")
+                if _wtl is not None and not _wtl.is_playing():
+                    _wtl.play()
+                app.update()
+                return "app_update"
+
+            # 워밍업: annotator가 실제 픽셀을 줄 때까지 전진(렌더러/그래프 초기화 소진).
+            # 실측: RTX 준비 전에 만든 render product는 무효가 되어(attach가 안 붙어
+            # 'not attached') 영원히 빈 데이터 → 감지 시 render product를 재생성한다.
+            cam_prim = stage.GetPrimAtPath(camera_path) if stage else None
+            print(f"[HL] camera {camera_path} valid={bool(cam_prim and cam_prim.IsValid())}")
+
+            def _recreate_rp():
+                nonlocal rp, annot
+                try:
+                    if annot is not None and rp is not None:
+                        annot.detach([rp])
+                except Exception:
+                    pass
+                try:
+                    if rp is not None:
+                        rp.destroy()
+                except Exception:
+                    pass
+                name = ("LdrColor", "rgb")[(_warm_count // 120) % 2]
+                rp = rep.create.render_product(camera_path, (req.width, req.height))
+                annot = rep.AnnotatorRegistry.get_annotator(name)
+                try:
+                    annot.attach([rp])
+                except TypeError:
+                    annot.attach(rp)
+                print(f"[HL] render product recreated (annotator={name}) at warmup #{_warm_count}")
+
+            _warm_deadline = time.perf_counter() + 60.0
+            _warm_count = 0
+            _adv_mode = None
+            while True:
+                _adv_mode = _advance()
+                _warm_count += 1
+                _not_attached = False
+                try:
+                    _warm_arr = np.asarray(annot.get_data(), dtype=np.uint8)
+                except Exception as e:
+                    if _warm_count == 1:
+                        print(f"[HL] warmup first get_data: {e!r}")
+                    _not_attached = "not attached" in str(e).lower()
+                    _warm_arr = np.zeros(0, dtype=np.uint8)
+                if _warm_arr.size:
+                    print(f"[HL] warmup done: {_warm_count} advances (mode={_adv_mode}) -> "
+                          f"{_warm_arr.size} bytes")
+                    break
+                if _not_attached and _warm_count % 120 == 0:
+                    try:
+                        _recreate_rp()
+                    except Exception as e:
+                        print(f"[HL] render product recreate failed: {e!r}")
+                if time.perf_counter() > _warm_deadline:
+                    print(f"[HL] warmup TIMEOUT after {_warm_count} advances (mode={_adv_mode}) — "
+                          f"annotator still empty; capture will likely produce no frames")
+                    break
+
             target_frames = int(req.duration_s * req.fps)
-            frame_interval = 1.0 / req.fps
-            next_due = time.perf_counter()
-            deadline = next_due + req.duration_s
             pushed = 0
+
+            # 프로브(첫 N프레임): 정합·비용을 실기로 판정.
+            #  ratio_t  = 타임라인 전진 / (1/fps)   → 1.0이면 클럭 정합
+            #  ratio_d  = 객체 최대 변위 / (speed × 1/fps) → 1.0이면 물리도 정속
+            #             (타임라인만 정합이고 물리가 substep을 못 돌면 여기서 <1로 검출)
+            #  upd/read/enc ms = 프레임당 비용 분해 → "몇 배 단축 가능한지" 실측 근거
+            _PROBE_FRAMES = 10
+            try:
+                import omni.timeline
+                _timeline = omni.timeline.get_timeline_interface()
+            except Exception:
+                _timeline = None
+            _expected_dt = 1.0 / req.fps
+            _speed = float(getattr(self._core, "_wander_speed", 0.0) or 0.0) if self._core else 0.0
+            _get_pos = getattr(self._core, "get_current_object_positions", None) if self._core else None
+            _prev_pos = None
+
             for seq in range(target_frames):
                 if stop_event is not None and stop_event.is_set():
                     break
-                # advance simulation + render one frame
-                app.update()
+                probing = seq < _PROBE_FRAMES
+                # 프레임의 sim 시각을 먼저 고정: 이 update 중의 충돌(in-step)과 직후
+                # 오버레이(post-step)가 같은 sim-time(seq/fps)으로 스탬프된다.
+                if self._core is not None and hasattr(self._core, "set_sim_time"):
+                    self._core.set_sim_time(seq * _expected_dt)
+                # advance simulation + render one frame (wall-clock 페이싱 없음, orchestrator 우선)
+                t_before = _timeline.get_current_time() if (probing and _timeline is not None) else None
+                _t0 = time.perf_counter()
+                _advance()
+                _t1 = time.perf_counter()
                 rgba = None
                 try:
                     arr = np.asarray(annot.get_data(), dtype=np.uint8)
@@ -629,6 +820,7 @@ class RealtimeCaptureRunner:
                 except Exception as e:
                     if seq == 0:
                         print(f"[HL] annotator get_data failed: {e!r}")
+                _t2 = time.perf_counter()
                 if rgba is not None:
                     overlay_snapshot = provider(req.width, req.height) if provider else None
                     if overlay_snapshot is not None:
@@ -639,12 +831,33 @@ class RealtimeCaptureRunner:
                                 print(f"[HL] overlay compose failed: {e!r}; continuing")
                     queue.push((seq, rgba, req.width, req.height))
                     pushed += 1
-                now = time.perf_counter()
-                if now < next_due:
-                    time.sleep(min(0.05, next_due - now))
-                next_due += frame_interval
-                if time.perf_counter() >= deadline:
-                    break
+                if probing:
+                    _t3 = time.perf_counter()
+                    ratio_t = None
+                    if _timeline is not None and t_before is not None:
+                        ratio_t = (_timeline.get_current_time() - t_before) / _expected_dt
+                    ratio_d = None
+                    if callable(_get_pos) and _speed > 0.0:
+                        try:
+                            cur = _get_pos()
+                            if cur and _prev_pos:
+                                disp = max(
+                                    (sum((float(cur[k][i]) - float(_prev_pos[k][i])) ** 2 for i in range(3)) ** 0.5
+                                     for k in cur.keys() & _prev_pos.keys()),
+                                    default=0.0,
+                                )
+                                ratio_d = disp / (_speed * _expected_dt)
+                            if cur:  # 빈 dict로 prev를 덮으면 이후 내내 n/a가 됨
+                                _prev_pos = cur
+                        except Exception:
+                            pass
+                    rt = f"{ratio_t:.2f}" if ratio_t is not None else "n/a"
+                    rd = f"{ratio_d:.2f}" if ratio_d is not None else "n/a"
+                    print(
+                        f"[HL probe] seq={seq} ratio_t={rt} ratio_d={rd}"
+                        f" upd={(_t1 - _t0) * 1000:.1f}ms read={(_t2 - _t1) * 1000:.1f}ms"
+                        f" enc={(_t3 - _t2) * 1000:.1f}ms"
+                    )
 
             queue.close()
             encoder.join(timeout=30.0)

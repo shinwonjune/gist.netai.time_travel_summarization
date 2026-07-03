@@ -44,7 +44,8 @@ class FrameEncoder:
             backend = self._select_backend()
             backend(self._queue)
         except Exception as exc:
-            self._error = repr(exc)
+            import traceback
+            self._error = f"{exc!r}\n{traceback.format_exc()}"
 
     def _select_backend(self):
         try:

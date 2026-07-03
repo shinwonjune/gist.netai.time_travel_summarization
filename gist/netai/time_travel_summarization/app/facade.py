@@ -44,6 +44,12 @@ class TimeTravelCore:
         self._capture_duration_s: float = 0.0
         self._capture_output_path = None
         self._capture_pipeline = None
+        # sim-time 마스터 클럭: headless 캡처가 프레임마다 set_sim_time(seq/fps)로 전진.
+        # 라벨 시각 = _capture_start_dt + _sim_time → 오버레이·CSV·클립 경계가 한 시계.
+        self._capture_start_dt = None
+        self._sim_time: float = 0.0
+        self._use_sim_clock: bool = False
+        self._wander_seed = None
 
     def load_config(self, config_path: str) -> bool:
         try:
@@ -348,6 +354,7 @@ class TimeTravelCore:
             self._start_collision_recorder()
         # Sidecar links this video to its collision labels + an exact t0 so the
         # offline dataset builder can slice clips and assign labels deterministically.
+        self._capture_start_dt = datetime.datetime.now()
         self._write_capture_sidecar(output_path, effective_duration)
         import threading
         import time as _time
@@ -357,7 +364,7 @@ class TimeTravelCore:
         carb.log_warn(f"[Capture] started duration={effective_duration:g}s output={output_path}")
         return True
 
-    def _write_capture_sidecar(self, output_path: str, duration_s: float) -> None:
+    def _write_capture_sidecar(self, output_path: str, duration_s: float, fps: Optional[int] = None) -> None:
         """Write ``<video>.meta.json`` next to the captured video.
 
         Records the capture-start wall-clock (t0, the anchor the offline builder
@@ -384,10 +391,13 @@ class TimeTravelCore:
             for objid in self._prim_map.keys():
                 m = _re.search(r"(\d+)$", str(objid))
                 objid_to_label[str(objid)] = str(int(m.group(1))) if m else str(objid)
+            # capture_start는 sim 클럭 앵커(_capture_start_dt)와 "동일 객체"를 사용.
+            # 별도 now() 호출이면 수 ms 어긋나 라벨 오프셋이 드리프트한다.
+            t0 = self._capture_start_dt or datetime.datetime.now()
             meta = {
-                "capture_start": datetime.datetime.now().isoformat(),
+                "capture_start": t0.isoformat(),
                 "duration_s": float(duration_s),
-                "fps": CaptureRequest.fps,
+                "fps": int(fps) if fps is not None else CaptureRequest.fps,
                 "width": CaptureRequest.width,
                 "height": CaptureRequest.height,
                 "mode": self.get_mode(),
@@ -406,6 +416,10 @@ class TimeTravelCore:
     def get_physics_bounds(self) -> Optional[dict]:
         """Bounds computed at set_physics_mode: {center, size, is_y_up}. None if not set."""
         return self._physics_bounds
+
+    def set_wander_seed(self, seed) -> None:
+        """에피소드 재현성: set_physics_mode 전에 호출하면 wander heading이 seed 결정적."""
+        self._wander_seed = seed
 
     def set_active_objects(self, objids) -> int:
         """Restrict physics/capture to the given objids; hide the rest.
@@ -436,7 +450,8 @@ class TimeTravelCore:
         self._prim_map = new_map
         return len(new_map)
 
-    def run_capture_headless(self, duration_s: float = 0.0, output_path: Optional[str] = None) -> Optional[str]:
+    def run_capture_headless(self, duration_s: float = 0.0, output_path: Optional[str] = None,
+                             camera_path: Optional[str] = None) -> Optional[str]:
         """Blocking offscreen capture for headless automation (no viewport).
 
         Writes the same <video>.meta.json sidecar as start_capture, then runs the
@@ -462,13 +477,25 @@ class TimeTravelCore:
                 output_path = str(output_dir / f"video_{ts}.mp4")
         if self._playback.get_mode() == "physics":
             self._start_collision_recorder()
-        self._write_capture_sidecar(output_path, effective_duration)
+        # sim-time 클럭 앵커: 이 시각 + sim 경과가 오버레이/CSV/사이드카의 단일 t0.
+        self._capture_start_dt = datetime.datetime.now()
+        self._sim_time = 0.0
+        self._use_sim_clock = True
+        # 실측(프로브): 이 Kit의 app.update() 고정 스텝 = 1/60s (timeCodesPerSecond 무시).
+        # → fps=60이 유일한 정합값(1 스텝 = 1 프레임). 10Hz 데이터셋은 build_dataset
+        #   --content-hz 10으로 데시메이션(B' 경로).
+        headless_fps = 60
+        self._write_capture_sidecar(output_path, effective_duration, fps=headless_fps)
         from pathlib import Path as _P
         from ..video_capture import CaptureRequest, RealtimeCaptureRunner
         output_uri = output_path if "://" in output_path else _P(output_path).resolve().as_uri()
-        req = CaptureRequest(duration_s=effective_duration, output_uri=output_uri, label="headless_capture")
-        res = RealtimeCaptureRunner(core=self).capture_headless(req)
-        self._stop_collision_recorder()  # 캡처 종료 == 충돌 기록 종료
+        req = CaptureRequest(duration_s=effective_duration, fps=headless_fps,
+                             output_uri=output_uri, label="headless_capture")
+        try:
+            res = RealtimeCaptureRunner(core=self).capture_headless(req, camera_path=camera_path)
+        finally:
+            self._use_sim_clock = False
+            self._stop_collision_recorder()  # 캡처 종료 == 충돌 기록 종료
         if not res.success:
             carb.log_warn(f"[Capture] headless FAILED: {res.error}")
             return None
@@ -560,7 +587,9 @@ class TimeTravelCore:
         """WanderController callback: persist a collision as a ground-truth label."""
         rec = self._collisions  # capture-thread가 None으로 바꾸는 경쟁 대비 로컬 참조
         if rec is not None:
-            rec.record(prim_path, position, kind)
+            # headless 캡처 중엔 sim 클럭으로 스탬프(프레임·오버레이와 동일 시계).
+            when = self.get_sim_clock_datetime() if self._use_sim_clock else None
+            rec.record(prim_path, position, kind, when=when)
 
     def _start_collision_recorder(self) -> None:
         from datetime import datetime as _dt
@@ -782,12 +811,13 @@ class TimeTravelCore:
         bounds_half = (box_size[0] / 2.0, box_size[1] / 2.0, box_size[2] / 2.0)
         horiz = (box_size[0], box_size[2]) if is_y_up else (box_size[0], box_size[1])
         wall_margin = 0.05 * min(horiz)
-        # 객체 간 충돌 거리: 두 실린더가 닿는 중심 거리는 2r. 스치는 접촉까지 잡도록
-        # 2r에 약간의 여유를 둔 2.2r 사용(임의 상수 대신 실제 프록시 반지름에 묶음).
+        # 객체 간 충돌 거리(거리 기반 fallback 전용): 스치는 접촉까지 잡도록 2.2r.
+        # contact report가 기본 탐지원이므로 이 값은 use_contact_reports=False일 때만 쓰임.
         collision_distance = 2.2 * max(proxy_radii) if proxy_radii else 1.0 * m_to_units
-        # Persist so the capture sidecar can record the exact contact distance,
-        # letting offline observability analysis replicate the contact condition.
-        self._collision_distance = collision_distance
+        # 라벨/observability용 접촉 정의: contact report는 실제 접촉(중심거리 ≈ 2r)에서
+        # 발화하므로 사이드카에는 2.0r을 기록 → 오프라인 recall 분석이 라벨과 같은
+        # 규칙을 재현한다. (fallback 탐지 2.2r과 정의가 다름에 주의)
+        self._collision_distance = 2.0 * max(proxy_radii) if proxy_radii else 1.0 * m_to_units
         self._wander = WanderController(
             rigid_prims,
             speed=self._wander_speed,
@@ -796,6 +826,7 @@ class TimeTravelCore:
             bounds_half=bounds_half,
             wall_margin=wall_margin,
             collision_distance=collision_distance,
+            seed=self._wander_seed,
         )
 
         try:
@@ -848,12 +879,28 @@ class TimeTravelCore:
     def get_current_time(self) -> datetime.datetime:
         return self._playback.get_current_time() or datetime.datetime.now()
 
+    # ---- sim-time master clock (headless 캡처의 단일 시계) -----------------
+    # headless 루프가 프레임마다 set_sim_time(seq/fps)를 호출 → 그 프레임의
+    # 오버레이·충돌 CSV가 전부 capture_start + sim_time으로 스탬프된다.
+    # 렌더 속도(wall-clock)와 무관하므로 클립 슬라이싱과 라벨이 항상 정합.
+
+    def set_sim_time(self, seconds: float) -> None:
+        self._sim_time = max(0.0, float(seconds))
+
+    def get_sim_time(self) -> float:
+        return self._sim_time
+
+    def get_sim_clock_datetime(self) -> datetime.datetime:
+        if self._capture_start_dt is None:
+            return datetime.datetime.now()
+        return self._capture_start_dt + datetime.timedelta(seconds=self._sim_time)
+
     def get_simulation_time(self) -> Optional[datetime.datetime]:
-        # In physics (wander) mode the trajectory clock does not advance, so the
-        # overlay/timestamp would be static. Fall back to wall-clock, which is the
-        # SAME clock CollisionRecorder stamps events with -> the burned-in
-        # timestamp equals the collision label, enabling offline clip labeling.
+        # Physics 모드: headless 캡처 중엔 sim 클럭(라벨과 동일 시계), 그 외(인터랙티브
+        # 프리뷰)는 wall-clock 폴백 — 프리뷰 오버레이가 실시간으로 흐르게.
         if self._playback.get_mode() == "physics":
+            if self._use_sim_clock:
+                return self.get_sim_clock_datetime()
             return datetime.datetime.now()
         return self._playback.get_current_time()
 
@@ -862,6 +909,8 @@ class TimeTravelCore:
         from ..timefmt import format_event_time
 
         if self._playback.get_mode() == "physics":
+            if self._use_sim_clock:
+                return format_event_time(self.get_sim_clock_datetime())
             return format_event_time(datetime.datetime.now())
         current_time = self._playback.get_current_time()
         if current_time:
