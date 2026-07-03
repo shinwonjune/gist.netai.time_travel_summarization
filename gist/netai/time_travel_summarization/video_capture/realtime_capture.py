@@ -234,7 +234,10 @@ class RealtimeCaptureRunner:
         self._overlay_provider = overlay_provider
         self._core = core
 
-    def _default_provider_from_core(self, viewport, stage):
+    def _default_provider_from_core(self, viewport, stage, matrices_fn=None):
+        """오버레이 프로바이더. ``matrices_fn(w,h)``가 주어지면(headless: camera_params
+        annotator = 렌더러가 실제 쓴 view/projection) 그것을 우선 사용 — 재구성 행렬의
+        conform 정책 추측 오차(라벨이 객체에서 밀리는 문제)가 원천 제거된다."""
         diag = {"first_logged": False}
 
         def _log_once(msg: str):
@@ -263,7 +266,11 @@ class RealtimeCaptureRunner:
                 _log_once(f"data empty at sim_time={sim_time}")
                 return OverlayFrame(timestamp_text=ts_text, object_labels=(), misc_text=())
 
-            matrices = _get_camera_matrices(viewport, stage, width, height)
+            matrices = matrices_fn(width, height) if matrices_fn is not None else None
+            if matrices is not None:
+                _log_once("overlay matrices: renderer camera_params (exact)")
+            else:
+                matrices = _get_camera_matrices(viewport, stage, width, height)
             if matrices is None:
                 _log_once(f"camera matrices unavailable (Kit API mismatch) — falling back to corner list. data keys: {list(data.keys())[:5]}")
                 # Fallback: 화면 좌상단에 객체 ID 리스트 박스로 표기 (3D anchor 없음)
@@ -642,6 +649,35 @@ class RealtimeCaptureRunner:
             rp = rep.create.render_product(camera_path, (req.width, req.height))
             annot = rep.AnnotatorRegistry.get_annotator("LdrColor")
             annot.attach([rp])
+            # 렌더러가 실제 사용한 view/projection을 프레임마다 제공 → 오버레이 투영 정확화.
+            cam_annot = None
+            try:
+                cam_annot = rep.AnnotatorRegistry.get_annotator("camera_params")
+                cam_annot.attach([rp])
+            except Exception as e:
+                print(f"[HL] camera_params annotator unavailable: {e!r} (재구성 행렬로 폴백)")
+                cam_annot = None
+
+            _cam_mtx_state = {"warned": False}
+
+            def _renderer_matrices(_w, _h):
+                if cam_annot is None:
+                    return None
+                try:
+                    d = cam_annot.get_data()
+                    view = d.get("cameraViewTransform")
+                    proj = d.get("cameraProjection")
+                    if view is None or proj is None:
+                        raise KeyError(f"keys={list(d.keys())[:8]}")
+                    from pxr import Gf
+                    vals_v = [float(x) for x in np.asarray(view, dtype=np.float64).reshape(16)]
+                    vals_p = [float(x) for x in np.asarray(proj, dtype=np.float64).reshape(16)]
+                    return (Gf.Matrix4d(*vals_v), Gf.Matrix4d(*vals_p))
+                except Exception as e:
+                    if not _cam_mtx_state["warned"]:
+                        _cam_mtx_state["warned"] = True
+                        print(f"[HL] camera_params read failed: {e!r} (재구성 행렬로 폴백)")
+                    return None
 
             # Shim exposing camera_path so the overlay's _get_camera_matrices works
             # without a viewport (matrices come from the camera prim, not the viewport).
@@ -652,7 +688,8 @@ class RealtimeCaptureRunner:
 
             composer = OverlayComposer(req.width, req.height, debug=DEBUG_OVERLAY_MARKERS)
             provider = self._overlay_provider or (
-                self._default_provider_from_core(_CamShim(), stage) if self._core else None
+                self._default_provider_from_core(_CamShim(), stage, matrices_fn=_renderer_matrices)
+                if self._core else None
             )
             encoder.start(queue)
 
@@ -895,6 +932,9 @@ class RealtimeCaptureRunner:
             try:
                 if annot is not None and rp is not None:
                     annot.detach([rp])
+                _ca = locals().get("cam_annot")
+                if _ca is not None and rp is not None:
+                    _ca.detach([rp])
                 if rp is not None:
                     rp.destroy()
             except Exception:
