@@ -48,6 +48,7 @@ class WanderController:
         # stuck 오탐(삼각형 진동)·pause 타이밍 왜곡이 사라진다. 단위: sim 초.
         self._sim_now = 0.0
         self._last_dt = 1.0 / 60.0
+        self._prev_timeline_t = None
         self._stuck_ratio = float(stuck_ratio)
         self._stuck_frames = int(stuck_frames)
         self._collision_cooldown_s = max(0.0, float(collision_cooldown_s))
@@ -129,6 +130,7 @@ class WanderController:
         self._active = True
         # 에피소드 시작마다 sim 클럭·충돌 상태 리셋 (seed 재현성 + 이전 run 잔재 제거)
         self._sim_now = 0.0
+        self._prev_timeline_t = None
         self._paused_until.clear()
         self._redirect_heading.clear()
         self._last_collision_time.clear()
@@ -164,15 +166,35 @@ class WanderController:
         if not self._active:
             return
 
-        # 고정 sim-dt 누적(fixed timestepping이면 payload dt == 고정값). wall-clock 금지.
+        # 시계 = 타임라인 현재 시각 직독(물리 진실). headless 캡처는 렌더 완료 대기
+        # 동안 app.update()가 여러 번 돌고 그 헛바퀴에도 payload dt>0이 오므로, dt 누적
+        # 시계로는 기대이동만 쌓여 false-stuck 폭증(실측 10초에 468회 → 진동 랜덤워크).
+        # 타임라인이 실제 전진한 틱만 판정하면 기대/실이동이 항상 같은 구간이 된다.
+        now = None
         try:
-            dt = float(event.payload["dt"])
+            import omni.timeline
+
+            now = float(omni.timeline.get_timeline_interface().get_current_time())
         except Exception:
-            dt = self._last_dt
-        if dt > 0.0:
-            self._last_dt = dt
-            self._sim_now += dt
-        now = self._sim_now
+            pass
+        if now is None:
+            # 폴백(omni 없는 유닛테스트 등): 기존 dt 누적 방식
+            try:
+                dt = float(event.payload["dt"])
+            except Exception:
+                dt = self._last_dt
+            if dt > 0.0:
+                self._last_dt = dt
+                self._sim_now += dt
+            now = self._sim_now
+        else:
+            prev = self._prev_timeline_t
+            self._prev_timeline_t = now
+            if prev is not None and now == prev:
+                return  # 물리 미전진 틱(렌더 대기 펌프) — 스킵
+            if prev is not None and now > prev:
+                self._last_dt = now - prev
+            self._sim_now = now
         self._initialize_directions()
         # contact report ON이면 객체충돌은 콜백이 처리 → 거리 기반은 OFF일 때만.
         if not self._use_contact_reports:
