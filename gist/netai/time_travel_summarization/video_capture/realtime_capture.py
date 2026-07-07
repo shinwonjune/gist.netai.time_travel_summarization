@@ -772,7 +772,22 @@ class RealtimeCaptureRunner:
                 app.update()
                 return "app_update"
 
-            _phys_state = {"fallback": False, "fails": 0}
+            _phys_state = {"fallback": False, "fails": 0, "use_fof": False}
+
+            def _tl_state():
+                if _wtl is None:
+                    return "no-timeline"
+
+                def g(name):
+                    try:
+                        return getattr(_wtl, name)()
+                    except Exception:
+                        return "?"
+                return (f"cur={g('get_current_time')} start={g('get_start_time')} "
+                        f"end={g('get_end_time')} playing={g('is_playing')} "
+                        f"looping={g('is_looping')}")
+
+            print(f"[HL] timeline @capture start: {_tl_state()}")
 
             def _phys_advance():
                 # 물리-only 스텝(렌더 스킵): 재생 상태 app.update() 1회 = 1/60 전진, 후 pause
@@ -786,6 +801,17 @@ class RealtimeCaptureRunner:
                     return
                 t_before = _wtl.get_current_time() if _wtl is not None else None
                 advanced = False
+                # play가 실속하는 상태에서 확인된 우회로: forward_one_frame(재생 상태 무관 전진).
+                if _phys_state["use_fof"] and _wtl is not None:
+                    try:
+                        _wtl.forward_one_frame()
+                        app.update()
+                        advanced = t_before is None or _wtl.get_current_time() > t_before
+                    except Exception:
+                        advanced = False
+                    if advanced:
+                        return
+                    _phys_state["use_fof"] = False  # fof마저 죽으면 일반 경로 재시도
                 for _ in range(3):
                     if _wtl is not None and not _wtl.is_playing():
                         _wtl.play()
@@ -795,6 +821,18 @@ class RealtimeCaptureRunner:
                         break
                 if _wtl is not None:
                     _wtl.pause()
+                if not advanced and _wtl is not None:
+                    # 원인 진단 덤프 + 상태 무관 전진 API 시도
+                    print(f"[HL] phys stall diag: {_tl_state()}")
+                    try:
+                        _wtl.forward_one_frame()
+                        app.update()
+                        if t_before is None or _wtl.get_current_time() > t_before:
+                            advanced = True
+                            _phys_state["use_fof"] = True
+                            print("[HL] phys advance: forward_one_frame OK -> 이후 이 경로 사용")
+                    except Exception as e:
+                        print(f"[HL] forward_one_frame failed: {e!r}")
                 if not advanced:
                     _phys_state["fails"] += 1
                     print(f"[HL] phys advance stalled (fail #{_phys_state['fails']}) "
