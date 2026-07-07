@@ -219,7 +219,12 @@ def process_episode(
     if csv_rel:
         csv_path = Path(csv_rel)
         if not csv_path.exists():
-            csv_path = meta_path.parent / Path(csv_rel).name
+            # 폴백: meta 옆의 같은 파일명. 주의 — Windows에서 기록된 절대경로를
+            # 리눅스에서 처리하면 백슬래시가 구분자로 안 잘려 Path().name이 통째로
+            # 나온다("생성=Windows, 빌드=L40" 조합에서 전 에피소드 negative화 실측).
+            # 구분자를 정규화해 파일명만 취한다.
+            fname = csv_rel.replace("\\", "/").rsplit("/", 1)[-1]
+            csv_path = meta_path.parent / fname
         if csv_path.exists():
             collisions = load_collisions(csv_path, set(args.kinds), objid_to_label, t0)
         else:
