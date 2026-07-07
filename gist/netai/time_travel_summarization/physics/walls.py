@@ -62,7 +62,7 @@ def create_bounding_box(
     thickness: float = 0.1,
     root_path: str = "/World/PhysicsWalls",
 ) -> None:
-    """Create or update visible static collider walls around the physics area."""
+    """Create or update invisible static collider walls around the physics area."""
     from pxr import Gf, UsdGeom, UsdPhysics
 
     root = stage.GetPrimAtPath(root_path)
@@ -71,14 +71,6 @@ def create_bounding_box(
 
     is_y_up = UsdGeom.GetStageUpAxis(stage) == UsdGeom.Tokens.y
     specs = _wall_specs(center, size, thickness, is_y_up)
-    # 시각 식별을 위해 색·opacity 강화. Floor는 더 진한 회색, 측면 4 walls는 빨강 반투명
-    wall_styles = {
-        "Floor": (Gf.Vec3f(0.35, 0.35, 0.35), 0.85),     # 진한 회색, 거의 불투명
-        "North": (Gf.Vec3f(0.9, 0.25, 0.25), 0.55),
-        "South": (Gf.Vec3f(0.9, 0.25, 0.25), 0.55),
-        "East":  (Gf.Vec3f(0.25, 0.55, 0.9), 0.55),
-        "West":  (Gf.Vec3f(0.25, 0.55, 0.9), 0.55),
-    }
 
     for name in _WALL_NAMES:
         wall_path = f"{root_path}/{name}"
@@ -87,9 +79,8 @@ def create_bounding_box(
         wall_prim = cube.GetPrim()
         translate, scale = specs[name]
         _set_cube_transform(wall_prim, Gf.Vec3d(*translate), Gf.Vec3f(*scale))
-        color_vec, opacity_val = wall_styles[name]
-        cube.CreateDisplayColorAttr().Set([color_vec])
-        cube.CreateDisplayOpacityAttr().Set([opacity_val])
-        UsdGeom.Imageable(wall_prim).MakeVisible()
+        # 캡처 영상 오염 방지: 벽은 비가시. 콜라이더는 가시성과 무관하게 동작하므로
+        # 배회·벽 반사·contact report는 불변 (기존 스테이지의 색 잔재도 비가시로 무력화).
+        UsdGeom.Imageable(wall_prim).MakeInvisible()
         _ensure_api(UsdPhysics.CollisionAPI, wall_prim)
         # wall은 static collider (RigidBodyAPI 없음). PhysxContactReportAPI는 RigidBody 쪽(우주인)에 붙어 있어 wall 충돌도 자동 수신됨.

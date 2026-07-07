@@ -76,6 +76,7 @@ class WanderController:
 
         self._active = False
         self._update_sub = None
+        self._physx_step_sub = None
         self._contact_sub = None
         self._contact_warning_logged = False
         self._direction = {}
@@ -87,6 +88,12 @@ class WanderController:
         self._contact_log_paths = set()
         self._last_blocked_direction: dict = {}
         self._last_collision_time: dict = {}
+        # 실효 속도 콘솔 표기: 창(sim 초)마다 객체별 경로누적/시간을 로그로 출력.
+        # 지시속도와 실제 이동속도(damping·충돌 pause 포함)를 눈으로 비교하는 용도.
+        self._speed_log_interval = 2.0
+        self._speed_window_start = 0.0
+        self._speed_accum: dict = {}
+        self._speed_last_pos: dict = {}
 
         self._initialize_directions()
 
@@ -134,8 +141,24 @@ class WanderController:
         self._paused_until.clear()
         self._redirect_heading.clear()
         self._last_collision_time.clear()
-        app = omni.kit.app.get_app()
-        self._update_sub = app.get_update_event_stream().create_subscription_to_pop(self._on_update)
+        self._speed_window_start = 0.0
+        self._speed_accum.clear()
+        self._speed_last_pos.clear()
+        # 1순위: PhysX 물리 스텝 이벤트. 물리가 1스텝 돌 때마다 정확히 1회 발화하므로
+        # 러너의 펌프 패턴(60fps/렌더 데시메이션/GUI)과 무관하게 제어 주기 = 물리 주기.
+        # update 스트림은 "물리 스텝 ≠ update 틱" 구조(렌더 대기 펌프, 데시메이션의
+        # orchestrator 전진)에서 velocity 재주장을 놓쳐 감쇠 누적 → 실효 속도 저하(#9 계열).
+        self._physx_step_sub = None
+        try:
+            import omni.physx
+
+            self._physx_step_sub = omni.physx.get_physx_interface().subscribe_physics_step_events(
+                self._on_physics_step)
+        except Exception as e:
+            self._log_warn(f"[Wander] physics-step subscription unavailable ({e!r}) -> update-stream fallback")
+        if self._physx_step_sub is None:
+            app = omni.kit.app.get_app()
+            self._update_sub = app.get_update_event_stream().create_subscription_to_pop(self._on_update)
         if self._use_contact_reports:
             self._subscribe_contact_events()
         self._initialize_directions(reset=True)
@@ -150,6 +173,7 @@ class WanderController:
 
         self._active = False
         self._update_sub = None
+        self._physx_step_sub = None
         self._contact_sub = None
         self._set_all_velocities_zero()
         for prim in self._valid_prims():
@@ -162,7 +186,25 @@ class WanderController:
 
     # ---- per-frame update ------------------------------------------------
 
+    def _on_physics_step(self, dt) -> None:
+        # 1순위 경로: PhysX가 물리를 1스텝 돌릴 때마다 정확히 1회 호출됨(러너 무관).
+        # 이 dt 누적이 곧 물리 진실의 시계 — update 틱과 물리 스텝의 불일치 문제가
+        # 원천적으로 없다.
+        if not self._active:
+            return
+        try:
+            dt = float(dt)
+        except (TypeError, ValueError):
+            dt = self._last_dt
+        if dt > 0.0:
+            self._last_dt = dt
+            self._sim_now += dt
+        self._tick(self._sim_now)
+
     def _on_update(self, event) -> None:
+        # 폴백 경로(physx 스텝 이벤트 미지원/유닛테스트). update 틱은 물리 스텝과
+        # 1:1이 아니므로(렌더 대기 펌프, 데시메이션의 orchestrator 전진) 시계는
+        # 타임라인 직독으로 맞추되, 물리 스텝 누락 가능성은 이 경로의 한계.
         if not self._active:
             return
 
@@ -195,6 +237,9 @@ class WanderController:
             if prev is not None and now > prev:
                 self._last_dt = now - prev
             self._sim_now = now
+        self._tick(now)
+
+    def _tick(self, now: float) -> None:
         self._initialize_directions()
         # contact report ON이면 객체충돌은 콜백이 처리 → 거리 기반은 OFF일 때만.
         if not self._use_contact_reports:
@@ -222,6 +267,28 @@ class WanderController:
                 self._redirect(prim, prim_path, kind="stuck")
             elif self._check_wall_hug(prim, prim_path):
                 self._redirect(prim, prim_path, kind="wall", new_direction=self._heading_to_center(prim))
+
+        # 실효 속도 표기: 스텝마다 경로를 누적하고, 창이 차면 객체별 units/s 출력.
+        for prim in self._valid_prims():
+            p = str(prim.GetPath())
+            pos = self._world_position(prim)
+            if pos is None:
+                continue
+            last = self._speed_last_pos.get(p)
+            if last is not None:
+                d = sum((float(pos[i]) - float(last[i])) ** 2 for i in range(3)) ** 0.5
+                self._speed_accum[p] = self._speed_accum.get(p, 0.0) + d
+            self._speed_last_pos[p] = tuple(float(pos[i]) for i in range(3))
+        span = now - self._speed_window_start
+        if span >= self._speed_log_interval:
+            if self._speed_accum:
+                parts = ", ".join(
+                    f"{p.rsplit('/', 1)[-1]} {self._speed_accum[p] / span:.0f}"
+                    for p in sorted(self._speed_accum))
+                self._log_warn(
+                    f"[Wander] 실효속도 units/s (지시 {self._speed:g}, 창 {span:.1f}s): {parts}")
+            self._speed_accum.clear()
+            self._speed_window_start = now
 
     def _redirect(self, prim, prim_path: str, kind: str, new_direction=None) -> None:
         """Pick a new heading and record the hit.

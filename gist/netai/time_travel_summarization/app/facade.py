@@ -451,7 +451,9 @@ class TimeTravelCore:
         return len(new_map)
 
     def run_capture_headless(self, duration_s: float = 0.0, output_path: Optional[str] = None,
-                             camera_path: Optional[str] = None) -> Optional[str]:
+                             camera_path: Optional[str] = None,
+                             capture_start_dt: Optional[datetime.datetime] = None,
+                             render_fps: Optional[int] = None) -> Optional[str]:
         """Blocking offscreen capture for headless automation (no viewport).
 
         Writes the same <video>.meta.json sidecar as start_capture, then runs the
@@ -478,19 +480,25 @@ class TimeTravelCore:
         if self._playback.get_mode() == "physics":
             self._start_collision_recorder()
         # sim-time 클럭 앵커: 이 시각 + sim 경과가 오버레이/CSV/사이드카의 단일 t0.
-        self._capture_start_dt = datetime.datetime.now()
+        # 배치 생성은 에피소드별 무작위 t0를 주입(숫자 다양성; 실행 시각 비종속).
+        self._capture_start_dt = capture_start_dt or datetime.datetime.now()
         self._sim_time = 0.0
         self._use_sim_clock = True
         # 실측(프로브): 이 Kit의 app.update() 고정 스텝 = 1/60s (timeCodesPerSecond 무시).
-        # → fps=60이 유일한 정합값(1 스텝 = 1 프레임). 10Hz 데이터셋은 build_dataset
-        #   --content-hz 10으로 데시메이션(B' 경로).
+        # → sim은 60Hz 고정. render_fps(60의 약수)를 주면 렌더·인코딩만 데시메이션되어
+        #   비디오는 그 fps가 된다(라벨 시각은 스텝 기준이라 정합 불변). 10Hz 데이터셋은
+        #   build_dataset --content-hz 10으로 최종 데시메이션(B' 경로).
         headless_fps = 60
-        self._write_capture_sidecar(output_path, effective_duration, fps=headless_fps)
+        _rfps = int(render_fps) if render_fps else headless_fps
+        vid_fps = headless_fps // max(1, int(round(headless_fps / max(1, _rfps))))
+        # 사이드카 fps = 실제 비디오 fps여야 build_dataset의 시각→프레임 매핑이 맞는다.
+        self._write_capture_sidecar(output_path, effective_duration, fps=vid_fps)
         from pathlib import Path as _P
         from ..video_capture import CaptureRequest, RealtimeCaptureRunner
         output_uri = output_path if "://" in output_path else _P(output_path).resolve().as_uri()
         req = CaptureRequest(duration_s=effective_duration, fps=headless_fps,
-                             output_uri=output_uri, label="headless_capture")
+                             output_uri=output_uri, label="headless_capture",
+                             render_fps=vid_fps)
         try:
             res = RealtimeCaptureRunner(core=self).capture_headless(req, camera_path=camera_path)
         finally:
@@ -986,6 +994,35 @@ class TimeTravelCore:
             carb.log_error("[TimeTravel] astronaut_usd not specified in config")
             return ""
         return self._stage_objects.create_astronaut_prim(index, astronaut_usd)
+
+    def add_synthetic_objects(self, count: int) -> Dict[str, str]:
+        """배치 전용: 궤적 데이터에 없는 추가 우주인을 스폰해 prim_map에 등록.
+
+        physics(wander) 모드는 데이터 좌표가 필요 없으므로 객체 수를 데이터 objid 수
+        이상으로 늘릴 수 있다. objid는 기존 개수에 이어 obj{N:03d}로 부여 —
+        라벨 규칙(끝자리 숫자)·충돌 기록·오버레이가 prim_map 기준이라 그대로 따라온다.
+        주의: 이 객체들은 재현(playback) 데이터가 없다. 호출부가 초기 위치를 반드시
+        직접 배치할 것(생성 직후엔 원점 — 겹침 폭발 위험, 일지 #6).
+        """
+        if count <= 0:
+            return {}
+        base = dict(self._prim_map_full or self._prim_map)
+        start_idx = len(base)
+        added: Dict[str, str] = {}
+        for k in range(1, int(count) + 1):
+            idx = start_idx + k
+            objid = f"obj{idx:03d}"
+            if objid in base:
+                continue
+            prim_path = self.create_astronaut_prim(idx)
+            if prim_path:
+                added[objid] = prim_path
+        if added:
+            self._prim_map.update(added)
+            if self._prim_map_full:
+                self._prim_map_full.update(added)
+            carb.log_warn(f"[TimeTravel] synthetic objects added: {sorted(added)}")
+        return added
 
     def auto_generate_astronauts(self) -> Dict[str, str]:
         if not self._config:

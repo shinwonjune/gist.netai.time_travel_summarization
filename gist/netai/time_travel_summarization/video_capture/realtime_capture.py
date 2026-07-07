@@ -619,17 +619,27 @@ class RealtimeCaptureRunner:
             asyncio.set_event_loop(asyncio.new_event_loop())
 
         start_wall = time.perf_counter()
+        # 렌더 데시메이션: sim은 req.fps(60Hz 고정 스텝)로 전부 전진하되, 렌더·인코딩은
+        # _dec 스텝당 1회만. 병목 실측(프레임당 orchestrator step=93%)에서 렌더 횟수
+        # 축소가 유일하게 유효한 지렛대. 라벨 시각은 스텝 인덱스 기준이라 정합 불변.
+        _render_fps = int(req.render_fps or req.fps)
+        _dec = max(1, int(round(req.fps / max(1, _render_fps))))
+        _vid_fps = req.fps // _dec
+        if _vid_fps != _render_fps:
+            print(f"[HL] render_fps={_render_fps} is not a divisor of {req.fps} -> using {_vid_fps}")
         metadata = {
             "runner": "A2_headless_render_product",
             "resolution": f"{req.width}x{req.height}",
-            "fps": req.fps,
+            "fps": _vid_fps,
+            "sim_fps": req.fps,
+            "render_decimation": _dec,
             "duration_s": req.duration_s,
             "frame_clock": "headless_sync_app_pump",
         }
         tmp_dir = Path(tempfile.mkdtemp(prefix="ttsum_hl_"))
         tmp_mp4 = tmp_dir / f"hl_{datetime.now().strftime('%Y%m%dT%H%M%S')}.mp4"
         queue = FrameQueue(maxsize=32, drop_oldest=False)
-        encoder = FrameEncoder(tmp_mp4, req.width, req.height, req.fps)
+        encoder = FrameEncoder(tmp_mp4, req.width, req.height, _vid_fps)
         camera_path = camera_path or "/World/summarization_camera"
         rp = None
         annot = None
@@ -762,6 +772,39 @@ class RealtimeCaptureRunner:
                 app.update()
                 return "app_update"
 
+            _phys_state = {"fallback": False, "fails": 0}
+
+            def _phys_advance():
+                # 물리-only 스텝(렌더 스킵): 재생 상태 app.update() 1회 = 1/60 전진, 후 pause
+                # (pause 생략 시 다음 orchestrator step과 중복 전진 → ratio_t=2.0, run12 실측).
+                # 전진을 실측 검증한다 — play가 같은 update에서 안 먹는 상태가 실재
+                # (run18: 전 phys 스텝 ratio_t=0 → sim이 라벨의 절반 속도로 진행).
+                # 재시도로 자가치유하고, 그래도 실패하면 그 스텝은 orchestrator로 전진
+                # (렌더 비용을 내더라도 정합이 우선), 반복되면 영구 폴백.
+                if _phys_state["fallback"]:
+                    _advance()
+                    return
+                t_before = _wtl.get_current_time() if _wtl is not None else None
+                advanced = False
+                for _ in range(3):
+                    if _wtl is not None and not _wtl.is_playing():
+                        _wtl.play()
+                    app.update()
+                    if _wtl is None or t_before is None or _wtl.get_current_time() > t_before:
+                        advanced = True
+                        break
+                if _wtl is not None:
+                    _wtl.pause()
+                if not advanced:
+                    _phys_state["fails"] += 1
+                    print(f"[HL] phys advance stalled (fail #{_phys_state['fails']}) "
+                          "-> orchestrator for this step")
+                    if _phys_state["fails"] >= 3:
+                        _phys_state["fallback"] = True
+                        print("[HL] phys advance broken -> PERMANENT orchestrator fallback "
+                              "(60fps-cost mode; 정합 우선)")
+                    _advance()
+
             # 워밍업: annotator가 실제 픽셀을 줄 때까지 전진(렌더러/그래프 초기화 소진).
             # 실측: RTX 준비 전에 만든 render product는 무효가 되어(attach가 안 붙어
             # 'not attached') 영원히 빈 데이터 → 감지 시 render product를 재생성한다.
@@ -825,7 +868,7 @@ class RealtimeCaptureRunner:
             #  ratio_d  = 객체 최대 변위 / (speed × 1/fps) → 1.0이면 물리도 정속
             #             (타임라인만 정합이고 물리가 substep을 못 돌면 여기서 <1로 검출)
             #  upd/read/enc ms = 프레임당 비용 분해 → "몇 배 단축 가능한지" 실측 근거
-            _PROBE_FRAMES = 10
+            _PROBE_FRAMES = 10 * _dec  # 렌더 프레임 10개 분량(물리-only 스텝 비용도 실측)
             try:
                 import omni.timeline
                 _timeline = omni.timeline.get_timeline_interface()
@@ -840,23 +883,29 @@ class RealtimeCaptureRunner:
                 if stop_event is not None and stop_event.is_set():
                     break
                 probing = seq < _PROBE_FRAMES
+                render_this = (seq % _dec == 0)
                 # 프레임의 sim 시각을 먼저 고정: 이 update 중의 충돌(in-step)과 직후
                 # 오버레이(post-step)가 같은 sim-time(seq/fps)으로 스탬프된다.
                 if self._core is not None and hasattr(self._core, "set_sim_time"):
                     self._core.set_sim_time(seq * _expected_dt)
-                # advance simulation + render one frame (wall-clock 페이싱 없음, orchestrator 우선)
+                # advance simulation (wall-clock 페이싱 없음): 렌더 스텝만 orchestrator,
+                # 나머지는 물리-only 전진 — 어느 쪽이든 1스텝 = 1/60 sim.
                 t_before = _timeline.get_current_time() if (probing and _timeline is not None) else None
                 _t0 = time.perf_counter()
-                _advance()
+                if render_this:
+                    _advance()
+                else:
+                    _phys_advance()
                 _t1 = time.perf_counter()
                 rgba = None
-                try:
-                    arr = np.asarray(annot.get_data(), dtype=np.uint8)
-                    if arr.size:
-                        rgba = arr.tobytes()
-                except Exception as e:
-                    if seq == 0:
-                        print(f"[HL] annotator get_data failed: {e!r}")
+                if render_this:
+                    try:
+                        arr = np.asarray(annot.get_data(), dtype=np.uint8)
+                        if arr.size:
+                            rgba = arr.tobytes()
+                    except Exception as e:
+                        if seq == 0:
+                            print(f"[HL] annotator get_data failed: {e!r}")
                 _t2 = time.perf_counter()
                 if rgba is not None:
                     overlay_snapshot = provider(req.width, req.height) if provider else None
@@ -891,7 +940,8 @@ class RealtimeCaptureRunner:
                     rt = f"{ratio_t:.2f}" if ratio_t is not None else "n/a"
                     rd = f"{ratio_d:.2f}" if ratio_d is not None else "n/a"
                     print(
-                        f"[HL probe] seq={seq} ratio_t={rt} ratio_d={rd}"
+                        f"[HL probe] seq={seq} kind={'render' if render_this else 'phys'}"
+                        f" ratio_t={rt} ratio_d={rd}"
                         f" upd={(_t1 - _t0) * 1000:.1f}ms read={(_t2 - _t1) * 1000:.1f}ms"
                         f" enc={(_t3 - _t2) * 1000:.1f}ms"
                     )
