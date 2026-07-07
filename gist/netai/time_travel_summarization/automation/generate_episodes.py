@@ -156,6 +156,82 @@ def organize_outputs(out_root: Path, idx: int, video: Path,
     return ep_dir
 
 
+def parse_spawn_plan(plan_str: Optional[str], zones: dict, n_objects: int) -> List[Tuple[str, int]]:
+    """"zoneA:2,zoneB:2" → [(zone, count)...]. 미지정 시 첫 구역에 전원. 합계는 객체 수와 일치해야."""
+    if not plan_str:
+        return [(next(iter(zones)), n_objects)]
+    out: List[Tuple[str, int]] = []
+    for part in plan_str.split(","):
+        name, _, cnt = part.strip().partition(":")
+        if name not in zones:
+            raise ValueError(f"unknown spawn zone {name!r} (defined: {sorted(zones)})")
+        out.append((name, int(cnt)))
+    total = sum(c for _, c in out)
+    if total != n_objects:
+        raise ValueError(f"spawn plan total {total} != episode objects {n_objects}")
+    return out
+
+
+def sample_zone_positions(zones: dict, plan: List[Tuple[str, int]], objids: List[str], seed: int,
+                          spawn_offset: float = 5.0, margin_frac: float = 0.1,
+                          min_sep_frac: float = 0.15, tries_per_obj: int = 60,
+                          ) -> Dict[str, Tuple[float, float, float]]:
+    """사전 정의 구역에서 순수 수학으로 시작 위치 샘플 — 레이캐스트·Kit API 불필요.
+
+    구역은 "바닥이 존재한다"를 정의자가 보증하는 수평 사각형(y-up 기준 (x,z)) + 바닥 높이:
+        zones = {name: {"min": [x0, z0], "max": [x1, z1], "floor": 89.5}}
+    plan 순서대로 objids를 앞에서부터 배정, 각 구역 내 가장자리 margin 제외 균등 샘플,
+    전 구역 공통으로 객체 간 최소 이격 보장, 바닥+spawn_offset(cm)에 스폰(중력 안착).
+    이격 실패 객체는 결과에서 제외(호출부 폴백). 신규 구역의 바닥 검증은 오프라인
+    도구(sample_floor_positions 레이캐스트)로 등록 시 1회 수행하는 것을 전제로 한다.
+    """
+    rng = random.Random(seed)
+    placed: List[Tuple[float, float, float]] = []  # (h0, h1, 그 지점의 min_sep)
+    out: Dict[str, Tuple[float, float, float]] = {}
+    idx = 0
+    for name, count in plan:
+        z = zones[name]
+        (l0, l1), (u0, u1) = z["min"], z["max"]
+        s0, s1 = float(u0) - float(l0), float(u1) - float(l1)
+        m = margin_frac
+        lo0, hi0 = l0 + s0 * m, u0 - s0 * m
+        lo1, hi1 = l1 + s1 * m, u1 - s1 * m
+        min_sep = min_sep_frac * min(s0, s1)
+        floor = float(z["floor"])
+        for objid in objids[idx: idx + count]:
+            for _ in range(tries_per_obj):
+                p0, p1 = rng.uniform(lo0, hi0), rng.uniform(lo1, hi1)
+                if all((p0 - q0) ** 2 + (p1 - q1) ** 2 >= min(min_sep, qs) ** 2
+                       for q0, q1, qs in placed):
+                    placed.append((p0, p1, min_sep))
+                    out[objid] = (p0, floor + spawn_offset, p1)
+                    break
+        idx += count
+    return out
+
+
+def load_spawn_zones(args, core) -> dict:
+    """--spawn-zones(JSON 파일 경로 또는 인라인 JSON) 로드. 미지정 시 기본 구역 =
+    궤적 데이터 좌표 범위(순수 데이터 조회 — physics 불필요) + --spawn-floor."""
+    raw = getattr(args, "spawn_zones", None)
+    if raw:
+        p = Path(raw)
+        zones = json.loads(p.read_text(encoding="utf-8")) if p.exists() else json.loads(raw)
+        for name, z in zones.items():
+            for key in ("min", "max", "floor"):
+                if key not in z:
+                    raise ValueError(f"zone {name!r}: {key!r} missing")
+        return zones
+    repo = getattr(core, "_repository", None)
+    cr = repo.get_coord_range() if repo is not None and hasattr(repo, "get_coord_range") else None
+    if not cr:
+        raise RuntimeError("spawn zones: coord range unavailable; provide --spawn-zones")
+    mins, maxs = cr
+    return {"trajectory_bbox": {"min": [float(mins[0]), float(mins[2])],
+                                "max": [float(maxs[0]), float(maxs[2])],
+                                "floor": float(getattr(args, "spawn_floor", 89.5))}}
+
+
 def write_run_manifest(out_root: Path, args_dict: dict, cfgs: List[EpisodeConfig],
                        done_idx: List[int], git_commit: Optional[str] = None) -> Path:
     """배치 재현·역추적용 manifest: 생성 인자, 에피소드별 조건·시드, 성공 여부."""
@@ -381,20 +457,24 @@ def run(args, core=None) -> None:
     print(f"[gen] {len(cfgs)} episodes, objects available={len(all_objids)}, out={out_root}")
     done_idx: List[int] = []
 
-    # 단일 physics 토글 윈도우: bounds 계산 + (무작위 모드) 위치 사전계산을 함께 끝낸다.
-    # 토글을 두 번 거치면 이후 캡처의 phys 스텝에서 timeline play가 안 먹는 상태가
-    # 실측됨(run18: 전 phys 스텝 ratio_t=0 → sim이 라벨의 절반 속도) — run13~15와 동일한
-    # 단일 토글 구조를 유지한다. 합성 객체는 이 윈도우 동안 원점에 있지만(레이캐스트
-    # 허용창이 그 위 히트를 걸러냄) 에피소드 시작 전 반드시 재배치된다.
-    core.set_to_earliest_time()  # 데이터 객체를 바닥 위 좌표로 (floor_ref 산출용, #6 산개)
+    # Bounds depend only on the trajectory range (constant) -> compute once.
+    # 주의: 이 physics 창에서 app.update()를 돌리지 말 것 — 캡처의 set_capture_on_play(False)
+    # 이전에 "재생 예약 + update"가 만나면 Replicator 자동 모드가 타임라인 자동 전진을
+    # 잠근다(run18~20 실측: playing=True인데 update 무전진). 그래서 레이캐스트 사전계산을
+    # 버리고 사전 정의 구역(spawn zones, 순수 수학) 방식으로 전환했다.
     core.set_physics_mode()
     bounds = core.get_physics_bounds()
-    start_positions: Dict[int, Dict[str, Tuple[float, float, float]]] = {}
-    if not getattr(args, "keep_positions", False):
-        start_positions = precompute_floor_positions(core, bounds, cfgs, all_objids)
     core.set_playback_mode()
     _repo = getattr(core, "_repository", None)
     print(f"[gen] after playback_mode: repo_start={getattr(_repo, 'data_start_time', None)}")
+
+    spawn_zones = None
+    if not getattr(args, "keep_positions", False):
+        if getattr(args, "spawn_plan", None) and args.min_objects != args.max_objects:
+            raise RuntimeError("--spawn-plan은 고정 객체 수가 전제: --min-objects == --max-objects")
+        spawn_zones = load_spawn_zones(args, core)
+        print(f"[gen] spawn zones: { {k: v for k, v in spawn_zones.items()} } "
+              f"plan={getattr(args, 'spawn_plan', None) or '(첫 구역에 전원)'}")
 
     for cfg in cfgs:
         objids = pick_objids(all_objids, cfg.n_objects, cfg.seed)
@@ -406,12 +486,24 @@ def run(args, core=None) -> None:
         core.set_to_earliest_time()
         synth_active = [o for o in objids if o not in data_objids]
         if synth_active:
-            # 합성 객체는 데이터 좌표가 없음 — 사전 계산 위치가 없더라도 산개는 보장(#6 방지).
+            # 합성 객체는 데이터 좌표가 없음 — 구역 샘플이 이격 실패로 놓쳐도 산개는 보장(#6 방지).
             apply_positions(core, random_positions(bounds, synth_active, cfg.seed + 1))
-        pre = start_positions.get(cfg.idx) or {}
-        if pre:
-            # physics OFF 상태 적용 → PhysX가 켜질 때 이 좌표를 초기 포즈로 인식(확실 반영).
-            apply_positions(core, pre)
+        if spawn_zones is not None:
+            plan = parse_spawn_plan(getattr(args, "spawn_plan", None), spawn_zones, len(objids))
+            zpos = sample_zone_positions(spawn_zones, plan, objids, cfg.seed)
+            missing = [o for o in objids if o not in zpos]
+            if missing:
+                print(f"[gen] zone-pos ep{cfg.idx}: sep-fail {missing} -> 데이터 좌표/산개 폴백")
+            if zpos:
+                # physics OFF 상태 적용 → PhysX가 켜질 때 이 좌표를 초기 포즈로 인식(확실 반영).
+                apply_positions(core, zpos)
+            print(f"[gen] zone-pos ep{cfg.idx}: "
+                  f"{ {k: tuple(round(v, 1) for v in xyz) for k, xyz in zpos.items()} }")
+            # 적용 검증: 좌표가 실제 프림에 반영됐는지 월드 좌표로 확인(합성 프림 추락
+            # 사고의 재발 감지 — run19에서 이동 명령이 조용히 무시된 정황).
+            cur = core.get_current_object_positions() or {}
+            print(f"[gen] pos-verify ep{cfg.idx}: "
+                  f"{ {k: tuple(round(float(v), 1) for v in xyz) for k, xyz in sorted(cur.items())} }")
         if getattr(args, "keep_positions", False):
             # 배치 검증 로그: repository가 비었으면 위 호출이 조용히 no-op이 된다.
             repo = getattr(core, "_repository", None)
@@ -504,6 +596,29 @@ def _self_test() -> None:
     pts = list((x, z) for x, y, z in pos.values())
     assert all((pts[i][0]-pts[j][0])**2 + (pts[i][1]-pts[j][1])**2 >= (0.15*80)**2
                for i in range(len(pts)) for j in range(i+1, len(pts))), "min-sep violated"
+    # spawn zones: plan 파싱, 구역 내 샘플·마진·이격·바닥+5, 다중 구역 배정, 결정성
+    zones = {"a": {"min": [0.0, 0.0], "max": [1000.0, 800.0], "floor": 89.5},
+             "b": {"min": [2000.0, 0.0], "max": [2600.0, 600.0], "floor": 120.0}}
+    assert parse_spawn_plan(None, zones, 4) == [("a", 4)]
+    assert parse_spawn_plan("a:2,b:2", zones, 4) == [("a", 2), ("b", 2)]
+    for bad in ("c:4", "a:1,b:1"):
+        try:
+            parse_spawn_plan(bad, zones, 4)
+            raise AssertionError(f"plan {bad!r} should fail")
+        except ValueError:
+            pass
+    zp = sample_zone_positions(zones, [("a", 2), ("b", 2)], ["o1", "o2", "o3", "o4"], seed=7)
+    assert set(zp) == {"o1", "o2", "o3", "o4"}
+    for o in ("o1", "o2"):
+        x, y, z = zp[o]
+        assert 100.0 <= x <= 900.0 and 80.0 <= z <= 720.0 and abs(y - 94.5) < 1e-9, zp[o]
+    for o in ("o3", "o4"):
+        x, y, z = zp[o]
+        assert 2060.0 <= x <= 2540.0 and 60.0 <= z <= 540.0 and abs(y - 125.0) < 1e-9, zp[o]
+    assert zp == sample_zone_positions(zones, [("a", 2), ("b", 2)], ["o1", "o2", "o3", "o4"], seed=7)
+    (x1, _, z1), (x2, _, z2) = zp["o1"], zp["o2"]
+    assert (x1 - x2) ** 2 + (z1 - z2) ** 2 >= (0.15 * 800.0) ** 2, "zone min-sep violated"
+
     # sample_floor_positions: 바닥 없는 구역 기각, floor+offset 스폰, 허용창·폴백
     bounds2 = {"center": (0.0, 90.0, 0.0), "size": (1000.0, 300.0, 800.0), "is_y_up": True}
     pos2 = sample_floor_positions(bounds2, ["a", "b", "c"], 7,
@@ -550,6 +665,14 @@ def main() -> None:
                          "default: /World/summarization_camera")
     ap.add_argument("--keep-positions", action="store_true",
                     help="skip random start positions; keep data-driven positions (GUI와 동일)")
+    ap.add_argument("--spawn-zones", type=str, default=None,
+                    help="스폰 구역 정의: JSON 파일 경로 또는 인라인 JSON "
+                         '{"name": {"min": [x,z], "max": [x,z], "floor": 89.5}}. '
+                         "미지정 시 궤적 범위 전체가 단일 구역")
+    ap.add_argument("--spawn-plan", type=str, default=None,
+                    help='구역별 객체 수 배정 "zoneA:2,zoneB:2" (합계 = 객체 수; min==max 필요)')
+    ap.add_argument("--spawn-floor", type=float, default=89.5,
+                    help="기본 구역의 바닥 높이(cm; run18~20 레이캐스트 실측값)")
     ap.add_argument("--extra-objects", type=int, default=0,
                     help="궤적 데이터 외 합성 우주인 추가 수(physics 전용; keep-positions와 양립 불가)")
     ap.add_argument("--upload-uri", type=str, default=None,
