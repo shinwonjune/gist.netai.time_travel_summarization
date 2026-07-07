@@ -953,7 +953,16 @@ class RealtimeCaptureRunner:
                         except Exception as e:
                             if seq == 0:
                                 print(f"[HL] overlay compose failed: {e!r}; continuing")
-                    queue.push((seq, rgba, req.width, req.height))
+                    # 인코더 스레드가 죽으면(백엔드 부재 등) 아무도 큐를 비우지 않아
+                    # push가 영원히 대기했었다(L40 실측: 32프레임 후 무증상 동결).
+                    # 사망 감지 시 즉시 중단 → 루프 탈출 → encoder.error가 실패로 보고됨.
+                    if encoder.error:
+                        print(f"[HL] encoder dead -> abort capture: {encoder.error.splitlines()[0]}")
+                        break
+                    if not queue.push((seq, rgba, req.width, req.height), timeout=10.0):
+                        print(f"[HL] frame push timeout at seq={seq} "
+                              f"(encoder stalled? error={bool(encoder.error)}) -> abort capture")
+                        break
                     pushed += 1
                 if probing:
                     _t3 = time.perf_counter()

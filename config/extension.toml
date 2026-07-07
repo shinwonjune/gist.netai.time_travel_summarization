@@ -37,13 +37,19 @@ repository = ""  # URL of the extension source repository
 [python.pipapi]
 # Runtime packages needed for Data Lake / MinIO trajectory loading.
 # `minio` handles s3:// / minio:// URIs and `pyarrow` is required for parquet chunks.
+# `imageio`(+`imageio-ffmpeg`: ffmpeg 바이너리 동봉)는 비디오 인코더 백엔드 —
+# 시스템 ffmpeg가 없는 머신(예: sudo 불가 공용 서버)에서도 캡처가 동작하게 한다.
 requirements = [
     "minio",
     "pyarrow",
+    "imageio",
+    "imageio-ffmpeg",
 ]
 modules = [
     "minio",
     "pyarrow",
+    "imageio",
+    "imageio_ffmpeg",
 ]
 use_online_index = true
 ignore_import_check = false
