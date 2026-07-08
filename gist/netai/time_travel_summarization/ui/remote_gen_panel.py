@@ -12,7 +12,7 @@ import threading
 import time
 
 from ..automation.remote_generation import (
-    JobSpec, LocalTransport, SSHTransport, read_status, submit_job,
+    JobSpec, read_status, submit_job, transport_from_host,
 )
 
 _DEFAULT_HOST = "netai@sv4000-2"
@@ -118,8 +118,9 @@ class RemoteGenPanel:
         self._dispatcher.submit(lambda: setattr(self._status_label, "text", text))
 
     def _transport(self):
-        host = self._host.model.get_value_as_string().strip()
-        return LocalTransport() if host in ("", "local") else SSHTransport(host)
+        # Host 판별: "user@host"=SSH / "http://localhost:8800"=REST(잡 API, SSH 터널
+        # 선행: ssh -L 8800:localhost:8800 <host>) / ""·"local"=이 머신
+        return transport_from_host(self._host.model.get_value_as_string())
 
     def _build_spec(self) -> JobSpec:
         job_id = "gen-" + datetime.datetime.now().strftime("%Y%m%d-%H%M%S")

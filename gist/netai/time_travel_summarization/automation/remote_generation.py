@@ -99,6 +99,60 @@ class SSHTransport:
         return p.returncode, (p.stdout + p.stderr).strip()
 
 
+class RESTTransport:
+    """잡 API(job_api.py) HTTP 클라이언트 — 하이브리드 모델의 원격 절반.
+
+    데몬은 서버 localhost에만 바인딩되므로, 원격에서는 SSH 터널을 먼저 연다:
+        ssh -L 8800:localhost:8800 <host>   →   base_url = http://localhost:8800
+    stdlib urllib만 사용 (Kit python 추가 의존성 없음).
+    """
+
+    name = "rest"
+
+    def __init__(self, base_url: str, api_key: str = ""):
+        self.base_url = base_url.rstrip("/")
+        self.api_key = api_key or ""
+
+    def _request(self, method: str, path: str, payload: Optional[dict] = None,
+                 timeout: float = 15.0) -> dict:
+        import json as _json
+        import urllib.request
+
+        headers = {"Content-Type": "application/json"}
+        if self.api_key:
+            headers["X-API-Key"] = self.api_key
+        req = urllib.request.Request(
+            self.base_url + path, method=method, headers=headers,
+            data=_json.dumps(payload).encode("utf-8") if payload is not None else None)
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return _json.loads(resp.read().decode("utf-8"))
+
+    def submit_spec(self, spec: JobSpec) -> Tuple[bool, str]:
+        from dataclasses import asdict
+        try:
+            out = self._request("POST", "/jobs", payload=asdict(spec))
+            return True, (f"{out.get('job_id')} queued on gpu {out.get('gpu')}"
+                          f" (ahead {out.get('ahead', 0)})")
+        except Exception as exc:
+            return False, f"REST submit failed: {exc!r}"
+
+    def job_status(self, job_id: str) -> dict:
+        try:
+            return self._request("GET", f"/jobs/{job_id}")
+        except Exception as exc:
+            return {"state": "unreachable", "error": repr(exc)}
+
+
+def transport_from_host(host: str):
+    """Host 문자열로 전송을 판별: http(s):// → REST, ''/'local' → 로컬, 그 외 → SSH."""
+    host = (host or "").strip()
+    if host in ("", "local"):
+        return LocalTransport()
+    if host.startswith("http://") or host.startswith("https://"):
+        return RESTTransport(host)
+    return SSHTransport(host)
+
+
 def build_submit_command(spec: JobSpec, remote_ext_root: str) -> str:
     """tmux 분리 세션으로 러너를 띄우는 셸 명령 1줄을 조립.
 
@@ -119,6 +173,8 @@ def build_status_command(job_id: str, remote_ext_root: str) -> str:
 
 
 def submit_job(spec: JobSpec, transport, remote_ext_root: str) -> Tuple[bool, str]:
+    if hasattr(transport, "submit_spec"):   # REST — 큐잉은 데몬이 담당
+        return transport.submit_spec(spec)
     rc, out = transport.run(build_submit_command(spec, remote_ext_root))
     ok = rc == 0 and "SUBMITTED" in out
     return ok, out
@@ -126,6 +182,8 @@ def submit_job(spec: JobSpec, transport, remote_ext_root: str) -> Tuple[bool, st
 
 def read_status(job_id: str, transport, remote_ext_root: str) -> dict:
     """status 파일(KEY=VALUE 줄들) → dict. 접근 실패 시 state=unreachable."""
+    if hasattr(transport, "job_status"):    # REST
+        return transport.job_status(job_id)
     try:
         rc, out = transport.run(build_status_command(job_id, remote_ext_root))
     except Exception as exc:  # ssh 타임아웃 등 — 제어면은 죽지 않는다
@@ -162,6 +220,34 @@ def _self_test() -> None:
         def run(self, command, timeout=30.0):
             raise TimeoutError("ssh timeout")
     assert read_status("gen-x", DeadTransport(), "/x")["state"] == "unreachable"
+    # transport 판별
+    assert isinstance(transport_from_host(""), LocalTransport)
+    assert isinstance(transport_from_host("local"), LocalTransport)
+    assert isinstance(transport_from_host("netai@sv4000-2"), SSHTransport)
+    assert isinstance(transport_from_host("http://localhost:8800"), RESTTransport)
+    # REST 경로 디스패치 (HTTP는 mock)
+    calls = []
+
+    class FakeREST(RESTTransport):
+        def _request(self, method, path, payload=None, timeout=15.0):
+            calls.append((method, path))
+            if method == "POST":
+                assert payload["job_id"] == spec.job_id and payload["seed"] == 42
+                return {"job_id": payload["job_id"], "gpu": payload["gpu"], "ahead": 0}
+            return {"state": "running", "episodes_done": "5", "total": "75"}
+
+    rest = FakeREST("http://localhost:8800/")
+    ok, msg = submit_job(spec, rest, "/unused")
+    assert ok and "queued on gpu" in msg, msg
+    st2 = read_status(spec.job_id, rest, "/unused")
+    assert st2["state"] == "running" and calls == [("POST", "/jobs"), ("GET", f"/jobs/{spec.job_id}")]
+
+    class DeadREST(RESTTransport):
+        def _request(self, *a, **k):
+            raise ConnectionError("tunnel down")
+    ok2, msg2 = submit_job(spec, DeadREST("http://localhost:8800"), "/x")
+    assert not ok2 and "failed" in msg2
+    assert read_status("j", DeadREST("http://localhost:8800"), "/x")["state"] == "unreachable"
     print("remote_generation self-test OK")
 
 
