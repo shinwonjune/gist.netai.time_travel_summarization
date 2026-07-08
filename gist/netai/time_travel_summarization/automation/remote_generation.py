@@ -45,6 +45,9 @@ class JobSpec:
     upload_uri: str = ""              # 예: s3://time-travel-summarization/episodes/<job_id>
     spawn_plan: str = ""              # "zoneA:2,zoneB:2" (빈 값 = 기본 구역 전원)
     keep_positions: bool = False
+    # 마스터 시드 — 에피소드 조건(시각·속도·배치·배회)이 전부 여기서 유도되므로
+    # run마다 달라야 한다(같으면 이름만 다른 완전 중복 데이터가 재생성됨).
+    seed: int = 42
 
     def to_env(self) -> dict:
         """run_job.sh가 소비하는 env 매핑 (값은 전부 문자열; 빈 값은 전송 생략)."""
@@ -66,6 +69,7 @@ class JobSpec:
             "UPLOAD_URI": self.upload_uri,
             "SPAWN_PLAN": self.spawn_plan,
             "KEEP_POSITIONS": "1" if self.keep_positions else "",
+            "SEED": str(int(self.seed)),
         }
 
 

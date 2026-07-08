@@ -200,13 +200,30 @@ def discover_episodes(episodes_dir: Path) -> List[Path]:
     return metas
 
 
+def derive_episode_id(meta_path: Path, episodes_dir: Path) -> str:
+    """episodes_dir 기준 상대경로 전체로 에피소드 ID를 만든다.
+
+    여러 run(prod-20260707 + prod-20260708 등)을 한 번에 빌드할 때 run마다
+    ep_0000/_video_0000이 반복되므로, 파일명만 쓰면 클립 파일명이 충돌해 서로
+    덮어쓴다. 상위 폴더들을 접두어로 붙여 run 간 유일성을 보장한다.
+    예: prod-20260707/ep_0000/_video_0000.meta.json -> prod-20260707_ep_0000__video_0000
+    """
+    stem = meta_path.name[: -len(".meta.json")]
+    try:
+        rel_parts = meta_path.parent.relative_to(episodes_dir).parts
+    except ValueError:
+        rel_parts = ()
+    return "_".join((*rel_parts, stem)) if rel_parts else stem
+
+
 def process_episode(
     meta_path: Path, clips_dir: Path, ffmpeg: str, args
 ) -> Tuple[str, List[dict]]:
     """Slice an episode into labeled clip records. Returns (episode_id, records)."""
     meta = json.loads(meta_path.read_text(encoding="utf-8"))
-    episode_id = meta_path.name[: -len(".meta.json")]
-    video = meta_path.parent / meta.get("video", episode_id + ".mp4")
+    episode_id = derive_episode_id(meta_path, args.episodes_dir)
+    stem = meta_path.name[: -len(".meta.json")]
+    video = meta_path.parent / meta.get("video", stem + ".mp4")
     if not video.exists():
         video = meta_path.with_suffix("").with_suffix(".mp4")
 

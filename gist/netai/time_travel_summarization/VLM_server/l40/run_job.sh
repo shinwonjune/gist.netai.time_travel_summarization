@@ -29,6 +29,7 @@ STAGE="${STAGE:-}"
 UPLOAD_URI="${UPLOAD_URI:-}"
 SPAWN_PLAN="${SPAWN_PLAN:-}"
 KEEP_POSITIONS="${KEEP_POSITIONS:-}"
+SEED="${SEED:-42}"   # run마다 반드시 다르게 — 같으면 이전 run과 동일 에피소드 재생성
 
 # ---- 경로 해석 (run_smoke.sh와 동일 규칙) ---------------------------------- #
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -78,7 +79,7 @@ write_status running 0
 # ---- 생성 인자 조립 --------------------------------------------------------- #
 EXEC_ARGS="$GEN --episodes $EPISODES --duration $DURATION --render-fps $RENDER_FPS \
  --speed-min $SPEED_MIN --speed-max $SPEED_MAX \
- --min-objects $MIN_OBJECTS --max-objects $MAX_OBJECTS --out $OUT --quit"
+ --min-objects $MIN_OBJECTS --max-objects $MAX_OBJECTS --seed $SEED --out $OUT --quit"
 [ "$EXTRA_OBJECTS" != "0" ] && EXEC_ARGS="$EXEC_ARGS --extra-objects $EXTRA_OBJECTS"
 [ -n "$STAGE" ] && EXEC_ARGS="$EXEC_ARGS --stage $STAGE"
 [ -n "$CAMERA" ] && EXEC_ARGS="$EXEC_ARGS --camera $CAMERA"

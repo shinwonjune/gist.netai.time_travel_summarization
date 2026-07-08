@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import datetime
 import threading
+import time
 
 from ..automation.remote_generation import (
     JobSpec, LocalTransport, SSHTransport, read_status, submit_job,
@@ -90,6 +91,11 @@ class RemoteGenPanel:
             ui.Label("~", width=10)
             self._max_objects = ui.IntField(width=30)
             self._max_objects.model.set_value(4)
+            ui.Label("Seed:", width=40)
+            self._seed = ui.IntField(width=75)
+            # run마다 달라야 중복 데이터가 안 생김(시드가 전 조건을 유도) → 초 단위
+            # 유닉스 시각 기본값 + 제출 시마다 재발급(같은 날 다중 생성 대응)
+            self._seed.model.set_value(self._fresh_seed())
             ui.Spacer(width=15)
             self._upload_checkbox = ui.CheckBox(width=20)
             self._upload_checkbox.model.set_value(True)
@@ -102,6 +108,10 @@ class RemoteGenPanel:
             self._status_label = ui.Label("", style={"color": 0xFF888888})
 
     # ---- helpers ----------------------------------------------------------- #
+
+    @staticmethod
+    def _fresh_seed() -> int:
+        return int(time.time()) % 2_000_000_000  # IntField(int32) 안전 범위
 
     def _set_status(self, text: str):
         # 스레드에서 불려도 안전하게 디스패처 경유
@@ -124,6 +134,7 @@ class RemoteGenPanel:
             camera=self._camera.model.get_value_as_string().strip(),
             stage=self._stage.model.get_value_as_string().strip(),
             upload_uri=upload,
+            seed=self._seed.model.get_value_as_int(),
         )
 
     # ---- callbacks ---------------------------------------------------------- #
@@ -137,6 +148,7 @@ class RemoteGenPanel:
         transport = self._transport()
         ext_root = self._ext_root.model.get_value_as_string().strip()
         self._last_job_id = spec.job_id
+        self._seed.model.set_value(self._fresh_seed())  # 다음 제출용 시드 재발급
         self._status_label.text = f"submitting {spec.job_id} via {transport.name}..."
 
         def work():
