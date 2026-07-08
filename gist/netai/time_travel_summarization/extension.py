@@ -68,6 +68,11 @@ class NetAITimetravelDreamAI(_get_i_ext_base()):
         self._vlm_client_core = VLMClientCore()
         self._vlm_client_window = VLMClientWindow(self._vlm_client_core, ext_id)
         carb.log_info("[Extension] VLM Client window created")
+
+        # Create remote Data Generation window (플랫폼 제어면 — 재현 제어와 분리)
+        from .ui.remote_gen_panel import RemoteGenWindow
+        self._remote_gen_window = RemoteGenWindow()
+        carb.log_info("[Extension] Data Generation window created")
         
         # Try to create overlay components (OPTIONAL - won't break if it fails)
         self._overlay = None
@@ -158,6 +163,14 @@ class NetAITimetravelDreamAI(_get_i_ext_base()):
             except Exception as e:
                 carb.log_error(f"[Extension] Error destroying event window: {e}")
             self._event_window = None
+
+        # Clean up Data Generation window
+        if hasattr(self, '_remote_gen_window') and self._remote_gen_window:
+            try:
+                self._remote_gen_window.destroy()
+            except Exception as e:
+                carb.log_error(f"[Extension] Error destroying data-gen window: {e}")
+            self._remote_gen_window = None
         
         # Clean up VLM Client window
         if hasattr(self, '_vlm_client_window') and self._vlm_client_window:
