@@ -761,7 +761,8 @@ class TimeTravelCore:
         # (hardcoded 5×3×5 / origin은 사용자 trajectory 범위와 안 맞을 수 있음)
         is_y_up = UsdGeom.GetStageUpAxis(stage) == UsdGeom.Tokens.y
         coord_range = self._repository.get_coord_range()
-        margin = 2.0 * m_to_units          # 영역 바깥 여유 (m)
+        # (주의) 과거 '영역 바깥 여유(margin)' 변수가 있었으나 실제로는 한 번도 벽 크기에
+        # 반영되지 않은 죽은 코드였음 — 현행 검증된 동작(벽=궤적 범위 그대로)을 유지하며 제거.
         min_height = 3.0 * m_to_units      # 최소 천장 높이 (m)
         if coord_range:
             mins, maxs = coord_range

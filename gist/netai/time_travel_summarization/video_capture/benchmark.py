@@ -105,14 +105,14 @@ def _markdown_table(summary_a1: dict, summary_a2: dict, duration_s: float, repea
         speedup_line = f"\n**Speedup (A1/A2 wall-clock 비)**: **{ratio:.2f}×**\n"
 
     body = [
-        f"# Realtime Capture 벤치마크",
-        f"",
+        "# Realtime Capture 벤치마크",
+        "",
         f"- 측정 시각: {datetime.now().isoformat(timespec='seconds')}",
         f"- 통제 변수: 해상도 {width}×{height}, fps {fps}, duration {duration_s}s, repeat {repeat}",
-        f"- 환경: Omniverse Kit Python 3.12.x, 단일 viewport",
-        f"",
-        f"| 메트릭 | A1 (Movie Capture) | A2 (viewport+async) |",
-        f"|---|---|---|",
+        "- 환경: Omniverse Kit Python 3.12.x, 단일 viewport",
+        "",
+        "| 메트릭 | A1 (Movie Capture) | A2 (viewport+async) |",
+        "|---|---|---|",
     ]
     for name, a1v, a2v in rows:
         body.append(f"| {name} | {a1v} | {a2v} |")

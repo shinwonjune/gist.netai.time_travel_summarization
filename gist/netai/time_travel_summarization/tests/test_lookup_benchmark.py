@@ -2,7 +2,6 @@ import datetime
 import unittest
 
 from gist.netai.time_travel_summarization.playback.lookup_benchmark import (
-    LkvCache,
     LkvForwardBisectHybrid,
     lkv_linear,
     synthesize_forward_queries,

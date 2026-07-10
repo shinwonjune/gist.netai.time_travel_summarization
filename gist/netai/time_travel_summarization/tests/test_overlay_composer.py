@@ -5,8 +5,6 @@ class OverlayComposerHeadlessTest(unittest.TestCase):
     def test_module_import(self):
         from gist.netai.time_travel_summarization.video_capture.overlay_composer import (
             OverlayComposer,
-            OverlayFrame,
-            TextItem,
         )
 
         self.assertTrue(callable(OverlayComposer))

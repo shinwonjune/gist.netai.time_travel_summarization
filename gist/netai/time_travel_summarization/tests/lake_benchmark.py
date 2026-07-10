@@ -18,7 +18,7 @@ import tempfile
 import time
 from pathlib import Path
 
-from gist.netai.time_travel_summarization.playback.lake_common import ingest_synthetic, manifest_uri
+from gist.netai.time_travel_summarization.playback.lake_common import ingest_synthetic
 from gist.netai.time_travel_summarization.playback.lake_repository import LakeTrajectoryRepository
 
 HZ = 5.0

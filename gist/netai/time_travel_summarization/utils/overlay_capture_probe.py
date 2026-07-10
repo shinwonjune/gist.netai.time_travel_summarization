@@ -8,7 +8,6 @@ Overlay-inclusive capture API probe.
     exec(open(r"C:\\Users\\wonjune\\workspace\\kit-app-template\\source\\extensions\\gist.netai.time_travel_summarization\\gist\\netai\\time_travel_summarization\\utils\\overlay_capture_probe.py", encoding="utf-8").read())
 """
 
-import os
 import tempfile
 from pathlib import Path
 
@@ -30,9 +29,9 @@ try:
         out_file.unlink()
     cap = capture_viewport_to_file(vp, str(out_file))
     print(f"    ✓ 호출 OK, return: {type(cap).__name__}")
-    print(f"    → 약 2~5초 후 다음 파일 열어보세요:")
+    print("    → 약 2~5초 후 다음 파일 열어보세요:")
     print(f"      {out_file}")
-    print(f"    overlay 텍스트 보이면 '이 API가 답'")
+    print("    overlay 텍스트 보이면 '이 API가 답'")
 except Exception as e:
     print(f"    ✗ FAIL: {e!r}")
 

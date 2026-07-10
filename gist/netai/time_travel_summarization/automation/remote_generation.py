@@ -16,7 +16,7 @@ from __future__ import annotations
 import shlex
 import subprocess
 from dataclasses import dataclass
-from typing import Tuple
+from typing import Optional, Tuple
 
 JOB_SCHEMA_VERSION = 1
 

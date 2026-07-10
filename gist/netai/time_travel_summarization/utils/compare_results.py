@@ -292,7 +292,7 @@ def print_comparison_report(precision: float, recall: float, f1: float, details:
     print("=" * 80)
     print("Object Detection 비교 결과 (완전 일치만 정답)")
     print("=" * 80)
-    print(f"\n📊 성능 지표:")
+    print("\n📊 성능 지표:")
     print(f"  Precision: {precision:.2f} ({precision*100:.2f}%)")
     print(f"  Recall:    {recall:.2f} ({recall*100:.2f}%)")
     print(f"  F1 Score:  {f1:.2f} ({f1*100:.2f}%)")

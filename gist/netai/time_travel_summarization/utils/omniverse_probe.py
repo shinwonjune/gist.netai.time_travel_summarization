@@ -56,7 +56,6 @@ except Exception as e:
 print("\n[3] 1프레임 RGBA buffer 추출 시도")
 try:
     from omni.kit.viewport.utility import get_active_viewport, capture_viewport_to_buffer
-    import asyncio, omni.kit.async_engine as ae
 
     captured = {}
     def _on_capture(buf, buf_size, width, height, fmt):
@@ -84,7 +83,7 @@ for name, attr in [("imageio", "__version__"), ("imageio_ffmpeg", "get_ffmpeg_ve
         v = getattr(mod, attr, None)
         v = v() if callable(v) else v
         print(f"    ✓ {name}: {v}")
-    except Exception as e:
+    except Exception:
         print(f"    ✗ {name}: not available")
 
 # [5] Python / pip

@@ -1,0 +1,41 @@
+# 정적 품질 게이트 설정 (플랫폼고도화 J1-②③)
+# 실행:  uvx ruff check gist/        (린트)
+#        uvx mypy                    (타입 검사 — 신규 순수 모듈부터 점진 적용)
+#        uvx --with minio pytest     (테스트 — kit 마커 제외는 CI 참조)
+
+[tool.ruff]
+line-length = 120
+target-version = "py310"   # WSL 3.12 / Kit 3.12 / L40 venv 3.13의 최소 공배수
+
+[tool.ruff.lint]
+# 기본 규칙(E4/E7/E9/F: 문법·이름·임포트 오류 계열). 아래 ignore는 "의도된 패턴"의 명시:
+#  - E731: 축별 좌표 조립 등 짧은 람다 대입을 허용 (가독성상 def보다 나은 지점들)
+#  - E402: Kit 확장 특성상 모듈 상단이 아닌 지연 임포트가 표준 (omni.*는 런타임에만 존재)
+ignore = ["E731", "E402"]
+
+[tool.ruff.lint.per-file-ignores]
+# 확장 로더/테스트 패키지의 재수출(star import)은 Kit 관례 — 이 파일들에 한해 허용
+"gist/netai/time_travel_summarization/__init__.py" = ["F403", "F401"]
+"gist/netai/time_travel_summarization/tests/__init__.py" = ["F403", "F401"]
+
+[tool.mypy]
+# 점진 도입: 신규·순수 파이썬 모듈만 검사 대상으로 시작하고,
+# 리팩터링(facade 분해 등)을 거친 모듈을 하나씩 추가한다.
+files = [
+    "gist/netai/time_travel_summarization/automation/remote_generation.py",
+    "gist/netai/time_travel_summarization/utils/vllm_client.py",
+    "gist/netai/time_travel_summarization/utils/build_dataset.py",
+    "gist/netai/time_travel_summarization/video_capture/types.py",
+    "gist/netai/time_travel_summarization/video_capture/frame_queue.py",
+    "gist/netai/time_travel_summarization/timefmt.py",
+]
+python_version = "3.10"
+ignore_missing_imports = true   # omni/carb/requests 등 실행환경 전용 모듈
+follow_imports = "silent"       # 점진 도입: 대상 파일의 오류만 보고(임포트 추적 보고 억제)
+check_untyped_defs = true
+
+[tool.pytest.ini_options]
+testpaths = ["gist/netai/time_travel_summarization/tests"]
+markers = [
+    "kit: Omniverse Kit 런타임(omni.*)이 필요한 테스트 — CI에서는 -m 'not kit'로 제외",
+]

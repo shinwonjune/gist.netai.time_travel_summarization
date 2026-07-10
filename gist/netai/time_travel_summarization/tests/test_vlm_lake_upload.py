@@ -61,6 +61,7 @@ def test_upload_video_file_uri_uses_temp_file_and_cleans_it_up():
             source_path = Path(source.name)
 
         core = VLMClientCore()
+        core._api = "vss"  # 이 테스트는 레거시 VSS 업로드 경로를 검증
         core._client = fake_client
 
         assert core.upload_video(source_path.as_uri()) is True
@@ -98,6 +99,7 @@ def test_upload_video_s3_uri_uses_storage_adapter_temp_bridge(monkeypatch):
     monkeypatch.setattr(storage_module, "from_uri", lambda uri: adapter)
 
     core = VLMClientCore()
+    core._api = "vss"  # 이 테스트는 레거시 VSS 업로드 경로를 검증
     core._client = fake_client
 
     assert core.upload_video(source_uri) is True
@@ -114,6 +116,7 @@ def test_upload_video_missing_file_uri_returns_false():
     with tempfile.TemporaryDirectory() as tmpdir:
         missing_uri = (Path(tmpdir) / "missing.mp4").as_uri()
         core = VLMClientCore()
+        core._api = "vss"
         core._client = FakeVSSClient()
 
         assert core.upload_video(missing_uri) is False
@@ -121,6 +124,7 @@ def test_upload_video_missing_file_uri_returns_false():
 
 def test_upload_video_missing_local_filename_returns_false():
     core = VLMClientCore()
+    core._api = "vss"
     core._client = FakeVSSClient()
 
     assert core.upload_video("missing-local-video.mp4") is False
@@ -128,6 +132,7 @@ def test_upload_video_missing_local_filename_returns_false():
 
 def test_generate_captions_saves_raw_result_only_to_output_root_uri(tmp_path):
     core = VLMClientCore.__new__(VLMClientCore)
+    core._api = "vss"  # 레거시 생성 경로 검증
     core._client = FakeGenerationClient()
     core._current_video_id = "vid-123"
     core._last_generation_response = None

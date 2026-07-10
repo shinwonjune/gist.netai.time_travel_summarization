@@ -69,7 +69,10 @@ class MinioAdapter(StorageAdapter):
         bucket, key_prefix = self._parse_uri(uri_prefix)
         objects = self._get_client().list_objects(bucket, prefix=key_prefix, recursive=recursive)
         for obj in objects:
-            if obj.size == 0 and obj.object_name.endswith("/"):
+            # 비재귀 목록에서 minio SDK는 하위 '폴더'를 dir 항목(size=None,
+            # object_name이 '/'로 끝남)으로 반환한다. 기존 `size == 0` 비교는
+            # None == 0이 False라 폴더가 파일처럼 새어 나왔다(실환경 테스트로 발견).
+            if getattr(obj, "is_dir", False) or obj.object_name.endswith("/"):
                 continue
             yield ObjectInfo(
                 uri=f"s3://{bucket}/{obj.object_name}",

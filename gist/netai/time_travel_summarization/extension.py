@@ -1,7 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2024 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: LicenseRef-NvidiaProprietary
 
-import os
 from pathlib import Path
 
 _INSTANCE_REGISTRY = {}
@@ -38,10 +37,7 @@ class NetAITimetravelDreamAI(_get_i_ext_base()):
 
         print("[netai.timetravel_dreamai] Extension startup")
         
-        # Print current working directory and extension path
-        current_dir = os.getcwd()
-        extension_file = Path(__file__).absolute()
-        extension_dir = extension_file.parent
+        extension_dir = Path(__file__).absolute().parent
         
         # Initialize core logic
         self._core = TimeTravelCore() 

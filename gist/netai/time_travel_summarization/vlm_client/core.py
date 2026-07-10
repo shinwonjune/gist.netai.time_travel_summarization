@@ -8,7 +8,7 @@ VLM 서버 통신: _initialize_client 메서드에서 직접 IP 주소와 포트
 import os
 import json
 from pathlib import Path
-from typing import Optional, Dict, Any
+from typing import Optional
 import carb
 from datetime import datetime
 

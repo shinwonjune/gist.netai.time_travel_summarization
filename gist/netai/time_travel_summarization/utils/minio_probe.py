@@ -7,7 +7,14 @@ MinIO 연결 read-only 점검.
 
 사용: python3 minio_probe.py [prefix]
 """
-import datetime, hashlib, hmac, os, sys, urllib.request, urllib.parse, urllib.error
+import datetime
+import hashlib
+import hmac
+import os
+import sys
+import urllib.request
+import urllib.parse
+import urllib.error
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
@@ -80,13 +87,15 @@ def main():
         print("  ⚠ scheme/secure 불일치 — TLS handshake 실패 예상")
 
     if not all([endpoint, access, secret, bucket]):
-        print("✗ .env에 필수 키 누락"); sys.exit(2)
+        print("✗ .env에 필수 키 누락")
+        sys.exit(2)
 
     # 1. ListBuckets
     status, body = signed_get(endpoint, access, secret, region, "/")
     print(f"\n[1] ListBuckets       : HTTP {status}")
     if status != 200:
-        print(body.decode(errors='replace')[:400]); sys.exit(1)
+        print(body.decode(errors='replace')[:400])
+        sys.exit(1)
     root = ET.fromstring(body)
     buckets = [b.findtext("s3:Name", namespaces=NS) for b in root.iter(f"{{{NS['s3']}}}Bucket")]
     print(f"    buckets visible   : {buckets}")
@@ -105,7 +114,8 @@ def main():
     status, body = signed_get(endpoint, access, secret, region, f"/{bucket}", query=q)
     print(f"\n[2] ListObjectsV2 prefix='{prefix}' delim='/': HTTP {status}")
     if status != 200:
-        print(body.decode(errors='replace')[:400]); sys.exit(1)
+        print(body.decode(errors='replace')[:400])
+        sys.exit(1)
     root = ET.fromstring(body)
     prefixes = [p.text for p in root.iter(f"{{{NS['s3']}}}Prefix")]
     contents = [

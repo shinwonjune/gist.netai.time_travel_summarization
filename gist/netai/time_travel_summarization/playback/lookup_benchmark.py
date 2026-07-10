@@ -19,7 +19,7 @@ import datetime as _dt
 import random
 import time
 from pathlib import Path
-from typing import Callable, Dict, List, Optional, Tuple
+from typing import Dict, List, Optional
 
 
 # ---------- pure functions ----------

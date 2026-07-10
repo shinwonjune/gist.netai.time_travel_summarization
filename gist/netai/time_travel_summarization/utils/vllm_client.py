@@ -187,7 +187,8 @@ class VLLMClient:
 def _self_test() -> None:
     # duration 파싱 / 청크 스팬
     err = "Input #0 ... \n  Duration: 00:00:30.03, start: 0.000000, bitrate: 1379 kb/s"
-    assert abs(parse_duration_s(err) - 30.03) < 1e-9
+    dur = parse_duration_s(err)
+    assert dur is not None and abs(dur - 30.03) < 1e-9
     assert parse_duration_s("no duration here") is None
     assert chunk_spans(30.03, 2.0) == [(i * 2.0, 2.0) for i in range(15)]
     assert chunk_spans(1.9, 2.0) == []

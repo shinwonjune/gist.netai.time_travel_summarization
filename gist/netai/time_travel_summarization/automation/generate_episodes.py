@@ -630,10 +630,13 @@ def _self_test() -> None:
     assert sample_floor_positions(bounds2, ["a"], 7, lambda h0, h1: 300.0, 90.0) == {}, "tol window"
     with tempfile.TemporaryDirectory() as d:
         root = Path(d)
-        v = root / "_video_0003.mp4"; v.write_text("v")
+        v = root / "_video_0003.mp4"
+        v.write_text("v")
         v.with_suffix(".meta.json").write_text("{}")
-        col = root / "collisions_x.csv"; col.write_text("c")
-        tr = root / "_trace_0003.csv"; tr.write_text("t")
+        col = root / "collisions_x.csv"
+        col.write_text("c")
+        tr = root / "_trace_0003.csv"
+        tr.write_text("t")
         ep = organize_outputs(root, 3, v, col, tr)
         names = sorted(p.name for p in ep.iterdir())
         assert names == ["_trace_0003.csv", "_video_0003.meta.json", "_video_0003.mp4", "collisions_x.csv"], names
