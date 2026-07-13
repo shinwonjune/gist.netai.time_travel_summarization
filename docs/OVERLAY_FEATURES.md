@@ -8,9 +8,13 @@ The TimeTravel extension now includes VLM-friendly overlay features for visualiz
 ### 1. Time Display Overlay
 - **Location**: Bottom-right corner of viewport
 - **Style**: Dark background (0xFF1A1A1A) with green border (0xFF00FF00)
-- **Content**: 
-  - Date: YYYY-MM-DD format (gray text, 24px)
-  - Time: HH:MM:SS format (white text, 28px, bold)
+- **Content**: twin time을 **초 단위(`HH:MM:SS`)** 로 표시. 날짜·밀리초는 표시하지 않는다.
+  - 이유: VLM이 픽셀의 이 시계를 읽어 이벤트 시각을 보고하고, 충돌 CSV 라벨도 같은
+    형식을 쓴다 → **추론↔라벨 형식 정합**을 위해 형식을 한 곳(`timefmt.py`의 `PRECISION`,
+    `format_event_time`)에서 관리한다. (과거 `YYYY-MM-DD HH:MM:SS.mmm` 표기는 VLM 보고·라벨과
+    어긋나 초 단위로 통일 — physics 일지 #5)
+  - 절대 날짜가 필요한 경우(이벤트 인덱스)는 영상 사이드카의 앵커(`capture_start`)와 결합해
+    복원한다(explanation.md §3 참조).
 - **Toggle**: Can be turned on/off via Overlay Control window
 
 ### 2. Object ID Overlay (NEW)

@@ -3,6 +3,28 @@
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 
+## [Unreleased] - 2026-07 프레임워크 고도화
+
+### Added
+- **VLM 폐루프 완성**: PhysX 충돌 시뮬로 학습 데이터 생성 → Qwen3-VL-8B LoRA 튜닝 →
+  vLLM OpenAI 호환 직접 호출 추론(VSS 대체). 데이터 증량 스케일링 실증(base→v1→v2).
+- **이벤트 인덱스**(`event_processing/event_index.py`): 추론 결과를 `vlm_events/`에 축적,
+  사이드카 앵커로 절대 시각 복원(자정 롤오버), twin time 구간 조회 → 선택 시 재구성.
+- **원격 제어면**: REST 잡 API(FastAPI, `VLM_server/l40/job_api.py`) + GPU별 순차 큐 +
+  잡 타입(generate/train/serve) + 서빙 GPU 역할 분리. extension GUI "Remote Jobs" 창.
+- **재생 공백 점프**: 데이터 공백 > 임계값이면 시계를 다음 데이터로 순간이동.
+- **정적 게이트**: pyproject.toml(ruff+mypy) + `.github/workflows/ci.yml`, pytest kit 마커.
+
+### Changed
+- **facade.py 분해**(1,235줄 → 코디네이터 + app/{capture,physics,data,object,benchmark}_service).
+  공개 API 불변, 상태는 core 소유.
+- 오버레이/충돌 CSV 시각을 `timefmt.py` 초 단위로 통일(추론↔라벨 정합). "Stage Time"→"Twin Time".
+- GUI 정리: 캡처 진입점 단일화(메인 Capture→VLM Source 자동 전달), VSS 잔재 제거.
+
+### Fixed
+- `list_prefix` 폴더 누출(minio dir 항목 size=None vs ==0), build_dataset 크로스플랫폼 경로 2건.
+
+
 ## [Unreleased] - 2026-05-25 데이터레이크 연동
 
 ### Added
