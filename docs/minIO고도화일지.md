@@ -171,3 +171,67 @@ VSS는 사실상 "영상을 VLM에 전달하는 통로"로만 쓰이고 있었�
 ### 부수 정리
 - `utils/VSS_client.py` 등 IDE 잔재 import(`from unittest import result`) 제거, 사용처 없는 변수 정리.
 - `tests/test_vlm_lake_upload.py`: #6의 기본 API 전환(openai)에 맞춰 레거시 VSS 경로 테스트에 `core._api = "vss"` 명시.
+
+---
+
+## #9. 프레임워크 구조 고도화 — facade 분해·잡 타입·GUI 정리 (2026-07-10~12)
+
+RAG/agent 직전 단계까지의 받침 구축. 방향 합의: 추론은 큐 미경유(vLLM 자체 배칭),
+서빙과 잡은 GPU 역할 분리.
+
+### (1) facade 분해 — 1,235줄 → 코디네이터 + 서비스 5모듈
+`app/facade.py`를 얇은 코디네이터(공개 API 불변)로 두고 동작을 분리:
+`capture_service`(캡처·사이드카) / `physics_service`(모드 전환·recorder) /
+`data_service`(config·local/lake 활성화) / `object_service`(우주인 생성·활성 선택) /
+`benchmark_service`(lookup 벤치마크). **분해 원칙: 상태는 core가 소유, 서비스는
+동작만**(테스트가 `__new__`+속성 주입으로 core를 구성하고 extension.py가 `_wander`를
+직접 만지므로). 신규 6모듈을 mypy 대상에 편입(6→12파일) — 편입 즉시 기존 코드의
+타입 결함 2건(TraceRecorder str/Path, repo_factory 타입) 표면화·수정.
+
+### (2) L40 잡 타입 확장 + GPU 역할 분리
+- `JobSpec.job_type`: generate | train | serve_start | serve_stop, 타입별 러너 디스패치
+  (`runner_rel_for`). `run_train.sh`(qwen3vl_lora_swift.sh 래핑 — 하이퍼파라미터 단일
+  소스, USE_HF=1·venv·status 계약) / `run_serve.sh`(vLLM 127.0.0.1 상주 기동+준비 확인,
+  `--served-model-name` 고정으로 GUI 모델명과 정합, 멱등 stop) 신설.
+- **GPU 역할 분리**: env `SERVE_GPU`(기본 0)는 서빙 전용 — serve 잡은 강제 배정,
+  generate/train이 지정하면 422 거부. 상주(서빙)와 유한 잡의 경합을 큐가 아니라
+  역할로 차단. 리뷰 반영: 다른 모델 서빙 중 start는 명시 실패("stop 먼저").
+
+### (3) GUI 정리 — 창 구성 평가에 따른 중복 제거
+- **캡처 진입점 3→1**: VLM 창의 A1/A2 버튼 제거(realtime_capture 검증기 잔재 —
+  라벨·사이드카 없는 캡처가 섞이는 위험). 메인 Capture 완료 시 VLM 창 Source
+  **자동 채움**(`set_capture_complete_callback`)으로 수동 URI 복붙 대체.
+- VSS 잔재 정리: 모델 콤보 5종→Qwen3-VL 단일(vLLM model 필드와 일치 필요),
+  overlap 노브 제거. "Data Generation" 창 → "Remote Jobs"(Training/Serving 섹션 상설).
+- `ui/remote_gen_panel.py` → `automation/window.py` 이동 — "도메인 패키지에 창을
+  같이 두는" 지배 규칙으로 통일(ui/에는 공용만: main_window, task_dispatcher).
+
+### (4) 이벤트 인덱스 v1 — 추론 결과의 검색 표면
+`event_processing/event_index.py`: 추론 1회 = `vlm_events/<영상>.jsonl` 1개(이벤트
+1건=1행). minIO append 부재 → 영상별 오브젝트로 동시 쓰기 경합 원천 차단, 재추론 =
+덮어쓰기(최신이 진실). vlm_client 저장 경로에 best-effort 배선. 독립 리뷰(MAJOR)
+반영: minIO 비재귀 목록의 폴더 의미 차이로 조회가 빈 결과가 되는 버그 —
+후행 슬래시+recursive=True로 수정.
+
+---
+
+## #10. 시각 의미론 정리 — twin time·사이드카 앵커·공백 점프·이벤트 검색 (2026-07-12)
+
+사용자 흐름 확정("range 로드 → 공백 건너뛰며 재연 → range 내 이벤트 목록 → 선택
+시 재구축")에서 드러난 시각 체계 결함을 일괄 정리. 용어 확정: **twin time** =
+디지털 트윈 세계의 현재 시각(USD 타임라인 stage time과 구분).
+
+| 문제 | 원인 | 해결 (경로) |
+|---|---|---|
+| playback 캡처의 시각 앵커 오염 | 사이드카 capture_start가 벽시계 — 영상 픽셀(데이터 시각)과 불일치 → 이벤트가 캡처한 날짜에 붙음 | 앵커 = 그 모드의 내부 시계(`capture_anchor()`: playback이면 재생 헤드의 데이터 시각), 벽시계는 `wall_clock` 필드로 분리, 재연 창(`replay_start/end`) 기록 (`app/capture_service.py`) |
+| 레이크 캡처는 사이드카 자체가 없음 | 원격 URI면 skip | storage adapter로 s3에도 영상 옆 기록 |
+| 인덱스가 HH:MM:SS뿐 → 다일 조회 불성립 | VLM은 오버레이 시계만 보고(날짜 없음) | 적재 시 사이드카 앵커와 결합해 절대 datetime 저장, 자정 롤오버(+1일), `query_events`가 datetime 구간 조회 (`event_index.py: resolve_event_datetime/sidecar_anchor`) |
+| 데이터 공백을 시계가 실시간으로 기어감 | 재생 구조 = 시계가 주인, 데이터는 조회 대상 → 공백에서 객체 정지+시계만 진행 | 진행 틱마다 다음 데이터까지 간격>임계값(기본 10s)이면 점프. 탐색은 메모리 인덱스 이진 탐색(타임스탬프 배열/manifest 청크 경계) — minIO 조회 없음 (`facade._maybe_skip_gap`, `trajectory_repository/lake_repository: next/prev_data_time`) |
+| 추론→이벤트→재연이 3창 수동 릴레이 | 파일명을 사람이 기억·입력 | Event Post Processing 창에 **Event Search**: twin time 구간 검색 → 목록 → 선택 시 seek(범위 밖이면 ±5분 자동 로드) (`event_processing/window.py`) |
+
+### 검증
+- 유닛테스트 100 passed(+10: 롤오버·다일 구분·앵커 미상 제외·공백 점프 전후진·
+  임계값 0·사이드카 파싱), ruff/mypy 클린. self-test 2종(remote_generation,
+  event_index) 통과.
+- **Kit 실기 미검증**: Event Search UI 렌더·선택 seek, playback 캡처 사이드카
+  실측, 공백 점프 체감 — 다음 GUI 세션에서 확인 필요.
