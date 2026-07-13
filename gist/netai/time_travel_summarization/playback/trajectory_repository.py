@@ -153,6 +153,31 @@ class TrajectoryRepository:
             return self._data[self._timestamps[0]]
         return self._data[self._timestamps[idx]]
 
+    def next_data_time(self, timestamp: datetime.datetime) -> Optional[datetime.datetime]:
+        """timestamp 이후(포함) 가장 이른 데이터 시각. 없으면 None.
+
+        재생 공백 점프용: 데이터가 촘촘하면 ≈timestamp가 나와 점프가 안 일어나고,
+        공백 구간이면 다음 세그먼트의 시작이 나온다. 정렬된 문자열 리스트 위의
+        이진 탐색이라 비용은 마이크로초 단위(메모리 조회, I/O 없음).
+        """
+        if not self._timestamps:
+            return None
+        key = self.format_timestamp(timestamp)
+        idx = bisect.bisect_left(self._timestamps, key)
+        if idx >= len(self._timestamps):
+            return None
+        return self.parse_timestamp(self._timestamps[idx])
+
+    def prev_data_time(self, timestamp: datetime.datetime) -> Optional[datetime.datetime]:
+        """timestamp 이전(포함) 가장 늦은 데이터 시각. 없으면 None (역재생 점프용)."""
+        if not self._timestamps:
+            return None
+        key = self.format_timestamp(timestamp)
+        idx = bisect.bisect_right(self._timestamps, key) - 1
+        if idx < 0:
+            return None
+        return self.parse_timestamp(self._timestamps[idx])
+
     def start_benchmark(self, pattern: str) -> None:
         self._bench_active = True
         self._bench_call_count = 0

@@ -119,6 +119,33 @@ class LakeTrajectoryRepository(TrajectoryRepository):
         self._schedule_prefetch(idx)
         return super()._do_lookup(timestamp)
 
+    def next_data_time(self, timestamp):
+        """공백 탐지(청크 해상도): manifest의 청크 [start,end] 커버리지 안이면
+        timestamp 그대로(공백 아님), 밖이면 다음 청크 시작. 탐색은 메모리의
+        chunk_starts 이진 탐색 — minIO 조회 없음. 청크 내부의 미세 공백은
+        작성기가 연속 데이터만 청크화하므로 무시해도 안전."""
+        if not self._chunks:
+            return None
+        idx = bisect.bisect_right(self._chunk_starts, timestamp) - 1
+        if idx >= 0:
+            end = self.parse_timestamp(self._chunks[idx]["end"])
+            if timestamp <= end:
+                return timestamp
+        nxt = idx + 1
+        if nxt < len(self._chunk_starts):
+            return self._chunk_starts[nxt]
+        return None
+
+    def prev_data_time(self, timestamp):
+        """역재생용: 커버리지 안이면 timestamp, 공백이면 직전 청크의 end."""
+        if not self._chunks:
+            return None
+        idx = bisect.bisect_right(self._chunk_starts, timestamp) - 1
+        if idx < 0:
+            return None
+        end = self.parse_timestamp(self._chunks[idx]["end"])
+        return timestamp if timestamp <= end else end
+
     def _chunk_for_time(self, timestamp: datetime.datetime) -> int:
         idx = bisect.bisect_right(self._chunk_starts, timestamp) - 1
         if idx < 0:

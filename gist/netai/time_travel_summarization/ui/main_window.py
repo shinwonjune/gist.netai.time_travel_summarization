@@ -124,9 +124,10 @@ class TimeTravelWindow:
                 with ui.HStack(height=2):
                     ui.Line(style={"color": 0xFF666666})
                 
-                # Current stage time display
+                # twin time = 디지털 트윈 세계의 현재 시각(재연=데이터 시각,
+                # physics=t0+경과). USD 타임라인의 'stage time'(초)과 구분하는 용어.
                 with ui.HStack(height=25):
-                    ui.Label("Stage Time:", width=80, style={"font_size": 14, "font_weight": "bold"})
+                    ui.Label("Twin Time:", width=80, style={"font_size": 14, "font_weight": "bold"})
                     self._stage_time_label = ui.Label("", style={"font_size": 20, "color": 0xFFFFFFFF})
                 
                 # Playback controls
