@@ -1,9 +1,12 @@
-"""원격 데이터 생성 패널 — 플랫폼 제어면의 GUI 클라이언트.
+"""원격 잡 패널 — 플랫폼 제어면의 GUI 클라이언트 (생성·학습·서빙).
 
 automation.remote_generation(잡 스펙 + 전송 어댑터) 위의 얇은 UI 층:
-파라미터 폼 → JobSpec 조립 → 제출(SSH/local, 백그라운드 스레드) → 상태 폴링.
+파라미터 폼 → JobSpec 조립 → 제출(SSH/local/REST, 백그라운드 스레드) → 상태 폴링.
 SSH는 블로킹이므로 UI 프리즈 방지를 위해 스레드에서 돌리고, 결과 반영은
 UiTaskDispatcher(메인 루프)로 되돌린다.
+
+추론(대화형)은 이 패널을 거치지 않는다 — vLLM이 자체 배칭하므로 vlm_client가
+서빙 엔드포인트를 직접 호출. 여기의 Serving 섹션은 그 서빙의 기동/중지만 담당.
 """
 from __future__ import annotations
 
@@ -11,7 +14,7 @@ import datetime
 import threading
 import time
 
-from ..automation.remote_generation import (
+from .remote_generation import (
     JobSpec, read_status, submit_job, transport_from_host,
 )
 
@@ -20,6 +23,11 @@ _DEFAULT_EXT_ROOT = "~/wonjune/kit-app-template/source/extensions/gist.netai.tim
 _DEFAULT_STAGE = ("omniverse://10.38.38.32/Projects/Dream-AI_Plus_Twin/"
                   "Workspace_Personal/swj/AI-Grad_Building/A_AI-Grad_Building.usd")
 _UPLOAD_PREFIX = "s3://time-travel-summarization/episodes"
+_DEFAULT_DATASET = "~/wonjune/ttsum-data/bev-collision-v2"
+_DEFAULT_MERGED_MODEL = "~/wonjune/ttsum-data/merged/qwen3vl_lora_v2"
+# GPU 역할 분리(서버 SERVE_GPU와 일치시킬 것): 0=서빙 전용, 1=잡(생성/학습).
+# REST 경로는 job_api가 강제하지만, SSH 직결 경로는 이 값이 그대로 쓰인다.
+_SERVE_GPU = 0
 
 
 class RemoteGenWindow:
@@ -31,10 +39,10 @@ class RemoteGenWindow:
     def __init__(self):
         import omni.ui as ui
 
-        from .task_dispatcher import UiTaskDispatcher
+        from ..ui.task_dispatcher import UiTaskDispatcher
 
         self._dispatcher = UiTaskDispatcher("RemoteGenWindowUiDispatcher")
-        self._window = ui.Window("Data Generation", width=520, height=290)
+        self._window = ui.Window("Remote Jobs", width=520, height=600)
         with self._window.frame:
             with ui.VStack(spacing=5):
                 self._panel = RemoteGenPanel(self._dispatcher)
@@ -107,6 +115,44 @@ class RemoteGenPanel:
             check.set_clicked_fn(self._on_status_clicked)
             self._status_label = ui.Label("", style={"color": 0xFF888888})
 
+        # ---- Training (LoRA) — train 잡 제출 --------------------------------- #
+        ui.Spacer(height=8)
+        ui.Label("Training (LoRA)", style={"font_size": 14, "font_weight": "bold"})
+        with ui.HStack(height=25, spacing=8):
+            ui.Label("Dataset:", width=85)
+            self._train_dataset = ui.StringField()
+            self._train_dataset.model.set_value(_DEFAULT_DATASET)
+        with ui.HStack(height=25, spacing=8):
+            ui.Label("Output:", width=85)
+            self._train_output = ui.StringField()
+            ui.Label("GPU:", width=35)
+            self._train_gpu = ui.IntField(width=30)
+            self._train_gpu.model.set_value(1)
+        with ui.HStack(height=28, spacing=10):
+            train_btn = ui.Button("Submit Train Job", width=140)
+            train_btn.set_clicked_fn(self._on_train_clicked)
+            ui.Label("(Hyperparameters fixed in training/qwen3vl_lora_swift.sh)",
+                     style={"color": 0xFF888888})
+
+        # ---- Serving (vLLM) — 전용 GPU에서 기동/중지 -------------------------- #
+        ui.Spacer(height=8)
+        ui.Label("Serving (vLLM)", style={"font_size": 14, "font_weight": "bold"})
+        with ui.HStack(height=25, spacing=8):
+            ui.Label("Model path:", width=85)
+            self._serve_model = ui.StringField()
+            self._serve_model.model.set_value(_DEFAULT_MERGED_MODEL)
+        with ui.HStack(height=25, spacing=8):
+            ui.Label("Port:", width=85)
+            self._serve_port = ui.IntField(width=60)
+            self._serve_port.model.set_value(38011)
+            ui.Label(f"(GPU {_SERVE_GPU} for Serving)",
+                     style={"color": 0xFF888888})
+        with ui.HStack(height=28, spacing=10):
+            start_btn = ui.Button("Start Serving", width=110)
+            start_btn.set_clicked_fn(self._on_serve_start_clicked)
+            stop_btn = ui.Button("Stop Serving", width=110)
+            stop_btn.set_clicked_fn(self._on_serve_stop_clicked)
+
     # ---- helpers ----------------------------------------------------------- #
 
     @staticmethod
@@ -140,28 +186,62 @@ class RemoteGenPanel:
 
     # ---- callbacks ---------------------------------------------------------- #
 
-    def _on_submit_clicked(self):
-        try:
-            spec = self._build_spec()
-        except Exception as exc:
-            self._status_label.text = f"spec error: {exc}"
-            return
+    def _submit_spec(self, spec: JobSpec):
+        """공통 제출 경로 — 모든 잡 타입이 같은 transport·status 규약을 쓴다."""
         transport = self._transport()
         ext_root = self._ext_root.model.get_value_as_string().strip()
         self._last_job_id = spec.job_id
-        self._seed.model.set_value(self._fresh_seed())  # 다음 제출용 시드 재발급
         self._status_label.text = f"submitting {spec.job_id} via {transport.name}..."
 
         def work():
             try:
                 ok, out = submit_job(spec, transport, ext_root)
-                msg = (f"{spec.job_id} submitted (tmux job-{spec.job_id})"
+                msg = (f"{spec.job_id} submitted"
                        if ok else f"submit FAILED: {out[-120:]}")
             except Exception as exc:
                 msg = f"submit error: {exc!r}"
             self._set_status(msg)
 
         threading.Thread(target=work, daemon=True, name="RemoteGenSubmit").start()
+
+    def _on_submit_clicked(self):
+        try:
+            spec = self._build_spec()
+        except Exception as exc:
+            self._status_label.text = f"spec error: {exc}"
+            return
+        self._seed.model.set_value(self._fresh_seed())  # 다음 제출용 시드 재발급
+        self._submit_spec(spec)
+
+    def _on_train_clicked(self):
+        dataset = self._train_dataset.model.get_value_as_string().strip()
+        if not dataset:
+            self._status_label.text = "train: Dataset 경로 필요"
+            return
+        job_id = "train-" + datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
+        self._submit_spec(JobSpec(
+            job_id=job_id, job_type="train", dataset=dataset,
+            train_output=self._train_output.model.get_value_as_string().strip(),
+            gpu=self._train_gpu.model.get_value_as_int(),
+        ))
+
+    def _on_serve_start_clicked(self):
+        model_path = self._serve_model.model.get_value_as_string().strip()
+        if not model_path:
+            self._status_label.text = "serve: Model path 필요"
+            return
+        job_id = "serve-" + datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
+        self._submit_spec(JobSpec(
+            job_id=job_id, job_type="serve_start", model_path=model_path,
+            port=self._serve_port.model.get_value_as_int(), gpu=_SERVE_GPU,
+        ))
+
+    def _on_serve_stop_clicked(self):
+        job_id = "serve-stop-" + datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
+        self._submit_spec(JobSpec(
+            job_id=job_id, job_type="serve_stop",
+            port=self._serve_port.model.get_value_as_int(), gpu=_SERVE_GPU,
+        ))
 
     def _on_status_clicked(self):
         if not self._last_job_id:
@@ -174,8 +254,12 @@ class RemoteGenPanel:
 
         def work():
             st = read_status(job_id, transport, ext_root)
-            done = st.get("episodes_done", "?")
-            total = st.get("total", "?")
-            self._set_status(f"{job_id}: {st.get('state', '?')} ({done}/{total})")
+            state = st.get("state", "?")
+            if "episodes_done" in st:  # generate 잡: 진행 카운트 표시
+                extra = f" ({st.get('episodes_done', '?')}/{st.get('total', '?')})"
+            else:                      # train/serve 잡: note가 있으면 표시
+                note = st.get("note", "")
+                extra = f" — {note}" if note else ""
+            self._set_status(f"{job_id}: {state}{extra}")
 
         threading.Thread(target=work, daemon=True, name="RemoteGenStatus").start()

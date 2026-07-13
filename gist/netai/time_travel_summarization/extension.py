@@ -64,9 +64,11 @@ class NetAITimetravelDreamAI(_get_i_ext_base()):
         self._vlm_client_core = VLMClientCore()
         self._vlm_client_window = VLMClientWindow(self._vlm_client_core, ext_id)
         carb.log_info("[Extension] VLM Client window created")
+        # 캡처 완료 → VLM 창 Source 자동 채움 (수동 URI 복붙 제거)
+        self._core.set_capture_complete_callback(self._vlm_client_window.set_source_uri)
 
-        # Create remote Data Generation window (플랫폼 제어면 — 재현 제어와 분리)
-        from .ui.remote_gen_panel import RemoteGenWindow
+        # Create remote jobs window (플랫폼 제어면 — 재현 제어와 분리)
+        from .automation.window import RemoteGenWindow
         self._remote_gen_window = RemoteGenWindow()
         carb.log_info("[Extension] Data Generation window created")
         
