@@ -18,11 +18,25 @@ import subprocess
 from dataclasses import dataclass
 from typing import Optional, Tuple
 
-JOB_SCHEMA_VERSION = 1
+JOB_SCHEMA_VERSION = 2
 
-# 러너의 확장 루트 기준 상대 위치 (원격/로컬 공통)
+# 러너의 확장 루트 기준 상대 위치 (원격/로컬 공통) — 잡 타입별로 분리
 RUNNER_REL = "gist/netai/time_travel_summarization/VLM_server/l40/run_job.sh"
+TRAIN_RUNNER_REL = "gist/netai/time_travel_summarization/VLM_server/l40/run_train.sh"
+SERVE_RUNNER_REL = "gist/netai/time_travel_summarization/VLM_server/l40/run_serve.sh"
 JOBS_REL = "artifacts/jobs"
+
+JOB_TYPES = ("generate", "train", "serve_start", "serve_stop")
+
+
+def runner_rel_for(job_type: str) -> str:
+    """잡 타입 → 러너 스크립트 상대 경로. 미지 타입은 KeyError(호출부 검증 전제)."""
+    return {
+        "generate": RUNNER_REL,
+        "train": TRAIN_RUNNER_REL,
+        "serve_start": SERVE_RUNNER_REL,
+        "serve_stop": SERVE_RUNNER_REL,
+    }[job_type]
 
 
 @dataclass
@@ -48,6 +62,14 @@ class JobSpec:
     # 마스터 시드 — 에피소드 조건(시각·속도·배치·배회)이 전부 여기서 유도되므로
     # run마다 달라야 한다(같으면 이름만 다른 완전 중복 데이터가 재생성됨).
     seed: int = 42
+    # ---- 잡 타입 확장 (generate | train | serve_start | serve_stop) ---------
+    # generate 외 타입은 아래 필드만 소비한다. 러너는 runner_rel_for()로 분기.
+    job_type: str = "generate"
+    dataset: str = ""       # train: 서버측 데이터셋 디렉토리 (build_dataset 산출물)
+    train_output: str = ""  # train: 어댑터 출력 디렉토리 (빈 값 = 러너 기본)
+    model_path: str = ""    # serve_start: 병합(merged) 모델 디렉토리
+    port: int = 38011       # serve: vLLM 포트
+    num_frames: int = 20    # serve: 클립당 프레임 예산 (train==infer 정합)
 
     def to_env(self) -> dict:
         """run_job.sh가 소비하는 env 매핑 (값은 전부 문자열; 빈 값은 전송 생략)."""
@@ -70,6 +92,12 @@ class JobSpec:
             "SPAWN_PLAN": self.spawn_plan,
             "KEEP_POSITIONS": "1" if self.keep_positions else "",
             "SEED": str(int(self.seed)),
+            "JOB_TYPE": self.job_type,
+            "DATASET": self.dataset,
+            "TRAIN_OUTPUT": self.train_output,
+            "MODEL_PATH": self.model_path,
+            "PORT": str(int(self.port)),
+            "NUM_FRAMES": str(int(self.num_frames)),
         }
 
 
@@ -159,7 +187,7 @@ def build_submit_command(spec: JobSpec, remote_ext_root: str) -> str:
     env는 shlex.quote로 개별 인용 — 값에 공백/특수문자가 있어도 안전.
     tmux new-session -d 라 제출은 즉시 반환되고 잡은 서버에서 계속 돈다.
     """
-    runner = f"{remote_ext_root.rstrip('/')}/{RUNNER_REL}"
+    runner = f"{remote_ext_root.rstrip('/')}/{runner_rel_for(spec.job_type)}"
     envs = " ".join(
         f"{k}={shlex.quote(v)}" for k, v in spec.to_env().items() if v != "")
     inner = f"{envs} bash {shlex.quote(runner)}"
@@ -210,6 +238,14 @@ def _self_test() -> None:
     assert "KEEP_POSITIONS" not in cmd, "빈 값은 명령에 포함되지 않아야"
     assert "'omniverse://10.38.38.32/Projects/A B/scene.usd'" in cmd, "공백 경로 인용 유지"
     assert cmd.endswith("&& echo SUBMITTED")
+    # 잡 타입 → 러너 디스패치
+    assert env["JOB_TYPE"] == "generate"
+    train_spec = JobSpec(job_id="train-1", job_type="train", dataset="/data/bev-v3")
+    assert "run_train.sh" in build_submit_command(train_spec, "/home/x/ext")
+    serve_cmd = build_submit_command(
+        JobSpec(job_id="serve-1", job_type="serve_start", model_path="/models/m"),
+        "/home/x/ext")
+    assert "run_serve.sh" in serve_cmd and "JOB_TYPE=serve_start" in serve_cmd
     # 상태 파싱
     class FakeTransport:
         def run(self, command, timeout=30.0):

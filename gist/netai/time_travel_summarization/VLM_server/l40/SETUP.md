@@ -54,9 +54,8 @@ python3 -m gist.netai.time_travel_summarization.utils.build_dataset \
 ```
 
 - 60/30fps 원본과 무관하게 `--content-hz 10`으로 2초 클립 = 20프레임(NFRAMES 일치).
-- 여러 run을 합쳐 빌드하지 말 것 — 에피소드 ID가 run 간 충돌한다(ep_0000끼리 덮어씀).
-  run 하나씩 별도 `--out-dir`로 빌드하거나, 합치기 전에 build_dataset의 episode_id에
-  run 접두어를 붙이는 수정이 선행돼야 한다.
+- 여러 run 합본 빌드 가능 — episode ID에 run 접두어가 자동으로 붙는다
+  (derive_episode_id, dd80d83). v2 데이터셋(225ep 합본)이 이 경로로 빌드됐다.
 
 ## 5. 학습 (training/ 스크립트 사용)
 
@@ -72,6 +71,25 @@ bash gist/netai/time_travel_summarization/training/run_eval.sh
 ```
 
 방법론·체크리스트: `training/METHODOLOGY.md`, `training/VERIFICATION_CHECKLIST.md`.
+
+## 6. 잡 타입과 GPU 역할 (job_api)
+
+잡 API(`run_api.sh` → `job_api.py`)는 네 가지 잡 타입을 받는다. 실행은 타입별 러너에 위임:
+
+| job_type | 러너 | 하는 일 |
+|---|---|---|
+| `generate` | run_job.sh | kit headless 데이터 생성 (기존) |
+| `train` | run_train.sh | LoRA 학습 — training/qwen3vl_lora_swift.sh 래핑 (DATASET 필수) |
+| `serve_start` | run_serve.sh | vLLM 기동(127.0.0.1 바인딩) + 준비 확인. 상주 프로세스는 러너 밖에서 지속 |
+| `serve_stop` | run_serve.sh | vLLM 중지 (멱등 — 안 떠 있으면 성공 처리) |
+
+**GPU 역할 분리**: env `SERVE_GPU`(기본 0)는 서빙 전용. serve_* 잡은 이 GPU로
+강제되고, generate/train이 이 GPU를 지정하면 422로 거부된다. run_api.sh 기동 전에
+`export SERVE_GPU=0` 형태로 조정 가능.
+
+서빙 상태 파일: `artifacts/serve/{vllm.pid, serve.info, serve.log}`.
+추론 클라이언트(vlm_client)는 큐를 거치지 않고 vLLM 엔드포인트를 직접 호출한다
+(`ssh -L 38011:localhost:38011 <host>` 터널 선행).
 
 ## 참고: 기존 rsync 흐름과의 관계
 
