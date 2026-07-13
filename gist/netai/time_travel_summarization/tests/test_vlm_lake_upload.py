@@ -153,6 +153,13 @@ def test_generate_captions_saves_raw_result_only_to_output_root_uri(tmp_path):
     assert not local_output.exists()
     assert lake_output.exists()
     assert json.loads(lake_output.read_text(encoding="utf-8"))["chunk_responses"]
+    # 이벤트 인덱스도 함께 적재된다 (추론 1회 = 인덱스 오브젝트 1개).
+    # 이 테스트는 사이드카가 없으므로 앵커 미상 → time=None, time_hms만 보존.
+    index_file = remote_root / "vlm_events" / "capture.jsonl"
+    assert index_file.exists()
+    record = json.loads(index_file.read_text(encoding="utf-8").splitlines()[0])
+    assert record["time"] is None
+    assert record["time_hms"] == "00:00:01" and record["ids"] == [1, 2]
 
 
 def _run_test(name, func):

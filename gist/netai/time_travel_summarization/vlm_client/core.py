@@ -24,6 +24,7 @@ class VLMClientCore:
         self._api = "openai"                 # "openai"(vLLM 직접) | "vss"(레거시)
         self._current_video_id = None
         self._current_video_path = None      # openai 모드: 업로드 대신 로컬 경로 보관
+        self._current_video_source = None    # 원본 URI/경로 (사이드카 앵커 조회용)
         self._staged_tmp_path = None         # URI 입력 시 내려받은 임시 파일 (정리용)
         self._last_upload_response = None
         self._last_generation_response = None
@@ -185,6 +186,9 @@ class VLMClientCore:
         """직접 모드의 '업로드': 분석할 비디오의 로컬 경로를 확보해 보관."""
         try:
             self._cleanup_staged()
+            # 원본 위치 보존 — 사이드카(.meta.json)는 스테이징 사본이 아니라
+            # 원본 옆에 있으므로, 이벤트 인덱스의 앵커 조회는 이 값을 쓴다.
+            self._current_video_source = video_source
             if "://" in video_source:
                 import tempfile
 
@@ -339,6 +343,29 @@ class VLMClientCore:
                     content_type="application/json",
                 )
                 carb.log_info(f"[VLMClient] Results saved to: {output_uri}")
+                # 이벤트 인덱스 적재(best-effort) — 추론 결과를 시간축 검색
+                # 표면으로 축적. 실패해도 추론 경로는 성공으로 유지.
+                try:
+                    from ..event_processing.event_index import (
+                        append_index, parse_events_from_vlm_result, sidecar_anchor,
+                    )
+
+                    events = parse_events_from_vlm_result(response)
+                    # 원본 영상 옆 사이드카의 capture_start로 절대 시각 복원.
+                    # 사이드카 미상이면 anchor=None → time_hms만 기록.
+                    anchor = (
+                        sidecar_anchor(self._current_video_source)
+                        if getattr(self, "_current_video_source", None) else None
+                    )
+                    idx_uri = append_index(
+                        output_root_uri, video_filename or output_filename,
+                        events, model=model, anchor=anchor,
+                    )
+                    carb.log_info(
+                        f"[VLMClient] event index: {len(events)} events "
+                        f"(anchor={'ok' if anchor else 'none'}) -> {idx_uri}")
+                except Exception as exc:
+                    carb.log_warn(f"[VLMClient] event index write failed: {exc!r}")
             else:
                 output_path = self._outputs_base_path / output_filename
                 self._client.save_json(response, str(output_path))
