@@ -28,6 +28,12 @@ files = [
     "gist/netai/time_travel_summarization/video_capture/types.py",
     "gist/netai/time_travel_summarization/video_capture/frame_queue.py",
     "gist/netai/time_travel_summarization/timefmt.py",
+    "gist/netai/time_travel_summarization/event_processing/event_index.py",
+    "gist/netai/time_travel_summarization/app/data_service.py",
+    "gist/netai/time_travel_summarization/app/object_service.py",
+    "gist/netai/time_travel_summarization/app/benchmark_service.py",
+    "gist/netai/time_travel_summarization/app/capture_service.py",
+    "gist/netai/time_travel_summarization/app/physics_service.py",
 ]
 python_version = "3.10"
 ignore_missing_imports = true   # omni/carb/requests 등 실행환경 전용 모듈

@@ -22,6 +22,7 @@ def _install_carb_stub():
 
 _install_carb_stub()
 
+from gist.netai.time_travel_summarization.app import data_service  # noqa: E402
 from gist.netai.time_travel_summarization.app import facade as facade_module  # noqa: E402
 from gist.netai.time_travel_summarization.app.facade import TimeTravelCore  # noqa: E402
 
@@ -100,8 +101,9 @@ def test_lake_source_switch_regenerates_astronauts_even_when_auto_generate_is_of
         def hide_all_cameras(self):
             pass
 
-    monkeypatch.setattr(facade_module, "TrajectoryRepository", DummyRepository)
-    monkeypatch.setattr(facade_module, "EventSummaryService", lambda *args, **kwargs: object())
+    # 데이터 소스 활성화 로직은 data_service로 분해됨 → 패치 대상도 그쪽
+    monkeypatch.setattr(data_service, "TrajectoryRepository", DummyRepository)
+    monkeypatch.setattr(data_service, "EventSummaryService", lambda *args, **kwargs: object())
 
     stage_objects = DummyStageObjects()
     core = TimeTravelCore.__new__(TimeTravelCore)

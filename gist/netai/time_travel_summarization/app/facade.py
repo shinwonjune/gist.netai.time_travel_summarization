@@ -1,20 +1,25 @@
+"""TimeTravelCore — 확장의 단일 진입 facade.
+
+상태(레포지토리·prim_map·캡처/물리 플래그)는 전부 이 클래스가 소유하고,
+동작은 도메인 서비스 모듈(capture/physics/data/object/benchmark_service)에
+위임한다. 서비스가 상태를 들지 않는 이유: 테스트가 __new__ + 속성 주입으로
+core를 구성하고, extension.py가 shutdown 시 _wander를 직접 만지기 때문.
+공개 API는 분해 전과 동일하다.
+"""
 import datetime
 from pathlib import Path
 from typing import Dict, List, Optional
-from urllib.parse import urlparse
 
 import carb
 
-from .config import ExtensionConfig
+from . import benchmark_service, capture_service, data_service, object_service, physics_service
 from .paths import ExtensionPaths
 from ..event_processing.summary_service import EventSummaryService
 from ..playback.controller import PlaybackController
 from ..playback.stage_object_controller import StageObjectController
 from ..playback.trajectory_repository import TrajectoryRepository
 
-
-DEFAULT_ASTRONAUT_USD = str((Path(__file__).resolve().parent.parent / "assets" / "Astronaut.usd").resolve())
-
+DEFAULT_ASTRONAUT_USD = object_service.DEFAULT_ASTRONAUT_USD
 
 
 class TimeTravelCore:
@@ -50,43 +55,22 @@ class TimeTravelCore:
         self._sim_time: float = 0.0
         self._use_sim_clock: bool = False
         self._wander_seed = None
+        # 캡처 완료 알림(성공 시 output URI 전달) — extension.py가 VLM 창을 배선.
+        self._capture_complete_cb = None
+        # 재생 공백 점프: 데이터 공백이 이 값(초)을 넘으면 시계를 다음 데이터로
+        # 순간이동(시계가 주인인 재생 구조에서, 공백 23h를 실시간으로 기지 않게).
+        self._gap_skip_s = 10.0
+
+    # ---- 데이터 소스 / config (data_service) --------------------------------
 
     def load_config(self, config_path: str) -> bool:
-        try:
-            path = Path(config_path)
-            if not path.exists():
-                self._last_data_load_error = f"Config file not found: {config_path}"
-                carb.log_warn(f"[TimeTravel] {self._last_data_load_error}")
-                return False
-
-            self._config = ExtensionConfig.from_file(config_path)
-            self._prim_map = dict(self._config.prim_map)
-            self._playback.set_event_summary(self._config.event_summary)
-            self._last_data_load_error = ""
-            carb.log_info("[TimeTravel] Config loaded")
-            return True
-        except Exception as e:
-            self._last_data_load_error = f"Failed to load config: {e}"
-            carb.log_error(f"[TimeTravel] {self._last_data_load_error}")
-            return False
+        return data_service.load_config(self, config_path)
 
     def _resolve_uri(self, value: str) -> Optional[str]:
-        """'://'가 있으면 그대로, 아니면 config 디렉터리 기준 로컬 경로 -> file:// URI."""
-        if not value:
-            return None
-        if "://" in value:
-            return value
-        path = Path(value)
-        if not path.is_absolute():
-            # Path 결합이 './' '../'를 정상 처리. lstrip 문자집합 제거 버그 회피.
-            path = self._config.config_dir / value
-        return path.resolve().as_uri()
+        return data_service.resolve_uri(self, value)
 
     def _resolve_output_uri_for_mode(self, mode: str, value: str) -> Optional[str]:
-        """Return configured output URI only when the active data source is Data Lake."""
-        if mode != "lake":
-            return None
-        return self._resolve_uri(value)
+        return data_service.resolve_output_uri_for_mode(self, mode, value)
 
     def get_output_root_uri_for_active_mode(self) -> Optional[str]:
         if not self._config:
@@ -112,134 +96,19 @@ class TimeTravelCore:
             getattr(self._config, "video_output_uri", ""),
         )
 
-    def _activate_data_source(self, mode: str) -> bool:
-        try:
-            if not self._config:
-                self._last_data_load_error = "Config must be loaded before data"
-                carb.log_error(f"[TimeTravel] {self._last_data_load_error}")
-                return False
-
-            lake_cfg = getattr(self._config, "lake", {}) or {}
-            if mode == "lake":
-                direct_data_uri = self._resolve_uri(lake_cfg.get("direct_data_uri", ""))
-                if direct_data_uri:
-                    repo_factory = TrajectoryRepository
-                    uri = direct_data_uri
-                    log_message = f"[TimeTravel] Lake mode test direct data URI: {uri}"
-                else:
-                    from ..playback.lake_repository import LakeTrajectoryRepository
-
-                    manifest_uri = self._resolve_uri(lake_cfg.get("manifest_uri", ""))
-                    if not manifest_uri:
-                        self._last_data_load_error = "Data Lake manifest URI is not configured"
-                        carb.log_warn(f"[TimeTravel] {self._last_data_load_error}")
-                        return False
-                    cache_chunks = int(lake_cfg.get("cache_chunks", 4))
-                    prefetch_ahead = int(lake_cfg.get("prefetch_ahead", 1))
-                    repo_factory = lambda: LakeTrajectoryRepository(
-                        cache_chunks=cache_chunks,
-                        prefetch_ahead=prefetch_ahead,
-                    )
-                    uri = manifest_uri
-                    log_message = f"[TimeTravel] Lake mode: manifest URI: {uri}"
-            elif mode == "local":
-                repo_factory = TrajectoryRepository
-                uri = self._config.data_uri
-                log_message = f"[TimeTravel] Looking for data at URI: {uri}"
-            else:
-                self._last_data_load_error = f"Invalid data source: {mode}"
-                carb.log_warn(f"[TimeTravel] {self._last_data_load_error}")
-                return False
-
-            output_root_uri = self._resolve_output_uri_for_mode(
-                mode,
-                getattr(self._config, "output_root_uri", ""),
-            )
-            repo = repo_factory()
-            carb.log_info(log_message)
-
-            loaded = repo.load_from_uri(uri)
-            if not loaded:
-                self._last_data_load_error = f"Data load failed for URI: {uri}"
-                carb.log_error(f"[TimeTravel] {self._last_data_load_error}")
-                return False
-
-            old_repository = getattr(self, "_repository", None)
-            if old_repository and hasattr(old_repository, "clear"):
-                old_repository.clear()
-
-            self._repository = repo
-            self._events = EventSummaryService(
-                self._module_dir,
-                self._repository,
-                output_root_uri=output_root_uri,
-            )
-            self._playback.configure_data_range(
-                self._repository.data_start_time,
-                self._repository.data_end_time,
-            )
-            carb.log_info(
-                f"[TimeTravel] Data loaded: {len(self._repository.timestamps)} timestamps, "
-                f"{self._repository.data_start_time} to {self._repository.data_end_time}"
-            )
-            self._data_source = mode
-            self._last_data_load_error = ""
-            if mode == "lake":
-                prim_map = self.regenerate_astronauts_from_loaded_data()
-                if not prim_map:
-                    carb.log_warn("[TimeTravel] Data Lake data loaded, but no astronauts were generated")
-                self.update_stage_objects()
-                carb.log_warn(
-                    f"[TimeTravel] Data Lake activation complete: "
-                    f"timestamps={len(self._repository.timestamps)}, "
-                    f"objects={self.get_loaded_object_count()}, "
-                    f"astronauts={len(self._prim_map)}"
-                )
-            return True
-        except Exception as e:
-            self._last_data_load_error = f"Failed to load data: {e}"
-            carb.log_error(f"[TimeTravel] {self._last_data_load_error}")
-            import traceback
-
-            carb.log_error(traceback.format_exc())
-            return False
-
     def load_data(self) -> bool:
-        try:
-            if not self._config:
-                self._last_data_load_error = "Config must be loaded before data"
-                carb.log_error(f"[TimeTravel] {self._last_data_load_error}")
-                return False
-
-            lake_cfg = getattr(self._config, "lake", {}) or {}
-            initial = "lake" if lake_cfg.get("enabled") and lake_cfg.get("manifest_uri") else "local"
-            return self._activate_data_source(initial)
-        except Exception as e:
-            self._last_data_load_error = f"Failed to load data: {e}"
-            carb.log_error(f"[TimeTravel] {self._last_data_load_error}")
-            return False
+        return data_service.load_data(self)
 
     def set_data_source(self, mode: str) -> bool:
-        if mode not in ("local", "lake"):
-            self._last_data_load_error = f"Invalid data source: {mode}"
-            carb.log_warn(f"[TimeTravel] {self._last_data_load_error}")
-            return False
-        if mode == "lake":
-            lake_cfg = getattr(self._config, "lake", {}) or {}
-            if not lake_cfg.get("direct_data_uri") and not lake_cfg.get("manifest_uri"):
-                self._last_data_load_error = "Data Lake manifest URI is not configured"
-                carb.log_warn(f"[TimeTravel] {self._last_data_load_error}")
-                return False
-        if self._activate_data_source(mode):
-            self.set_to_earliest_time()
-            return True
-        return False
+        return data_service.set_data_source(self, mode)
 
     def get_data_source(self) -> str:
         return getattr(self, "_data_source", "local")
 
     def get_last_data_load_error(self) -> str:
         return getattr(self, "_last_data_load_error", "")
+
+    # ---- 재생 (PlaybackController 패스스루) ----------------------------------
 
     def _parse_timestamp(self, timestamp_str: str) -> datetime.datetime:
         return self._repository.parse_timestamp(timestamp_str)
@@ -320,554 +189,42 @@ class TimeTravelCore:
     def toggle_playback(self):
         self._playback.toggle_playback()
 
-    def start_capture(self, duration_s: float = 0.0, output_path: Optional[str] = None) -> bool:
-        """실시간 viewport 캡처 시작. duration_s=0 이면 default 60초. 중간에 stop_capture로 중단 가능."""
-        if self._capture_active:
-            carb.log_warn("[Capture] already active")
-            return False
-        # duration_s 0 이하 → default 60초
-        effective_duration = float(duration_s) if duration_s > 0 else 60.0
-        if output_path is None:
-            from datetime import datetime as _dt
-            ts = _dt.now().strftime("%Y%m%dT%H%M%S")
-            video_output_uri = self.get_video_output_uri_for_active_mode()
-            if video_output_uri:
-                output_path = f"{video_output_uri.rstrip('/')}/video_{ts}.mp4"
-            else:
-                # config의 video_output_dir 사용. 없으면 default "artifacts/video"
-                output_dir_str = (
-                    getattr(self._config, "video_output_dir", "artifacts/video")
-                    if self._config
-                    else "artifacts/video"
-                )
-                output_dir = Path(output_dir_str)
-                if not output_dir.is_absolute():
-                    output_dir = self._module_dir / output_dir
-                output_dir.mkdir(parents=True, exist_ok=True)
-                output_path = str(output_dir / f"video_{ts}.mp4")
-        self._capture_active = True
-        self._capture_duration_s = effective_duration
-        self._capture_output_path = output_path
-        # 충돌 기록 창 == 캡처 창: physics 모드면 캡처와 함께 recorder 시작(사이드카 전에
-        # 시작해야 collisions_csv 경로가 링크됨). → CSV 길이가 영상 길이와 일치.
-        if self._playback.get_mode() == "physics":
-            self._start_collision_recorder()
-        # Sidecar links this video to its collision labels + an exact t0 so the
-        # offline dataset builder can slice clips and assign labels deterministically.
-        self._capture_start_dt = datetime.datetime.now()
-        self._write_capture_sidecar(output_path, effective_duration)
-        import threading
-        import time as _time
-        self._capture_stop_event = threading.Event()
-        self._capture_start_time = _time.perf_counter()
-        self._start_capture_backend(output_path)
-        carb.log_warn(f"[Capture] started duration={effective_duration:g}s output={output_path}")
-        return True
+    def set_gap_skip_threshold(self, seconds: float) -> None:
+        """공백 점프 임계값(초). 0 = 기능 끔. 실데이터 Hz가 불규칙하면 크게."""
+        self._gap_skip_s = max(0.0, float(seconds))
 
-    def _write_capture_sidecar(self, output_path: str, duration_s: float, fps: Optional[int] = None) -> None:
-        """Write ``<video>.meta.json`` next to the captured video.
-
-        Records the capture-start wall-clock (t0, the anchor the offline builder
-        uses to map collision timestamps -> 2s clips), the active collisions CSV,
-        and the objid->numeric-label map (matching the overlay's drawn labels).
-        Best-effort: only for local file paths; never blocks the capture.
-        """
-        import json as _json
-        import re as _re
-
-        from ..video_capture import CaptureRequest
-
+    def _maybe_skip_gap(self, t: datetime.datetime) -> datetime.datetime:
+        """재생 진행 시각 t 앞(역재생이면 뒤)에 데이터 공백이 있으면 점프 목적지 반환."""
+        thr = getattr(self, "_gap_skip_s", 0.0)
+        if not thr:
+            return t
+        forward = self._playback.get_playback_speed() >= 0
+        fn = getattr(self._repository, "next_data_time" if forward else "prev_data_time", None)
+        if not callable(fn):
+            return t
         try:
-            if "://" in output_path:
-                # Remote/omniverse URIs: skip (builder runs on local artifacts).
-                carb.log_warn(f"[Capture] sidecar skipped for non-local path {output_path}")
-                return
-            meta_path = Path(output_path).with_suffix(".meta.json")
-            collisions_csv = (
-                str(self._collisions.output_path) if self._collisions is not None else None
-            )
-            # objid -> numeric label, same rule as the burned-in overlay labels.
-            objid_to_label = {}
-            for objid in self._prim_map.keys():
-                m = _re.search(r"(\d+)$", str(objid))
-                objid_to_label[str(objid)] = str(int(m.group(1))) if m else str(objid)
-            # capture_start는 sim 클럭 앵커(_capture_start_dt)와 "동일 객체"를 사용.
-            # 별도 now() 호출이면 수 ms 어긋나 라벨 오프셋이 드리프트한다.
-            t0 = self._capture_start_dt or datetime.datetime.now()
-            meta = {
-                "capture_start": t0.isoformat(),
-                "duration_s": float(duration_s),
-                "fps": int(fps) if fps is not None else CaptureRequest.fps,
-                "width": CaptureRequest.width,
-                "height": CaptureRequest.height,
-                "mode": self.get_mode(),
-                "video": str(Path(output_path).name),
-                "collisions_csv": collisions_csv,
-                "collision_distance": getattr(self, "_collision_distance", None),
-                "objid_to_label": objid_to_label,
-            }
-            meta_path.parent.mkdir(parents=True, exist_ok=True)
-            with open(meta_path, "w", encoding="utf-8") as f:
-                _json.dump(meta, f, indent=2, ensure_ascii=False)
-            carb.log_warn(f"[Capture] sidecar -> {meta_path}")
-        except Exception as exc:
-            carb.log_warn(f"[Capture] sidecar write failed: {exc!r}")
-
-    def get_physics_bounds(self) -> Optional[dict]:
-        """Bounds computed at set_physics_mode: {center, size, is_y_up}. None if not set."""
-        return self._physics_bounds
-
-    def set_wander_seed(self, seed) -> None:
-        """에피소드 재현성: set_physics_mode 전에 호출하면 wander heading이 seed 결정적."""
-        self._wander_seed = seed
-
-    def set_active_objects(self, objids) -> int:
-        """Restrict physics/capture to the given objids; hide the rest.
-
-        Call BEFORE set_physics_mode so only the active subset gets rigid bodies,
-        collision proxies, overlay labels and collision recording. Enables varying
-        the object count (4-6) per episode. Returns the active count.
-        """
-        if not self._prim_map_full:
-            self._prim_map_full = dict(self._prim_map)
-        want = {str(o) for o in objids}
-        new_map = {}
-        try:
-            import omni.usd
-            from pxr import UsdGeom
-            stage = omni.usd.get_context().get_stage()
+            target = fn(t)
         except Exception:
-            stage = None
-        for objid, path in self._prim_map_full.items():
-            active = str(objid) in want
-            if stage is not None:
-                prim = stage.GetPrimAtPath(path)
-                if prim and prim.IsValid():
-                    img = UsdGeom.Imageable(prim)
-                    img.MakeVisible() if active else img.MakeInvisible()
-            if active:
-                new_map[objid] = path
-        self._prim_map = new_map
-        return len(new_map)
+            return t
+        if target is None:
+            return t
+        gap = (target - t).total_seconds() if forward else (t - target).total_seconds()
+        if gap > thr:
+            carb.log_warn(f"[TimeTravel] data gap {gap:.0f}s at {t} -> jump to {target}")
+            return target
+        return t
 
-    def run_capture_headless(self, duration_s: float = 0.0, output_path: Optional[str] = None,
-                             camera_path: Optional[str] = None,
-                             capture_start_dt: Optional[datetime.datetime] = None,
-                             render_fps: Optional[int] = None) -> Optional[str]:
-        """Blocking offscreen capture for headless automation (no viewport).
-
-        Writes the same <video>.meta.json sidecar as start_capture, then runs the
-        render-product capture synchronously (it pumps the app so physics advances
-        and frames render). Returns the output path on success, else None.
-        """
-        effective_duration = float(duration_s) if duration_s > 0 else 60.0
-        if output_path is None:
-            from datetime import datetime as _dt
-            ts = _dt.now().strftime("%Y%m%dT%H%M%S")
-            video_output_uri = self.get_video_output_uri_for_active_mode()
-            if video_output_uri:
-                output_path = f"{video_output_uri.rstrip('/')}/video_{ts}.mp4"
-            else:
-                output_dir_str = (
-                    getattr(self._config, "video_output_dir", "artifacts/video")
-                    if self._config else "artifacts/video"
-                )
-                output_dir = Path(output_dir_str)
-                if not output_dir.is_absolute():
-                    output_dir = self._module_dir / output_dir
-                output_dir.mkdir(parents=True, exist_ok=True)
-                output_path = str(output_dir / f"video_{ts}.mp4")
-        if self._playback.get_mode() == "physics":
-            self._start_collision_recorder()
-        # sim-time 클럭 앵커: 이 시각 + sim 경과가 오버레이/CSV/사이드카의 단일 t0.
-        # 배치 생성은 에피소드별 무작위 t0를 주입(숫자 다양성; 실행 시각 비종속).
-        self._capture_start_dt = capture_start_dt or datetime.datetime.now()
-        self._sim_time = 0.0
-        self._use_sim_clock = True
-        # 실측(프로브): 이 Kit의 app.update() 고정 스텝 = 1/60s (timeCodesPerSecond 무시).
-        # → sim은 60Hz 고정. render_fps(60의 약수)를 주면 렌더·인코딩만 데시메이션되어
-        #   비디오는 그 fps가 된다(라벨 시각은 스텝 기준이라 정합 불변). 10Hz 데이터셋은
-        #   build_dataset --content-hz 10으로 최종 데시메이션(B' 경로).
-        headless_fps = 60
-        _rfps = int(render_fps) if render_fps else headless_fps
-        vid_fps = headless_fps // max(1, int(round(headless_fps / max(1, _rfps))))
-        # 사이드카 fps = 실제 비디오 fps여야 build_dataset의 시각→프레임 매핑이 맞는다.
-        self._write_capture_sidecar(output_path, effective_duration, fps=vid_fps)
-        from pathlib import Path as _P
-        from ..video_capture import CaptureRequest, RealtimeCaptureRunner
-        output_uri = output_path if "://" in output_path else _P(output_path).resolve().as_uri()
-        req = CaptureRequest(duration_s=effective_duration, fps=headless_fps,
-                             output_uri=output_uri, label="headless_capture",
-                             render_fps=vid_fps)
-        try:
-            res = RealtimeCaptureRunner(core=self).capture_headless(req, camera_path=camera_path)
-        finally:
-            self._use_sim_clock = False
-            self._stop_collision_recorder()  # 캡처 종료 == 충돌 기록 종료
-        if not res.success:
-            carb.log_warn(f"[Capture] headless FAILED: {res.error}")
-            return None
-        carb.log_warn(f"[Capture] headless done -> {res.output_uri}")
-        return output_path
-
-    def stop_capture(self) -> Optional[str]:
-        if not self._capture_active:
-            return None
-        out = self._capture_output_path
-        # stop_event 신호 → background worker가 capture loop 빠져나오고 인코더 마무리 후 파일 저장
-        if getattr(self, "_capture_stop_event", None) is not None:
-            self._capture_stop_event.set()
-        carb.log_warn(f"[Capture] stop requested -> {out}")
-        return out
-
-    def is_capturing(self) -> bool:
-        return self._capture_active
-
-    def _start_capture_backend(self, output_path: str) -> None:
-        """RealtimeCaptureRunner를 background thread에서 실행. duration은 runner 내부에서 자동 처리."""
-        import threading
-        from pathlib import Path as _P
-        from ..video_capture import CaptureRequest, RealtimeCaptureRunner
-
-        # duration_s=0 (무한)이면 기본 60초로 fallback. runner.capture는 blocking이라 외부 stop 불가.
-        duration = self._capture_duration_s if self._capture_duration_s > 0 else 60.0
-        output_uri = output_path if "://" in output_path else _P(output_path).resolve().as_uri()
-
-        def _worker():
-            try:
-                runner = RealtimeCaptureRunner(core=self)
-                req = CaptureRequest(duration_s=duration, output_uri=output_uri, label="ui_capture")
-                res = runner.capture(req, stop_event=self._capture_stop_event)
-                if res.success:
-                    meta = res.metadata or {}
-                    parsed_output = urlparse(res.output_uri)
-                    video_name = Path(parsed_output.path or res.output_uri).name
-                    carb.log_warn(
-                        f"[Capture] done {res.wall_clock_s:.1f}s "
-                        f"{res.output_size_bytes // 1024}KB "
-                        f"frames={meta.get('frames_written', '?')}/{meta.get('frames_requested', '?')} "
-                        f"completed={meta.get('frames_completed', '?')} "
-                        f"dup={meta.get('duplicate_frames', '?')} "
-                        f"drop={res.dropped_frames}"
-                    )
-                    carb.log_warn(f"[Capture] video_uri={res.output_uri}")
-                    carb.log_warn(f"[Capture] video_name={video_name}")
-                    carb.log_warn(f"[Capture] paste_to_vlm_client={res.output_uri}")
-                else:
-                    carb.log_warn(f"[Capture] FAILED: {res.error}")
-            except Exception as exc:
-                carb.log_warn(f"[Capture] worker exception: {exc!r}")
-            finally:
-                self._capture_active = False
-                self._capture_pipeline = None
-                self._capture_stop_event = None
-                self._stop_collision_recorder()  # 캡처 종료 == 충돌 기록 종료
-
-        thread = threading.Thread(target=_worker, daemon=True)
-        thread.start()
-        self._capture_pipeline = thread
-
-    def _stop_capture_backend(self) -> None:
-        """RealtimeCaptureRunner.capture는 blocking이라 외부 stop 불가.
-        duration_s까지 runner가 자체 종료. 여기서는 flag만 해제."""
-        self._capture_pipeline = None
+    def _on_playback_tick(self, t: datetime.datetime) -> None:
+        self.set_current_time(self._maybe_skip_gap(t))
 
     def update(self, dt: float):
-        self._playback.update(dt, self._parse_timestamp, self.set_current_time, self._on_event_requested)
+        self._playback.update(dt, self._parse_timestamp, self._on_playback_tick, self._on_event_requested)
         if self._trace and self._trace.active:
             try:
                 self._trace.tick()
             except Exception as e:
                 carb.log_warn(f"[Trace] tick failed: {e}")
         # capture auto-stop은 RealtimeCaptureRunner가 내부에서 처리
-
-    def start_wander(self) -> bool:
-        """Start PhysX wandering when Physics mode has created a controller."""
-        if not self._wander:
-            carb.log_warn("[TimeTravel] start_wander: Physics mode is not active")
-            return False
-        # 충돌 기록은 Capture가 소유(start_capture에서 시작) → 여기선 시작하지 않음.
-        # Move만 누르면 객체는 움직이지만 CSV는 안 남고, Capture를 눌러야 기록 시작.
-        self._wander.start()
-        return True
-
-    def _on_collision_event(self, prim_path: str, position, kind: str) -> None:
-        """WanderController callback: persist a collision as a ground-truth label."""
-        rec = self._collisions  # capture-thread가 None으로 바꾸는 경쟁 대비 로컬 참조
-        if rec is not None:
-            # headless 캡처 중엔 sim 클럭으로 스탬프(프레임·오버레이와 동일 시계).
-            when = self.get_sim_clock_datetime() if self._use_sim_clock else None
-            rec.record(prim_path, position, kind, when=when)
-
-    def _start_collision_recorder(self) -> None:
-        from datetime import datetime as _dt
-
-        from ..physics import CollisionRecorder
-
-        if self._collisions is not None:
-            return
-        prim_to_objid = {str(path): objid for objid, path in self._prim_map.items()}
-        ts = _dt.now().strftime("%Y%m%dT%H%M%S")
-        output_path = self._paths.artifacts_dir / "collisions" / f"collisions_{ts}.csv"
-        self._collisions = CollisionRecorder(output_path, prim_to_objid)
-        self._collisions.start()
-        carb.log_warn(f"[Collision] recording started -> {output_path}")
-
-    def _stop_collision_recorder(self) -> None:
-        if self._collisions is None:
-            return
-        out = self._collisions.stop()
-        rows = self._collisions.row_count
-        self._collisions = None
-        carb.log_warn(f"[Collision] recording stopped ({rows} events) -> {out}")
-
-    def set_velocity_mode(self, mode: str) -> bool:
-        """콘솔에서 velocity 모드 즉시 토글 (per_tick / on_enter)."""
-        if not self._wander:
-            carb.log_warn("[TimeTravel] set_velocity_mode: Physics 모드 아님")
-            return False
-        return self._wander.set_velocity_mode(mode)
-
-    def get_wander_speed(self) -> float:
-        if self._wander:
-            return self._wander.get_speed()
-        return float(getattr(self, "_wander_speed", 120.0))
-
-    def set_wander_speed(self, speed: float) -> bool:
-        try:
-            speed = float(speed)
-        except (TypeError, ValueError):
-            carb.log_warn(f"[TimeTravel] invalid wander speed: {speed!r}")
-            return False
-        if speed <= 0.0:
-            carb.log_warn(f"[TimeTravel] invalid wander speed: {speed:g}")
-            return False
-        self._wander_speed = speed
-        if self._wander:
-            return self._wander.set_speed(speed)
-        return True
-
-    def stop_wander(self) -> bool:
-        if not self._wander:
-            return False
-        self._wander.stop()
-        # recorder는 Capture가 소유 → 여기서 멈추지 않음(캡처 창과 분리되지 않게).
-        return True
-
-    def is_wandering(self) -> bool:
-        return bool(self._wander and getattr(self._wander, "is_active", lambda: False)())
-
-    def start_trace(self, output_path: Optional[str] = None) -> str:
-        """Start streaming current astronaut coordinates to a trajectory CSV."""
-        from datetime import datetime as _dt
-
-        import omni.usd
-
-        from ..physics import TraceRecorder
-
-        if self._trace and self._trace.active:
-            carb.log_warn("[TimeTravel] trace already active")
-            return str(self._trace.output_path)
-
-        if output_path is None:
-            ts = _dt.now().strftime("%Y%m%dT%H%M%S")
-            trace_dir = self._paths.artifacts_dir / "trace"
-            trace_dir.mkdir(parents=True, exist_ok=True)
-            output_path = str(trace_dir / f"physics_trace_{ts}.csv")
-
-        resolved = {}
-        stage = omni.usd.get_context().get_stage()
-        if stage:
-            for objid, prim_path in self._prim_map.items():
-                prim = stage.GetPrimAtPath(prim_path)
-                if prim and prim.IsValid():
-                    resolved[objid] = prim
-        else:
-            carb.log_warn("[Trace] recording without an active stage")
-
-        self._trace = TraceRecorder(resolved, output_path)
-        self._trace.start()
-        carb.log_warn(f"[Trace] recording started -> {output_path}")
-        return output_path
-
-    def stop_trace(self) -> Optional[str]:
-        if not self._trace or not self._trace.active:
-            return None
-        out = self._trace.stop()
-        rows = self._trace.row_count
-        carb.log_warn(f"[Trace] saved {rows} rows to {out}")
-        return str(out)
-
-    def is_tracing(self) -> bool:
-        return bool(self._trace and self._trace.active)
-
-    # 캡처 부하에서 sim이 실시간을 따라잡게 하는 설정(슬로모션·stuck 오발동 완화).
-    # minFrameRate를 낮추면 느린 프레임에서도 물리가 substep을 더 돌려 elapsed 시간을 따라잡음.
-    # 낮을수록 catch-up↑(=정확)·캡처 느려짐. 너무 낮으면 한 프레임에 과도한 substep 위험 → 5 정도.
-    _CAPTURE_MIN_FRAME_RATE = 5
-    _MIN_FRAME_RATE_KEY = "/persistent/simulation/minFrameRate"
-
-    def _lower_min_frame_rate(self) -> None:
-        try:
-            import carb.settings
-            s = carb.settings.get_settings()
-            self._saved_min_frame_rate = s.get(self._MIN_FRAME_RATE_KEY)
-            s.set(self._MIN_FRAME_RATE_KEY, int(self._CAPTURE_MIN_FRAME_RATE))
-            carb.log_warn(
-                f"[Physics] minFrameRate {self._saved_min_frame_rate} -> "
-                f"{s.get(self._MIN_FRAME_RATE_KEY)} (캡처 dilation 완화; playback 복귀 시 원복)"
-            )
-        except Exception as exc:
-            carb.log_warn(f"[Physics] minFrameRate 조정 실패: {exc}")
-
-    def _restore_min_frame_rate(self) -> None:
-        if getattr(self, "_saved_min_frame_rate", None) is None:
-            return
-        try:
-            import carb.settings
-            s = carb.settings.get_settings()
-            s.set(self._MIN_FRAME_RATE_KEY, self._saved_min_frame_rate)
-            carb.log_warn(f"[Physics] minFrameRate 원복 -> {s.get(self._MIN_FRAME_RATE_KEY)}")
-        except Exception as exc:
-            carb.log_warn(f"[Physics] minFrameRate 원복 실패: {exc}")
-        finally:
-            self._saved_min_frame_rate = None
-
-    def set_physics_mode(self) -> None:
-        """Enable PhysX-driven wandering for the configured astronaut prims."""
-        import omni.usd
-        from pxr import UsdGeom
-
-        from ..physics import WanderController, create_bounding_box, ensure_physics_scene, wrap_with_collision_proxy
-
-        stage = omni.usd.get_context().get_stage()
-        if not stage:
-            carb.log_warn("[TimeTravel] Cannot enable Physics mode without an active stage")
-            return
-        self._lower_min_frame_rate()
-
-        if self._wander:
-            self._wander.stop()
-            self._wander = None
-
-        self._playback.set_mode("physics")
-        ensure_physics_scene(stage)
-
-        meters_per_unit = UsdGeom.GetStageMetersPerUnit(stage) or 1.0
-        m_to_units = 1.0 / meters_per_unit
-        carb.log_info(f"[Physics] stage metersPerUnit={meters_per_unit} m_to_units={m_to_units}")
-
-        # walls 위치·크기를 trajectory 좌표 범위 + margin으로 자동 결정
-        # (hardcoded 5×3×5 / origin은 사용자 trajectory 범위와 안 맞을 수 있음)
-        is_y_up = UsdGeom.GetStageUpAxis(stage) == UsdGeom.Tokens.y
-        coord_range = self._repository.get_coord_range()
-        # (주의) 과거 '영역 바깥 여유(margin)' 변수가 있었으나 실제로는 한 번도 벽 크기에
-        # 반영되지 않은 죽은 코드였음 — 현행 검증된 동작(벽=궤적 범위 그대로)을 유지하며 제거.
-        min_height = 3.0 * m_to_units      # 최소 천장 높이 (m)
-        if coord_range:
-            mins, maxs = coord_range
-            carb.log_info(f"[Physics] coord_range mins={mins} maxs={maxs}")
-            cx = (mins[0] + maxs[0]) / 2.0
-            cy = (mins[1] + maxs[1]) / 2.0
-            cz = (mins[2] + maxs[2]) / 2.0
-            ext_x = (maxs[0] - mins[0])
-            ext_y = (maxs[1] - mins[1])
-            ext_z = (maxs[2] - mins[2])
-            if is_y_up:
-                # horizontal = X·Z, vertical = Y
-                width, depth = ext_x, ext_z
-                height = max(ext_y, min_height)
-                # floor가 ground level(mins[1]) 살짝 아래로 가도록 center.y 조정
-                box_center = (cx, mins[1] + height / 2.0, cz)
-                box_size = (width, height, depth)
-            else:
-                # horizontal = X·Y, vertical = Z
-                width, depth = ext_x, ext_y
-                height = max(ext_z, min_height)
-                box_center = (cx, cy, mins[2] + height / 2.0)
-                box_size = (width, depth, height)
-        else:
-            # trajectory 미로드 시 기본값
-            if is_y_up:
-                box_center = (0.0, 1.5, 0.0)
-                box_size = (5.0, 3.0, 5.0)
-            else:
-                box_center = (0.0, 0.0, 1.5)
-                box_size = (5.0, 5.0, 3.0)
-
-        carb.log_info(f"[Physics] bounding box center={box_center} size={box_size} up_axis={'Y' if is_y_up else 'Z'}")
-        create_bounding_box(stage, center=box_center, size=box_size)
-        # Persist bounds so automation can place objects at random in-bounds positions.
-        self._physics_bounds = {
-            "center": tuple(float(v) for v in box_center),
-            "size": tuple(float(v) for v in box_size),
-            "is_y_up": bool(is_y_up),
-        }
-
-        rigid_prims = []
-        proxy_radii = []
-        for objid, prim_path in self._prim_map.items():
-            prim = stage.GetPrimAtPath(prim_path)
-            if not prim or not prim.IsValid():
-                carb.log_warn(f"[Physics] skip invalid prim: objid={objid} path={prim_path}")
-                continue
-            wrapped, proxy_radius = wrap_with_collision_proxy(stage, prim, shape="cylinder", visible=False)
-            rigid_prims.append(wrapped)
-            proxy_radii.append(proxy_radius)
-
-        # wander는 사용자가 Move 버튼으로 명시 시작. 여기서는 인스턴스만 생성.
-        # 벽 근접 탐지를 위해 박스 bounds 전달 (margin = 작은 수평 변의 5% → 벽에 더 붙은 뒤 회전).
-        bounds_half = (box_size[0] / 2.0, box_size[1] / 2.0, box_size[2] / 2.0)
-        horiz = (box_size[0], box_size[2]) if is_y_up else (box_size[0], box_size[1])
-        wall_margin = 0.05 * min(horiz)
-        # 객체 간 충돌 거리(거리 기반 fallback 전용): 스치는 접촉까지 잡도록 2.2r.
-        # contact report가 기본 탐지원이므로 이 값은 use_contact_reports=False일 때만 쓰임.
-        collision_distance = 2.2 * max(proxy_radii) if proxy_radii else 1.0 * m_to_units
-        # 라벨/observability용 접촉 정의: contact report는 실제 접촉(중심거리 ≈ 2r)에서
-        # 발화하므로 사이드카에는 2.0r을 기록 → 오프라인 recall 분석이 라벨과 같은
-        # 규칙을 재현한다. (fallback 탐지 2.2r과 정의가 다름에 주의)
-        self._collision_distance = 2.0 * max(proxy_radii) if proxy_radii else 1.0 * m_to_units
-        self._wander = WanderController(
-            rigid_prims,
-            speed=self._wander_speed,
-            on_collision=self._on_collision_event,
-            bounds_center=box_center,
-            bounds_half=bounds_half,
-            wall_margin=wall_margin,
-            collision_distance=collision_distance,
-            seed=self._wander_seed,
-        )
-
-        try:
-            import omni.timeline
-
-            omni.timeline.get_timeline_interface().play()
-        except Exception as e:
-            carb.log_warn(f"[TimeTravel] Physics mode enabled, but timeline play request failed: {e}")
-
-    def set_playback_mode(self) -> None:
-        """Return to trajectory playback and remove transient physics controls."""
-        import omni.usd
-
-        from ..physics import unwrap
-
-        if self._wander:
-            self._wander.stop()
-            self._wander = None
-        self._stop_collision_recorder()
-        self._restore_min_frame_rate()
-
-        stage = omni.usd.get_context().get_stage()
-        if stage:
-            for prim_path in self._prim_map.values():
-                prim = stage.GetPrimAtPath(prim_path)
-                if prim and prim.IsValid():
-                    unwrap(stage, prim)
-            if stage.GetPrimAtPath("/World/PhysicsWalls"):
-                stage.RemovePrim("/World/PhysicsWalls")
-
-        self._playback.set_mode("playback")
-        self.update_stage_objects()
 
     def get_mode(self) -> str:
         return self._playback.get_mode()
@@ -887,6 +244,44 @@ class TimeTravelCore:
 
     def get_current_time(self) -> datetime.datetime:
         return self._playback.get_current_time() or datetime.datetime.now()
+
+    def is_playing(self) -> bool:
+        return self._playback.is_playing()
+
+    def get_playback_speed(self) -> float:
+        return self._playback.get_playback_speed()
+
+    def set_playback_speed(self, speed: float):
+        self._playback.set_playback_speed(speed)
+
+    # ---- 캡처 (capture_service) ---------------------------------------------
+
+    def start_capture(self, duration_s: float = 0.0, output_path: Optional[str] = None) -> bool:
+        return capture_service.start_capture(self, duration_s, output_path)
+
+    def run_capture_headless(self, duration_s: float = 0.0, output_path: Optional[str] = None,
+                             camera_path: Optional[str] = None,
+                             capture_start_dt: Optional[datetime.datetime] = None,
+                             render_fps: Optional[int] = None) -> Optional[str]:
+        return capture_service.run_capture_headless(
+            self, duration_s, output_path,
+            camera_path=camera_path,
+            capture_start_dt=capture_start_dt,
+            render_fps=render_fps,
+        )
+
+    def stop_capture(self) -> Optional[str]:
+        return capture_service.stop_capture(self)
+
+    def is_capturing(self) -> bool:
+        return self._capture_active
+
+    def set_capture_complete_callback(self, cb) -> None:
+        """UI 캡처 성공 시 output URI로 호출될 콜백 등록(캡처 워커 스레드에서 호출됨)."""
+        self._capture_complete_cb = cb
+
+    def _write_capture_sidecar(self, output_path: str, duration_s: float, fps: Optional[int] = None) -> None:
+        capture_service.write_capture_sidecar(self, output_path, duration_s, fps=fps)
 
     # ---- sim-time master clock (headless 캡처의 단일 시계) -----------------
     # headless 루프가 프레임마다 set_sim_time(seq/fps)를 호출 → 그 프레임의
@@ -926,14 +321,114 @@ class TimeTravelCore:
             return format_event_time(current_time)
         return "No time set"
 
-    def is_playing(self) -> bool:
-        return self._playback.is_playing()
+    # ---- physics / wander (physics_service) ---------------------------------
 
-    def get_playback_speed(self) -> float:
-        return self._playback.get_playback_speed()
+    def set_physics_mode(self) -> None:
+        physics_service.set_physics_mode(self)
 
-    def set_playback_speed(self, speed: float):
-        self._playback.set_playback_speed(speed)
+    def set_playback_mode(self) -> None:
+        physics_service.set_playback_mode(self)
+
+    def get_physics_bounds(self) -> Optional[dict]:
+        """Bounds computed at set_physics_mode: {center, size, is_y_up}. None if not set."""
+        return self._physics_bounds
+
+    def set_wander_seed(self, seed) -> None:
+        """에피소드 재현성: set_physics_mode 전에 호출하면 wander heading이 seed 결정적."""
+        self._wander_seed = seed
+
+    def start_wander(self) -> bool:
+        """Start PhysX wandering when Physics mode has created a controller."""
+        if not self._wander:
+            carb.log_warn("[TimeTravel] start_wander: Physics mode is not active")
+            return False
+        # 충돌 기록은 Capture가 소유(start_capture에서 시작) → 여기선 시작하지 않음.
+        # Move만 누르면 객체는 움직이지만 CSV는 안 남고, Capture를 눌러야 기록 시작.
+        self._wander.start()
+        return True
+
+    def stop_wander(self) -> bool:
+        if not self._wander:
+            return False
+        self._wander.stop()
+        # recorder는 Capture가 소유 → 여기서 멈추지 않음(캡처 창과 분리되지 않게).
+        return True
+
+    def is_wandering(self) -> bool:
+        return bool(self._wander and getattr(self._wander, "is_active", lambda: False)())
+
+    def set_velocity_mode(self, mode: str) -> bool:
+        """콘솔에서 velocity 모드 즉시 토글 (per_tick / on_enter)."""
+        if not self._wander:
+            carb.log_warn("[TimeTravel] set_velocity_mode: Physics 모드 아님")
+            return False
+        return self._wander.set_velocity_mode(mode)
+
+    def get_wander_speed(self) -> float:
+        if self._wander:
+            return self._wander.get_speed()
+        return float(getattr(self, "_wander_speed", 120.0))
+
+    def set_wander_speed(self, speed: float) -> bool:
+        try:
+            speed = float(speed)
+        except (TypeError, ValueError):
+            carb.log_warn(f"[TimeTravel] invalid wander speed: {speed!r}")
+            return False
+        if speed <= 0.0:
+            carb.log_warn(f"[TimeTravel] invalid wander speed: {speed:g}")
+            return False
+        self._wander_speed = speed
+        if self._wander:
+            return self._wander.set_speed(speed)
+        return True
+
+    def _on_collision_event(self, prim_path: str, position, kind: str) -> None:
+        physics_service.on_collision_event(self, prim_path, position, kind)
+
+    def _start_collision_recorder(self) -> None:
+        physics_service.start_collision_recorder(self)
+
+    def _stop_collision_recorder(self) -> None:
+        physics_service.stop_collision_recorder(self)
+
+    def start_trace(self, output_path: Optional[str] = None) -> str:
+        return physics_service.start_trace(self, output_path)
+
+    def stop_trace(self) -> Optional[str]:
+        return physics_service.stop_trace(self)
+
+    def is_tracing(self) -> bool:
+        return bool(self._trace and self._trace.active)
+
+    # ---- 객체 생성/선택 (object_service) -------------------------------------
+
+    def create_astronaut_prim(self, index: int) -> str:
+        astronaut_usd = self._config.astronaut_usd if self._config else ""
+        if not astronaut_usd:
+            carb.log_error("[TimeTravel] astronaut_usd not specified in config")
+            return ""
+        return self._stage_objects.create_astronaut_prim(index, astronaut_usd)
+
+    def set_active_objects(self, objids) -> int:
+        return object_service.set_active_objects(self, objids)
+
+    def add_synthetic_objects(self, count: int) -> Dict[str, str]:
+        return object_service.add_synthetic_objects(self, count)
+
+    def auto_generate_astronauts(self) -> Dict[str, str]:
+        return object_service.auto_generate_astronauts(self)
+
+    def regenerate_astronauts_from_loaded_data(self) -> Dict[str, str]:
+        return object_service.regenerate_astronauts_from_loaded_data(self)
+
+    def clear_timetravel_objects(self):
+        object_service.clear_timetravel_objects(self)
+
+    def hide_all_cameras(self):
+        self._stage_objects.hide_all_cameras()
+
+    # ---- 데이터/이벤트 조회 ---------------------------------------------------
 
     def has_data(self) -> bool:
         return self._repository.has_data()
@@ -979,133 +474,6 @@ class TimeTravelCore:
             carb.log_error(f"[TimeTravel] Failed to parse objids: {e}")
             return []
 
-    def clear_timetravel_objects(self):
-        if self._wander:
-            self._wander.stop()
-            self._wander = None
-        self._stage_objects.clear_timetravel_objects()
-        self._repository.clear()
-        self._prim_map.clear()
-        self._playback.configure_data_range(None, None)
-        self._playback.set_event_summary([])
-
-    def create_astronaut_prim(self, index: int) -> str:
-        astronaut_usd = self._config.astronaut_usd if self._config else ""
-        if not astronaut_usd:
-            carb.log_error("[TimeTravel] astronaut_usd not specified in config")
-            return ""
-        return self._stage_objects.create_astronaut_prim(index, astronaut_usd)
-
-    def add_synthetic_objects(self, count: int) -> Dict[str, str]:
-        """배치 전용: 궤적 데이터에 없는 추가 우주인을 스폰해 prim_map에 등록.
-
-        physics(wander) 모드는 데이터 좌표가 필요 없으므로 객체 수를 데이터 objid 수
-        이상으로 늘릴 수 있다. objid는 기존 개수에 이어 obj{N:03d}로 부여 —
-        라벨 규칙(끝자리 숫자)·충돌 기록·오버레이가 prim_map 기준이라 그대로 따라온다.
-        주의: 이 객체들은 재현(playback) 데이터가 없다. 호출부가 초기 위치를 반드시
-        직접 배치할 것(생성 직후엔 원점 — 겹침 폭발 위험, 일지 #6).
-        """
-        if count <= 0:
-            return {}
-        base = dict(self._prim_map_full or self._prim_map)
-        start_idx = len(base)
-        added: Dict[str, str] = {}
-        for k in range(1, int(count) + 1):
-            idx = start_idx + k
-            objid = f"obj{idx:03d}"
-            if objid in base:
-                continue
-            prim_path = self.create_astronaut_prim(idx)
-            if prim_path:
-                added[objid] = prim_path
-        if added:
-            self._prim_map.update(added)
-            if self._prim_map_full:
-                self._prim_map_full.update(added)
-            carb.log_warn(f"[TimeTravel] synthetic objects added: {sorted(added)}")
-        return added
-
-    def auto_generate_astronauts(self) -> Dict[str, str]:
-        if not self._config:
-            carb.log_error("[TimeTravel] Config must be loaded before auto-generation")
-            return {}
-
-        if not self._config.astronaut_usd:
-            self._config.astronaut_usd = DEFAULT_ASTRONAUT_USD
-            carb.log_info(f"[TimeTravel] Using default astronaut USD: {DEFAULT_ASTRONAUT_USD}")
-
-        data_uri = self._config.data_uri
-        if "://" in self._config.data_path:
-            objids = TrajectoryRepository.parse_unique_objids_from_uri(data_uri)
-        else:
-            csv_path = self._config.resolve_from_config(self._config.data_path)
-            if not csv_path.exists():
-                carb.log_error(f"[TimeTravel] Data file not found: {csv_path}")
-                return {}
-            objids = self.parse_unique_objids(str(csv_path))
-        if not objids:
-            carb.log_error("[TimeTravel] No objids found in CSV")
-            return {}
-
-        self.clear_timetravel_objects()
-
-        prim_map = {}
-        for i, objid in enumerate(objids, start=1):
-            prim_path = self.create_astronaut_prim(i)
-            if prim_path:
-                prim_map[objid] = prim_path
-
-        self.hide_all_cameras()
-        self._prim_map = prim_map
-        return prim_map
-
-    def regenerate_astronauts_from_loaded_data(self) -> Dict[str, str]:
-        if not self._config:
-            carb.log_error("[TimeTravel] Config must be loaded before auto-generation")
-            return {}
-        if not self._config.astronaut_usd:
-            self._config.astronaut_usd = DEFAULT_ASTRONAUT_USD
-            carb.log_info(f"[TimeTravel] Using default astronaut USD: {DEFAULT_ASTRONAUT_USD}")
-
-        objids = []
-        get_object_ids = getattr(self._repository, "get_object_ids", None)
-        if callable(get_object_ids):
-            objids = get_object_ids()
-        if not objids and self._repository.data_start_time:
-            objids = sorted(self._repository.get_data_at_time(self._repository.data_start_time).keys())
-        if not objids:
-            carb.log_error("[TimeTravel] No objids found in loaded data")
-            return {}
-
-        if self._wander:
-            self._wander.stop()
-            self._wander = None
-        self._stage_objects.clear_timetravel_objects()
-
-        prim_map = {}
-        for i, objid in enumerate(objids, start=1):
-            prim_path = self.create_astronaut_prim(i)
-            if prim_path:
-                prim_map[objid] = prim_path
-            else:
-                carb.log_error(f"[TimeTravel] Failed to create astronaut prim for objid={objid}")
-
-        self.hide_all_cameras()
-        self._prim_map = prim_map
-        if prim_map:
-            carb.log_warn(
-                f"[TimeTravel] Regenerated {len(prim_map)} astronauts from loaded data "
-                f"(objids={len(objids)})"
-            )
-        else:
-            carb.log_error(
-                f"[TimeTravel] Loaded data has {len(objids)} objids, but no astronaut prims were created"
-            )
-        return prim_map
-
-    def hide_all_cameras(self):
-        self._stage_objects.hide_all_cameras()
-
     def process_event_json(self, json_path: str) -> bool:
         try:
             success = self._events.process_event_json(json_path)
@@ -1118,6 +486,8 @@ class TimeTravelCore:
 
     def should_auto_generate(self) -> bool:
         return bool(self._config and self._config.auto_generate)
+
+    # ---- lookup / 벤치마크 (benchmark_service) --------------------------------
 
     def set_lookup_mode(self, mode: str) -> bool:
         """Lookup 알고리즘 모드 변경. 'linear' | 'bisect' | 'hybrid' | 'invalidate' | 'bidirectional'."""
@@ -1133,87 +503,15 @@ class TimeTravelCore:
         return self._repository.get_lookup_mode()
 
     def start_lookup_benchmark(self, mode: str, pattern: str) -> bool:
-        """Live lookup benchmark 시작.
-
-        mode: 'linear' | 'bisect' | 'hybrid' | 'invalidate'
-        pattern: 자유 라벨 (예: 'forward', 'backward', 'random_seek')
-        """
-        try:
-            self._repository.set_lookup_mode(mode)
-        except ValueError as e:
-            carb.log_warn(f"[Benchmark] invalid mode: {e}")
-            return False
-        self._repository.start_benchmark(pattern)
-        carb.log_warn(f"[Benchmark] started mode={mode} pattern={pattern}")
-        return True
+        return benchmark_service.start_lookup_benchmark(self, mode, pattern)
 
     def stop_lookup_benchmark(self) -> dict:
-        """Live lookup benchmark 종료. 결과 표 + CSV 저장."""
-        result = self._repository.stop_benchmark()
-        carb.log_warn(
-            f"[Benchmark] mode={result['mode']:12s} pattern={result['pattern']:12s} "
-            f"calls={result['call_count']:6d} total={result['total_seconds']*1000:.3f}ms "
-            f"per_call={result['per_call_us']:.3f}us"
-        )
-        try:
-            out_dir = self._paths.artifacts_dir / "benchmarks"
-            out_dir.mkdir(parents=True, exist_ok=True)
-            csv_path = out_dir / "lookup_runtime_benchmark.csv"
-            is_new = not csv_path.exists()
-            with open(csv_path, "a", encoding="utf-8", newline="") as f:
-                import csv as _csv_local
-                writer = _csv_local.writer(f)
-                if is_new:
-                    writer.writerow(["timestamp", "mode", "pattern", "call_count",
-                                     "total_seconds", "per_call_us"])
-                from datetime import datetime as _dt_local
-                writer.writerow([_dt_local.now().isoformat(), result["mode"],
-                                 result["pattern"], result["call_count"],
-                                 result["total_seconds"], result["per_call_us"]])
-            carb.log_warn(f"[Benchmark] CSV appended: {csv_path}")
-        except Exception as e:
-            carb.log_warn(f"[Benchmark] CSV write failed: {e}")
-        return result
+        return benchmark_service.stop_lookup_benchmark(self)
 
     def run_lookup_benchmark_suite(self, duration_s: float = 5.0, fps: int = 60) -> list:
-        """3 lookup modes × forward/backward = 6 runs 자동 측정.
+        return benchmark_service.run_lookup_benchmark_suite(self, duration_s, fps)
 
-        각 run 전 timeline을 안전한 시작점으로 reset.
-        """
-        n_ticks = int(duration_s * fps)
-        dt = 1.0 / fps
-        runs = [
-            ("bisect", "forward", 1.0),
-            ("hybrid", "forward", 1.0),
-            ("invalidate", "forward", 1.0),
-            ("bisect", "backward", -1.0),
-            ("hybrid", "backward", -1.0),
-            ("invalidate", "backward", -1.0),
-        ]
-        results = []
-        for mode, pattern, speed in runs:
-            # 1) Reset timeline to a safe starting point
-            if speed > 0:
-                self.set_to_earliest_time()
-            else:
-                end = self._repository.data_end_time
-                if end:
-                    self.set_current_time(end)
-            # 2) Ensure not playing before start
-            if self._playback.is_playing():
-                self._playback.toggle_playback()
-            # 3) Start benchmark + play
-            self.start_lookup_benchmark(mode, pattern)
-            self._playback.set_playback_speed(speed)
-            self._playback.toggle_playback()
-            # 4) Drive updates manually (Kit main thread blocked here)
-            for _ in range(n_ticks):
-                self.update(dt)
-            # 5) Stop play + benchmark
-            if self._playback.is_playing():
-                self._playback.toggle_playback()
-            results.append(self.stop_lookup_benchmark())
-        return results
+    # ---- 표시 복잡도 / 이벤트 카메라 ------------------------------------------
 
     def set_visual_complexity(self, level: str) -> bool:
         if not self._config:
