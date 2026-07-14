@@ -225,7 +225,10 @@ class TrajectoryRepository:
             return list(csv.DictReader(io.StringIO(raw.decode("utf-8"))))
         import pyarrow.parquet as pq  # parquet일 때만 필요 (선택 의존성)
 
-        return pq.read_table(io.BytesIO(raw)).to_pylist()
+        # NOTE: read_table()은 내부적으로 pyarrow.dataset(네이티브 _dataset.pyd)를 지연
+        # import하는데, 이 DLL 초기화가 Kit 임베디드 파이썬에서 세그폴트를 낸다(앱 종료).
+        # ParquetFile.read()는 저수준 _parquet 리더만 써서 _dataset를 안 건드린다.
+        return pq.ParquetFile(io.BytesIO(raw)).read().to_pylist()
 
     @staticmethod
     def _rows_to_data(
