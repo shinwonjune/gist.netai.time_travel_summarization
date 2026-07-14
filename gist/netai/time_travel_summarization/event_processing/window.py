@@ -34,10 +34,10 @@ class EventProcessingWindow:
     
     def _build_ui(self):
         """Build the event processing window UI."""
-        self._window = ui.Window("Event Post Processing", width=440, height=520)
-        
+        self._window = ui.Window("Event Post Processing", width=440, height=430)
+
         with self._window.frame:
-            with ui.VStack(spacing=10, style={"margin": 3}):
+            with ui.VStack(spacing=6, style={"margin": 3}):
                 # Title
                 ui.Label("Event Post Processing", height=30, style={"font_size": 18, "font_weight": "bold"})
                 
@@ -54,7 +54,7 @@ class EventProcessingWindow:
                 ui.Spacer(height=5)
 
                 # Process Button
-                self._process_button = ui.Button("Process Events", height=40, clicked_fn=self._on_process_clicked)
+                self._process_button = ui.Button("Process Events", width=120, height=28, clicked_fn=self._on_process_clicked)
                 
                 ui.Spacer(height=5)
                 
@@ -70,7 +70,6 @@ class EventProcessingWindow:
 
                 # ---- Event Search — 이벤트 인덱스(vlm_events) 시간창 조회 ------- #
                 # 파일명 릴레이 대신 twin time 구간으로 검색, 선택하면 그 시점 재구축.
-                ui.Spacer(height=5)
                 ui.Label("Event Search (twin time range):", height=20,
                          style={"font_weight": "bold", "font_size": 16})
                 with ui.HStack(height=25, spacing=5):
@@ -82,7 +81,7 @@ class EventProcessingWindow:
                 with ui.HStack(height=28, spacing=8):
                     self._search_button = ui.Button("Search Events", width=120,
                                                     clicked_fn=self._on_search_clicked)
-                    ui.Label("(YYYY-MM-DD HH:MM:SS — Data Lake 모드)",
+                    ui.Label("(YYYY-MM-DD HH:MM:SS — Data Lake mode)",
                              style={"color": 0xFF888888})
                 self._results_stack = None
                 with ui.ScrollingFrame(height=120):
@@ -190,11 +189,11 @@ class EventProcessingWindow:
             end = datetime.datetime.strptime(
                 self._search_end.model.get_value_as_string().strip(), _DT_FMT)
         except ValueError:
-            self._update_status(f"Error: 시각 형식은 {_DT_FMT}", error=True)
+            self._update_status(f"Error: time format must be {_DT_FMT}", error=True)
             return
         index_root = self._core.get_output_root_uri_for_active_mode()
         if not index_root:
-            self._update_status("Error: 이벤트 검색은 Data Lake 모드에서만 가능합니다.", error=True)
+            self._update_status("Error: event search requires Data Lake mode.", error=True)
             return
         self._update_status("Searching events...", processing=True)
         self._search_button.enabled = False

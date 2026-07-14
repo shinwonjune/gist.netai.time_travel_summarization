@@ -216,7 +216,7 @@ class RemoteGenPanel:
     def _on_train_clicked(self):
         dataset = self._train_dataset.model.get_value_as_string().strip()
         if not dataset:
-            self._status_label.text = "train: Dataset 경로 필요"
+            self._status_label.text = "train: Dataset path required"
             return
         job_id = "train-" + datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
         self._submit_spec(JobSpec(
@@ -228,7 +228,7 @@ class RemoteGenPanel:
     def _on_serve_start_clicked(self):
         model_path = self._serve_model.model.get_value_as_string().strip()
         if not model_path:
-            self._status_label.text = "serve: Model path 필요"
+            self._status_label.text = "serve: Model path required"
             return
         job_id = "serve-" + datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
         self._submit_spec(JobSpec(

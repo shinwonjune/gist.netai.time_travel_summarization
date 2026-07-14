@@ -287,7 +287,7 @@ class TimeTravelWindow:
             self._refresh_after_source_switch()
             return
 
-        self._source_status_message = "Data Lake 미설정(config lake.manifest_uri 필요)"
+        self._source_status_message = "Data Lake not configured (config lake.manifest_uri required)"
         if hasattr(self._core, "get_last_data_load_error"):
             self._source_status_message = self._core.get_last_data_load_error() or self._source_status_message
         carb.log_warn(f"[TimeTravel] {self._source_status_message}")
