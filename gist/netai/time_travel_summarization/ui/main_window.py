@@ -496,7 +496,7 @@ class TimeTravelWindow:
     def update_ui(self):
         """Update UI elements (called every frame)."""
         # Update stage time display
-        self._stage_time_label.text = self._core.get_stage_time_string()
+        self._stage_time_label.text = self._core.get_twin_time_string()
         
         # Update slider if playing (but don't interfere with user dragging)
         if self._core.is_playing():

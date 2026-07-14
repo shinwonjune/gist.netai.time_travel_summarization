@@ -321,6 +321,23 @@ class TimeTravelCore:
             return format_event_time(current_time)
         return "No time set"
 
+    def get_twin_time_string(self) -> str:
+        """Twin Time 창 라벨 전용 — 날짜 포함(YYYY-MM-DD HH:MM:SS).
+
+        오버레이/CSV용 get_stage_time_string(HH:MM:SS, 추론↔라벨 정합)과 달리,
+        멀티데이 재생에서 날짜 구분을 보이려고 날짜를 앞에 붙인다. 시각 부분은
+        format_event_time을 재사용해 PRECISION을 공유한다.
+        """
+        from ..timefmt import format_event_time
+
+        if self._playback.get_mode() == "physics":
+            dt = self.get_sim_clock_datetime() if self._use_sim_clock else datetime.datetime.now()
+        else:
+            dt = self._playback.get_current_time()
+        if not dt:
+            return "No time set"
+        return f"{dt.strftime('%Y-%m-%d')} {format_event_time(dt)}"
+
     # ---- physics / wander (physics_service) ---------------------------------
 
     def set_physics_mode(self) -> None:
