@@ -23,6 +23,9 @@ _DEFAULT_EXT_ROOT = "/home/netai/wonjune/kit-app-template/source/extensions/gist
 _DEFAULT_STAGE = ("omniverse://10.38.38.32/Projects/Dream-AI_Plus_Twin/"
                   "Workspace_Personal/swj/AI-Grad_Building/A_AI-Grad_Building.usd")
 _UPLOAD_PREFIX = "s3://time-travel-summarization/episodes"
+# L40 apps 디렉토리에 .kit이 여러 개라 러너 자동 발견이 불가 → 명시 지정 필수.
+# prod-20260709가 실제 사용한 앱(job.log "My USD Composer" 확인).
+_DEFAULT_APP_KIT = "my_company.my_usd_composer"
 _DEFAULT_DATASET = "/home/netai/wonjune/ttsum-data/bev-collision-v2"
 _DEFAULT_MERGED_MODEL = "/home/netai/wonjune/ttsum-data/lora_qwen3vl_v3/v0-20260710-051758/checkpoint-133-merged"
 # GPU 역할 분리(서버 SERVE_GPU와 일치시킬 것): 0=서빙 전용, 1=잡(생성/학습).
@@ -79,6 +82,10 @@ class RemoteGenPanel:
             ui.Label("Stage:", width=85)
             self._stage = ui.StringField()
             self._stage.model.set_value(_DEFAULT_STAGE)
+        with ui.HStack(height=25, spacing=8):
+            ui.Label("App kit:", width=85)
+            self._app_kit = ui.StringField()
+            self._app_kit.model.set_value(_DEFAULT_APP_KIT)
         with ui.HStack(height=25, spacing=8):
             ui.Label("Camera:", width=85)
             self._camera = ui.StringField(width=140)
@@ -180,6 +187,7 @@ class RemoteGenPanel:
             max_objects=self._max_objects.model.get_value_as_int(),
             camera=self._camera.model.get_value_as_string().strip(),
             stage=self._stage.model.get_value_as_string().strip(),
+            app_kit=self._app_kit.model.get_value_as_string().strip(),
             upload_uri=upload,
             seed=self._seed.model.get_value_as_int(),
         )
@@ -255,11 +263,12 @@ class RemoteGenPanel:
         def work():
             st = read_status(job_id, transport, ext_root)
             state = st.get("state", "?")
+            extra = ""
             if "episodes_done" in st:  # generate 잡: 진행 카운트 표시
                 extra = f" ({st.get('episodes_done', '?')}/{st.get('total', '?')})"
-            else:                      # train/serve 잡: note가 있으면 표시
-                note = st.get("note", "")
-                extra = f" — {note}" if note else ""
+            note = st.get("note", "")  # 실패 사유·부가 정보 (모든 잡 타입)
+            if note:
+                extra += f" — {note}"
             self._set_status(f"{job_id}: {state}{extra}")
 
         threading.Thread(target=work, daemon=True, name="RemoteGenStatus").start()

@@ -37,6 +37,28 @@ EXT_ROOT="$(git -C "$SCRIPT_DIR" rev-parse --show-toplevel)"
 EXT_PKG="$EXT_ROOT/gist/netai/time_travel_summarization"
 GEN="$EXT_PKG/automation/generate_episodes.py"
 
+# ---- 잡 상태 파일을 먼저 만든다 --------------------------------------------- #
+# kit/앱 해석보다 앞이어야 조기 실패(APP_KIT 미지정 등)도 status·log에 남는다.
+# (전엔 해석 후 생성이라 tmux 세션만 죽고 GUI엔 아무 흔적이 없는 무음 실패였음.)
+JOB_DIR="$EXT_ROOT/artifacts/jobs/$JOB_ID"
+OUT="$EXT_ROOT/artifacts/episodes/$JOB_ID"
+LOG="$JOB_DIR/job.log"
+STATUS="$JOB_DIR/status"
+mkdir -p "$JOB_DIR" "$OUT"
+
+write_status() {  # write_status <state> <done> [note]
+  { echo "state=$1"; echo "episodes_done=$2"; echo "total=$EPISODES";
+    echo "job_id=$JOB_ID"; [ -n "${3:-}" ] && echo "note=$3";
+    echo "updated=$(date -Is)"; } > "$STATUS.tmp"
+  mv "$STATUS.tmp" "$STATUS"   # 원자적 교체 — 폴링이 반쯤 쓰인 파일을 읽지 않게
+}
+fail() {  # fail <note> — 조기 실패를 status+log 양쪽에 남기고 종료
+  echo "ERROR: $1" | tee -a "$LOG"
+  write_status failed 0 "$1"
+  exit 2
+}
+write_status running 0 "resolving kit/app"
+
 KIT_ROOT="${KIT_ROOT:-}"
 if [ -z "$KIT_ROOT" ]; then
   for cand in "$EXT_ROOT/../../.." "$HOME/wonjune/kit-app-template" "$HOME/kit-app-template"; do
@@ -45,7 +67,7 @@ if [ -z "$KIT_ROOT" ]; then
     fi
   done
 fi
-[ -n "$KIT_ROOT" ] || { echo "ERROR: kit 빌드 없음 — KIT_ROOT 지정"; exit 2; }
+[ -n "$KIT_ROOT" ] || fail "kit 빌드 없음 — KIT_ROOT 지정"
 KIT="$KIT_ROOT/_build/linux-x86_64/release/kit/kit"
 APPS_DIR="$KIT_ROOT/_build/linux-x86_64/release/apps"
 APP_KIT="${APP_KIT:-}"
@@ -53,27 +75,16 @@ if [ -n "$APP_KIT" ]; then
   case "$APP_KIT" in */*) APP="$APP_KIT" ;; *) APP="$APPS_DIR/${APP_KIT%.kit}.kit" ;; esac
 else
   mapfile -t _apps < <(ls "$APPS_DIR"/*.kit 2>/dev/null || true)
-  [ "${#_apps[@]}" -eq 1 ] || { echo "ERROR: APP_KIT 지정 필요 (앱 ${#_apps[@]}개)"; exit 2; }
+  [ "${#_apps[@]}" -eq 1 ] || fail "APP_KIT 지정 필요 (앱 ${#_apps[@]}개)"
   APP="${_apps[0]}"
 fi
-[ -f "$APP" ] || { echo "ERROR: 앱 없음: $APP"; exit 2; }
+[ -f "$APP" ] || fail "앱 없음: $APP"
 
 # 자격증명 (무인 Nucleus/minIO)
 if [ -f "$HOME/wonjune/.env.l40" ]; then
   set -a; . "$HOME/wonjune/.env.l40"; set +a
 fi
 
-JOB_DIR="$EXT_ROOT/artifacts/jobs/$JOB_ID"
-OUT="$EXT_ROOT/artifacts/episodes/$JOB_ID"
-LOG="$JOB_DIR/job.log"
-STATUS="$JOB_DIR/status"
-mkdir -p "$JOB_DIR" "$OUT"
-
-write_status() {  # write_status <state> <done>
-  { echo "state=$1"; echo "episodes_done=$2"; echo "total=$EPISODES";
-    echo "job_id=$JOB_ID"; echo "updated=$(date -Is)"; } > "$STATUS.tmp"
-  mv "$STATUS.tmp" "$STATUS"   # 원자적 교체 — 폴링이 반쯤 쓰인 파일을 읽지 않게
-}
 write_status running 0
 
 # ---- 생성 인자 조립 --------------------------------------------------------- #
