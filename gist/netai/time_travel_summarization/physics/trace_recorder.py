@@ -17,6 +17,7 @@ class TraceRecorder:
         self._writer: Optional[csv.writer] = None
         self._row_count = 0
         self._last_tick = None
+        self._last_timestamp: Optional[str] = None
         self._active = False
 
     @property
@@ -40,6 +41,7 @@ class TraceRecorder:
         self._writer.writerow(["timestamp", "objid", "x", "y", "z"])
         self._active = True
         self._last_tick = None
+        self._last_timestamp = None
         self._row_count = 0
 
     def tick(self, now_dt: Optional[datetime.datetime] = None) -> None:
@@ -55,6 +57,11 @@ class TraceRecorder:
         self._last_tick = now
 
         timestamp_str = self._format_timestamp(now_dt or datetime.datetime.now())
+        # 같은 시각 재기록 방지 — headless 캡처의 렌더 대기 펌프 틱은 sim 클럭이
+        # 정지한 채 들어오므로, 여과 없이 쓰면 동일 타임스탬프 행이 중복된다.
+        if timestamp_str == self._last_timestamp:
+            return
+        self._last_timestamp = timestamp_str
         for objid, prim_or_path in self._prim_map.items():
             try:
                 pos = self._world_position(prim_or_path)

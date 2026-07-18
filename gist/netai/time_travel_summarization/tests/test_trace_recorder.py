@@ -40,8 +40,9 @@ class TraceRecorderTest(unittest.TestCase):
             rec._world_position = staticmethod(lambda p: (1.0, 2.0, 3.0))
 
             rec.start()
-            for _ in range(3):
-                rec.tick(datetime.datetime(2025, 1, 1, 0, 0, 0))
+            t0 = datetime.datetime(2025, 1, 1, 0, 0, 0)
+            for i in range(3):
+                rec.tick(t0 + datetime.timedelta(milliseconds=33 * i))
                 rec._last_tick = None
             rec.stop()
 
@@ -50,6 +51,26 @@ class TraceRecorderTest(unittest.TestCase):
             self.assertEqual(len(rows), 1 + 3 * 2)
             self.assertEqual(rows[1][1], "obj001")
             self.assertEqual(rows[1][2], "1.000")
+
+    def test_tick_skips_repeated_timestamp(self):
+        """sim 클럭이 정지한 펌프 틱(같은 시각 재호출)은 중복 기록하지 않는다."""
+        with tempfile.TemporaryDirectory() as td:
+            out = Path(td) / "trace.csv"
+            rec = TraceRecorder(prim_map={"obj001": _FakePrim("/W/obj001")},
+                                output_path=out, subsample_fps=1000)
+            rec._world_position = staticmethod(lambda p: (1.0, 2.0, 3.0))
+
+            rec.start()
+            same = datetime.datetime(2025, 1, 1, 0, 0, 0)
+            for _ in range(3):        # 동일 시각 3회 → 1회만 기록
+                rec.tick(same)
+                rec._last_tick = None
+            rec.tick(same + datetime.timedelta(milliseconds=33))  # 전진 → 기록
+            rec.stop()
+
+            with open(out) as f:
+                rows = list(csv.reader(f))
+            self.assertEqual(len(rows), 1 + 2)
 
 
 if __name__ == "__main__":

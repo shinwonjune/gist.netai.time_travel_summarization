@@ -221,7 +221,11 @@ class TimeTravelCore:
         self._playback.update(dt, self._parse_timestamp, self._on_playback_tick, self._on_event_requested)
         if self._trace and self._trace.active:
             try:
-                self._trace.tick()
+                # 충돌 CSV·오버레이와 동일 시계 — headless 캡처 중엔 sim 클럭.
+                # 인자 없이 부르면 wall clock이 찍혀, 렌더가 sim보다 느린 만큼
+                # trace가 늘어진다(30s 에피소드가 ~99s 스팬 → 재연 슬로모션).
+                now = self.get_sim_clock_datetime() if self._use_sim_clock else None
+                self._trace.tick(now)
             except Exception as e:
                 carb.log_warn(f"[Trace] tick failed: {e}")
         # capture auto-stop은 RealtimeCaptureRunner가 내부에서 처리
