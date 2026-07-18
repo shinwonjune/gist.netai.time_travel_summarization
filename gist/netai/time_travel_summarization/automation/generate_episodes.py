@@ -233,18 +233,25 @@ def load_spawn_zones(args, core) -> dict:
 
 
 def write_run_manifest(out_root: Path, args_dict: dict, cfgs: List[EpisodeConfig],
-                       done_idx: List[int], git_commit: Optional[str] = None) -> Path:
-    """배치 재현·역추적용 manifest: 생성 인자, 에피소드별 조건·시드, 성공 여부."""
+                       done_idx: List[int], git_commit: Optional[str] = None,
+                       timing: Optional[dict] = None,
+                       elapsed_s: Optional[Dict[int, float]] = None) -> Path:
+    """배치 재현·역추적용 manifest: 생성 인자, 에피소드별 조건·시드, 성공 여부, 소요 시간."""
     done = set(done_idx)
+    elapsed_s = elapsed_s or {}
     manifest = {
         "schema_version": 1,
         "created": datetime.datetime.now().isoformat(timespec="seconds"),
         "git_commit": git_commit,
+        # setup_s = 씬 로드+객체 준비(에피소드 밖 고정 비용), total_s = run() 전체.
+        # 배치 예상 상한 공식(로드 180s + Σep(D×7.2+30))×1.2 의 실측 검증 근거.
+        "timing": timing or {},
         "args": {k: args_dict[k] for k in sorted(args_dict)},
         "episodes": [
             {"idx": c.idx, "dir": f"ep_{c.idx:04d}", "seed": c.seed,
              "n_objects": c.n_objects, "speed": c.speed, "duration": c.duration,
-             "base_time_s": c.base_time_s, "ok": c.idx in done}
+             "base_time_s": c.base_time_s, "ok": c.idx in done,
+             "elapsed_s": elapsed_s.get(c.idx)}
             for c in cfgs
         ],
     }
@@ -422,6 +429,10 @@ def run(args, core=None) -> None:
     out_root = Path(args.out)
     out_root.mkdir(parents=True, exist_ok=True)
 
+    import time as _time
+    run_t0 = _time.monotonic()          # 소요 시간 실측 → manifest["timing"]
+    ep_elapsed: Dict[int, float] = {}
+
     _ensure_stage(core, getattr(args, "stage", None))
     camera_path = _resolve_camera(getattr(args, "camera", None))
     ok = core.load_data()
@@ -476,7 +487,9 @@ def run(args, core=None) -> None:
         print(f"[gen] spawn zones: { {k: v for k, v in spawn_zones.items()} } "
               f"plan={getattr(args, 'spawn_plan', None) or '(첫 구역에 전원)'}")
 
+    setup_s = _time.monotonic() - run_t0   # 씬 로드+객체 준비 (에피소드 밖 고정 비용)
     for cfg in cfgs:
+        ep_t0 = _time.monotonic()
         objids = pick_objids(all_objids, cfg.n_objects, cfg.seed)
         core.set_active_objects(objids)
         # 모드 무관 공통: 궤적 데이터 첫 시점 좌표로 벌려놓기. 이걸 안 하면 생성 직후
@@ -540,6 +553,7 @@ def run(args, core=None) -> None:
         core.stop_trace()
         core.set_playback_mode()
         if not produced:
+            ep_elapsed[cfg.idx] = round(_time.monotonic() - ep_t0, 1)
             print(f"[gen] ep {cfg.idx}: capture failed; skipping")
             continue
         # collisions path comes from the sidecar the capture wrote
@@ -556,6 +570,8 @@ def run(args, core=None) -> None:
                 upload_episode(ep_dir, args.upload_uri)
             except Exception as e:
                 print(f"[gen] upload FAILED for ep {cfg.idx}: {e!r} (local files kept)")
+        ep_elapsed[cfg.idx] = round(_time.monotonic() - ep_t0, 1)
+        print(f"[gen] ep {cfg.idx}: elapsed {ep_elapsed[cfg.idx]}s")
 
     git_commit = None
     try:
@@ -565,7 +581,10 @@ def run(args, core=None) -> None:
             text=True, timeout=10).strip()
     except Exception:
         pass
-    manifest_path = write_run_manifest(out_root, dict(vars(args)), cfgs, done_idx, git_commit)
+    timing = {"setup_s": round(setup_s, 1),
+              "total_s": round(_time.monotonic() - run_t0, 1)}
+    manifest_path = write_run_manifest(out_root, dict(vars(args)), cfgs, done_idx, git_commit,
+                                       timing=timing, elapsed_s=ep_elapsed)
     print(f"[gen] manifest -> {manifest_path} (ok {len(done_idx)}/{len(cfgs)})")
     if getattr(args, "upload_uri", None):
         try:
