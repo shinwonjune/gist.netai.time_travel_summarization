@@ -19,12 +19,12 @@ from .remote_generation import (
 )
 
 _DEFAULT_HOST = "netai@sv4000-2"
-_DEFAULT_EXT_ROOT = "~/wonjune/kit-app-template/source/extensions/gist.netai.time_travel_summarization"
+_DEFAULT_EXT_ROOT = "/home/netai/wonjune/kit-app-template/source/extensions/gist.netai.time_travel_summarization"
 _DEFAULT_STAGE = ("omniverse://10.38.38.32/Projects/Dream-AI_Plus_Twin/"
                   "Workspace_Personal/swj/AI-Grad_Building/A_AI-Grad_Building.usd")
 _UPLOAD_PREFIX = "s3://time-travel-summarization/episodes"
-_DEFAULT_DATASET = "~/wonjune/ttsum-data/bev-collision-v2"
-_DEFAULT_MERGED_MODEL = "~/wonjune/ttsum-data/merged/qwen3vl_lora_v2"
+_DEFAULT_DATASET = "/home/netai/wonjune/ttsum-data/bev-collision-v2"
+_DEFAULT_MERGED_MODEL = "/home/netai/wonjune/ttsum-data/lora_qwen3vl_v3/v0-20260710-051758/checkpoint-133-merged"
 # GPU 역할 분리(서버 SERVE_GPU와 일치시킬 것): 0=서빙 전용, 1=잡(생성/학습).
 # REST 경로는 job_api가 강제하지만, SSH 직결 경로는 이 값이 그대로 쓰인다.
 _SERVE_GPU = 0

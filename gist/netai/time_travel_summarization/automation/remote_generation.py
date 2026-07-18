@@ -181,23 +181,33 @@ def transport_from_host(host: str):
     return SSHTransport(host)
 
 
+def _tilde_safe(path: str) -> str:
+    """원격 셸용 경로 토큰. '~/...'는 shlex.quote가 통째로 홑따옴표로 감싸
+    ~ 확장이 막힌다(bash '~/...' → 리터럴 틸드 파일 없음 → 러너 미실행).
+    $HOME으로 치환해 원격 sh -c가 확장하게 한다(뒤 경로는 quote로 안전 처리)."""
+    if path.startswith("~/"):
+        return "$HOME/" + shlex.quote(path[2:])
+    return shlex.quote(path)
+
+
 def build_submit_command(spec: JobSpec, remote_ext_root: str) -> str:
     """tmux 분리 세션으로 러너를 띄우는 셸 명령 1줄을 조립.
 
     env는 shlex.quote로 개별 인용 — 값에 공백/특수문자가 있어도 안전.
     tmux new-session -d 라 제출은 즉시 반환되고 잡은 서버에서 계속 돈다.
     """
-    runner = f"{remote_ext_root.rstrip('/')}/{runner_rel_for(spec.job_type)}"
+    runner_tok = _tilde_safe(
+        f"{remote_ext_root.rstrip('/')}/{runner_rel_for(spec.job_type)}")
     envs = " ".join(
         f"{k}={shlex.quote(v)}" for k, v in spec.to_env().items() if v != "")
-    inner = f"{envs} bash {shlex.quote(runner)}"
+    inner = f"{envs} bash {runner_tok}"
     session = shlex.quote(f"job-{spec.job_id}")
     return f"tmux new-session -d -s {session} {shlex.quote(inner)} && echo SUBMITTED"
 
 
 def build_status_command(job_id: str, remote_ext_root: str) -> str:
     status = f"{remote_ext_root.rstrip('/')}/{JOBS_REL}/{job_id}/status"
-    return f"cat {shlex.quote(status)} 2>/dev/null || echo state=unknown"
+    return f"cat {_tilde_safe(status)} 2>/dev/null || echo state=unknown"
 
 
 def submit_job(spec: JobSpec, transport, remote_ext_root: str) -> Tuple[bool, str]:
