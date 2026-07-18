@@ -15,7 +15,7 @@ import threading
 import time
 
 from .remote_generation import (
-    JobSpec, read_status, submit_job, transport_from_host,
+    JobSpec, build_serve_check_command, read_status, submit_job, transport_from_host,
 )
 
 _DEFAULT_HOST = "netai@sv4000-2"
@@ -67,6 +67,7 @@ class RemoteGenPanel:
 
         self._dispatcher = dispatcher
         self._last_job_id = None
+        self._last_status_label = None  # 잡 타입별 상태 표시 위치 (serve는 Serving 섹션)
 
         ui.Label("Remote Data Generation", style={"font_size": 14, "font_weight": "bold"})
 
@@ -159,6 +160,11 @@ class RemoteGenPanel:
             start_btn.set_clicked_fn(self._on_serve_start_clicked)
             stop_btn = ui.Button("Stop Serving", width=110)
             stop_btn.set_clicked_fn(self._on_serve_stop_clicked)
+            check_btn = ui.Button("Check Serving", width=110)
+            check_btn.set_clicked_fn(self._on_serve_check_clicked)
+        with ui.HStack(height=22, spacing=8):
+            # serve 전용 상태줄 — 상단 공용 라벨(생성/학습 잡)과 분리
+            self._serve_status_label = ui.Label("", style={"color": 0xFF888888})
 
     # ---- helpers ----------------------------------------------------------- #
 
@@ -166,9 +172,10 @@ class RemoteGenPanel:
     def _fresh_seed() -> int:
         return int(time.time()) % 2_000_000_000  # IntField(int32) 안전 범위
 
-    def _set_status(self, text: str):
+    def _set_status(self, text: str, label=None):
         # 스레드에서 불려도 안전하게 디스패처 경유
-        self._dispatcher.submit(lambda: setattr(self._status_label, "text", text))
+        tgt = label or self._status_label
+        self._dispatcher.submit(lambda: setattr(tgt, "text", text))
 
     def _transport(self):
         # Host 판별: "user@host"=SSH / "http://localhost:8800"=REST(잡 API, SSH 터널
@@ -194,12 +201,14 @@ class RemoteGenPanel:
 
     # ---- callbacks ---------------------------------------------------------- #
 
-    def _submit_spec(self, spec: JobSpec):
+    def _submit_spec(self, spec: JobSpec, status_label=None):
         """공통 제출 경로 — 모든 잡 타입이 같은 transport·status 규약을 쓴다."""
         transport = self._transport()
         ext_root = self._ext_root.model.get_value_as_string().strip()
+        label = status_label or self._status_label
         self._last_job_id = spec.job_id
-        self._status_label.text = f"submitting {spec.job_id} via {transport.name}..."
+        self._last_status_label = label  # Check Status도 같은 자리에 표시
+        label.text = f"submitting {spec.job_id} via {transport.name}..."
 
         def work():
             try:
@@ -208,7 +217,7 @@ class RemoteGenPanel:
                        if ok else f"submit FAILED: {out[-120:]}")
             except Exception as exc:
                 msg = f"submit error: {exc!r}"
-            self._set_status(msg)
+            self._set_status(msg, label)
 
         threading.Thread(target=work, daemon=True, name="RemoteGenSubmit").start()
 
@@ -242,14 +251,33 @@ class RemoteGenPanel:
         self._submit_spec(JobSpec(
             job_id=job_id, job_type="serve_start", model_path=model_path,
             port=self._serve_port.model.get_value_as_int(), gpu=_SERVE_GPU,
-        ))
+        ), status_label=self._serve_status_label)
 
     def _on_serve_stop_clicked(self):
         job_id = "serve-stop-" + datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
         self._submit_spec(JobSpec(
             job_id=job_id, job_type="serve_stop",
             port=self._serve_port.model.get_value_as_int(), gpu=_SERVE_GPU,
-        ))
+        ), status_label=self._serve_status_label)
+
+    def _on_serve_check_clicked(self):
+        """잡 큐/status 파일이 아니라 서버의 컨테이너·API 실체를 직접 확인."""
+        transport = self._transport()
+        port = self._serve_port.model.get_value_as_int()
+        if not hasattr(transport, "run"):  # REST 데몬엔 컨테이너 조회 API가 없음
+            self._serve_status_label.text = "check: use SSH host (user@host)"
+            return
+        self._serve_status_label.text = "checking container/api..."
+
+        def work():
+            try:
+                _, out = transport.run(build_serve_check_command(port))
+                txt = "  ".join(x.strip() for x in out.splitlines() if "=" in x) or out[-100:]
+            except Exception as exc:
+                txt = f"check error: {exc!r}"
+            self._set_status(txt, self._serve_status_label)
+
+        threading.Thread(target=work, daemon=True, name="ServeCheck").start()
 
     def _on_status_clicked(self):
         if not self._last_job_id:
@@ -258,7 +286,8 @@ class RemoteGenPanel:
         transport = self._transport()
         ext_root = self._ext_root.model.get_value_as_string().strip()
         job_id = self._last_job_id
-        self._status_label.text = f"checking {job_id}..."
+        label = self._last_status_label or self._status_label
+        label.text = f"checking {job_id}..."
 
         def work():
             st = read_status(job_id, transport, ext_root)
@@ -269,6 +298,6 @@ class RemoteGenPanel:
             note = st.get("note", "")  # 실패 사유·부가 정보 (모든 잡 타입)
             if note:
                 extra += f" — {note}"
-            self._set_status(f"{job_id}: {state}{extra}")
+            self._set_status(f"{job_id}: {state}{extra}", label)
 
         threading.Thread(target=work, daemon=True, name="RemoteGenStatus").start()

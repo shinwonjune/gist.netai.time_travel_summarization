@@ -129,6 +129,11 @@ def start_capture(core, duration_s: float = 0.0, output_path: Optional[str] = No
     core._capture_active = True
     core._capture_duration_s = effective_duration
     core._capture_output_path = output_path
+    # 재연 캡처 자동 재생: playback 모드에서 일시정지 상태로 Capture를 누르면
+    # play 전까지 정지 화면만 찍힌다 → 캡처 시작이 곧 재생 시작이 되게 한다.
+    # (physics 모드는 Move 버튼이 구동을 담당하므로 건드리지 않는다.)
+    if core._playback.get_mode() == "playback" and not core._playback.is_playing():
+        core.toggle_playback()
     # 충돌 기록 창 == 캡처 창: physics 모드면 캡처와 함께 recorder 시작(사이드카 전에
     # 시작해야 collisions_csv 경로가 링크됨). → CSV 길이가 영상 길이와 일치.
     if core._playback.get_mode() == "physics":

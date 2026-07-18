@@ -210,6 +210,20 @@ def build_status_command(job_id: str, remote_ext_root: str) -> str:
     return f"cat {_tilde_safe(status)} 2>/dev/null || echo state=unknown"
 
 
+def build_serve_check_command(port: int, container: str = "ttsum-vllm") -> str:
+    """서빙 실체 확인 1줄 — 잡 status 파일이 아니라 지금의 컨테이너·API를 직접 본다.
+
+    container= docker ps의 Status(없으면 none), api= /v1/models 응답 여부.
+    """
+    return (
+        f"S=$(docker ps --filter name='^/{container}$' --format '{{{{.Status}}}}' "
+        f"2>/dev/null | head -1); "
+        f'[ -n "$S" ] && echo "container=$S" || echo container=none; '
+        f"curl -sf -m 3 http://127.0.0.1:{int(port)}/v1/models >/dev/null 2>&1 "
+        f"&& echo api=ready || echo api=down"
+    )
+
+
 def submit_job(spec: JobSpec, transport, remote_ext_root: str) -> Tuple[bool, str]:
     if hasattr(transport, "submit_spec"):   # REST — 큐잉은 데몬이 담당
         return transport.submit_spec(spec)
