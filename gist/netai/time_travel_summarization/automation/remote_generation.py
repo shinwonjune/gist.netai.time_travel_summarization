@@ -210,6 +210,87 @@ def build_status_command(job_id: str, remote_ext_root: str) -> str:
     return f"cat {_tilde_safe(status)} 2>/dev/null || echo state=unknown"
 
 
+API_RUNNER_REL = "gist/netai/time_travel_summarization/VLM_server/l40/run_api.sh"
+DAEMON_PORT = 8800
+VLLM_PORT = 38011
+
+
+def build_daemon_start_command(remote_ext_root: str, port: int = DAEMON_PORT) -> str:
+    """잡 API 데몬 멱등 기동 1줄 — 살아 있으면 통과, 아니면 tmux 상주 기동.
+
+    run_api.sh 자체에도 멱등 가드가 있지만, 여기서 선확인하면 tmux 세션을
+    건드리지 않는다(정상 데몬의 세션을 kill-session으로 끊는 사고 방지).
+    """
+    runner_tok = _tilde_safe(f"{remote_ext_root.rstrip('/')}/{API_RUNNER_REL}")
+    inner = f"PORT={int(port)} bash {runner_tok}"
+    return (
+        f"curl -sf -m 2 http://127.0.0.1:{int(port)}/health >/dev/null 2>&1 && echo running || "
+        f"{{ tmux kill-session -t job-api 2>/dev/null; "
+        f"tmux new-session -d -s job-api {shlex.quote(inner)} && echo started; }}"
+    )
+
+
+class SSHTunnel:
+    """ssh -N -L 포트포워딩 상주 프로세스 — 확장이 터널을 직접 소유한다.
+
+    로컬 포트가 이미 점유(기존 수동 터널·VSCode 포워딩)면 ExitOnForwardFailure로
+    즉사하지만, 그 경우 기존 터널이 통신을 담당하므로 connect_server의 health
+    확인은 그대로 통과한다(중복 터널 무해).
+    """
+
+    def __init__(self, host: str, forwards):
+        self.host = host
+        self.forwards = list(forwards)  # [(local_port, remote_port), ...]
+        self._proc = None
+
+    def alive(self) -> bool:
+        return self._proc is not None and self._proc.poll() is None
+
+    def start(self) -> None:
+        if self.alive():
+            return
+        args = ["ssh", "-N", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10",
+                "-o", "ExitOnForwardFailure=yes"]
+        for lp, rp in self.forwards:
+            args += ["-L", f"{lp}:localhost:{rp}"]
+        args.append(self.host)
+        self._proc = subprocess.Popen(
+            args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+    def stop(self) -> None:
+        if self.alive():
+            self._proc.terminate()
+        self._proc = None
+
+
+def connect_server(ssh_host: str, remote_ext_root: str, tunnel: SSHTunnel,
+                   daemon_port: int = DAEMON_PORT) -> Tuple[bool, str]:
+    """서버 연결 공용 시퀀스: 데몬 멱등 기동(SSH) → 터널 → 로컬 health 확인.
+
+    성공하면 GUI는 Host를 REST(http://localhost:8800)로 전환해 잡 큐 경유로
+    제출하고, vLLM(38011)도 같은 터널로 localhost 직결이 된다.
+    """
+    import time as _time
+    import urllib.request
+
+    rc, out = SSHTransport(ssh_host).run(
+        build_daemon_start_command(remote_ext_root, daemon_port), timeout=25)
+    if rc != 0 or ("running" not in out and "started" not in out):
+        return False, f"daemon start failed: {out[-120:]}"
+    daemon = "already running" if "running" in out else "started"
+    tunnel.start()
+    deadline = _time.monotonic() + 15
+    while _time.monotonic() < deadline:
+        try:
+            with urllib.request.urlopen(
+                    f"http://127.0.0.1:{daemon_port}/health", timeout=3) as r:
+                if r.status == 200:
+                    return True, f"connected (daemon {daemon})"
+        except Exception:
+            _time.sleep(1)
+    return False, "connect timeout (tunnel/health)"
+
+
 def build_serve_check_command(port: int, container: str = "ttsum-vllm") -> str:
     """서빙 실체 확인 1줄 — 잡 status 파일이 아니라 지금의 컨테이너·API를 직접 본다.
 

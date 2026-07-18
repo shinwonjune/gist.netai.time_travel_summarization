@@ -15,7 +15,8 @@ import threading
 import time
 
 from .remote_generation import (
-    JobSpec, build_serve_check_command, read_status, submit_job, transport_from_host,
+    DAEMON_PORT, VLLM_PORT, JobSpec, SSHTunnel, build_serve_check_command,
+    connect_server, read_status, submit_job, transport_from_host,
 )
 
 _DEFAULT_HOST = "netai@sv4000-2"
@@ -51,6 +52,9 @@ class RemoteGenWindow:
                 self._panel = RemoteGenPanel(self._dispatcher)
 
     def destroy(self):
+        if self._panel:
+            self._panel.shutdown()  # SSH 터널 정리 (고아 프로세스 방지)
+            self._panel = None
         if self._dispatcher:
             self._dispatcher.shutdown()
             self._dispatcher = None
@@ -68,6 +72,8 @@ class RemoteGenPanel:
         self._dispatcher = dispatcher
         self._last_job_id = None
         self._last_status_label = None  # 잡 타입별 상태 표시 위치 (serve는 Serving 섹션)
+        self._tunnel = None             # Connect Server가 소유하는 SSH 터널
+        self._ssh_host = ""             # REST 전환 후 Disconnect 시 되돌릴 원래 호스트
 
         ui.Label("Remote Data Generation", style={"font_size": 14, "font_weight": "bold"})
 
@@ -75,6 +81,8 @@ class RemoteGenPanel:
             ui.Label("Host:", width=85)
             self._host = ui.StringField()
             self._host.model.set_value(_DEFAULT_HOST)
+            self._connect_btn = ui.Button("Connect Server", width=110)
+            self._connect_btn.set_clicked_fn(self._on_connect_clicked)
         with ui.HStack(height=25, spacing=8):
             ui.Label("Ext root:", width=85)
             self._ext_root = ui.StringField()
@@ -220,6 +228,53 @@ class RemoteGenPanel:
             self._set_status(msg, label)
 
         threading.Thread(target=work, daemon=True, name="RemoteGenSubmit").start()
+
+    def _on_connect_clicked(self):
+        """서버 연결 공용 버튼: 데몬 멱등 기동(SSH) + 터널(8800/38011) + health.
+
+        성공 시 Host를 REST URL로 전환 → 이후 제출은 잡 큐(job_api) 경유,
+        vLLM도 localhost:38011 직결. 다시 누르면 해제(Disconnect).
+        """
+        if self._tunnel and self._tunnel.alive():
+            self._tunnel.stop()
+            self._connect_btn.text = "Connect Server"
+            if self._ssh_host:
+                self._host.model.set_value(self._ssh_host)
+            self._status_label.text = "disconnected"
+            return
+        host = self._host.model.get_value_as_string().strip()
+        if "@" not in host:
+            self._status_label.text = "connect: enter SSH host (user@host)"
+            return
+        ext_root = self._ext_root.model.get_value_as_string().strip()
+        self._ssh_host = host
+        if self._tunnel is None:
+            self._tunnel = SSHTunnel(
+                host, [(DAEMON_PORT, DAEMON_PORT), (VLLM_PORT, VLLM_PORT)])
+        else:
+            self._tunnel.host = host
+        self._status_label.text = "connecting (daemon + tunnel)..."
+
+        def work():
+            try:
+                ok, msg = connect_server(host, ext_root, self._tunnel)
+            except Exception as exc:
+                ok, msg = False, f"connect error: {exc!r}"
+
+            def apply():
+                self._status_label.text = msg
+                if ok:
+                    self._host.model.set_value(f"http://localhost:{DAEMON_PORT}")
+                    self._connect_btn.text = "Disconnect"
+
+            self._dispatcher.submit(apply)
+
+        threading.Thread(target=work, daemon=True, name="ServerConnect").start()
+
+    def shutdown(self):
+        """창 파괴 시 터널 정리 — 고아 ssh 프로세스 방지."""
+        if self._tunnel:
+            self._tunnel.stop()
 
     def _on_submit_clicked(self):
         try:
