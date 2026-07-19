@@ -235,3 +235,158 @@ RAG/agent 직전 단계까지의 받침 구축. 방향 합의: 추론은 큐 미
   event_index) 통과.
 - **Kit 실기 미검증**: Event Search UI 렌더·선택 seek, playback 캡처 사이드카
   실측, 공백 점프 체감 — 다음 GUI 세션에서 확인 필요.
+
+---
+
+## #11. LoRA v3 완결 — 병합·vLLM Docker 서빙 (2026-07-14~18)
+
+### 결과 (v3: prod-20260709 추가 합본, ~900 pos — 스케일링 커브 3점 완성)
+| | base | v1 | v2 | **v3** |
+|---|---|---|---|---|
+| STRICT F1 | 0.065 | 0.250 | 0.503 | **0.699** |
+| RELAXED F1 | 0.338 | 0.548 | 0.784 | **0.837** |
+
+- 오차 해부: FN의 57.7%가 **정확히 1초 차이**(같은 클립·같은 객체) — ±1s 허용 시 STRICT 0.699→0.791.
+  검출 능력은 학습됐고 초 경계 정렬이 지배 오차라는 뜻(향후 클립 위상 정렬 여지).
+- 체크포인트: epoch1 `checkpoint-133`(eval_loss 최저 0.0759) 채택, epoch2는 경미한 과적합.
+
+### 병합·서빙 (`VLM_server/l40/run_serve.sh` 전면 개정 — Docker)
+- 병합: `USE_HF=1 swift export --merge_lora` — USE_HF 없으면 ModelScope에서 베이스를 재다운로드하는
+  함정(#7과 동일 계보). 산출 = `.../checkpoint-133-merged`(17GB 자기완결).
+- 서빙을 **vLLM 공식 이미지(vllm/vllm-openai) 컨테이너**로 전환: `--gpus device=$GPU`(역할 분리 유지),
+  포트는 `127.0.0.1`에만 바인딩(SSH 터널 보안 모델), `--served-model-name` 고정(클라이언트 404 방지),
+  `num_frames 20`(train==infer 정합), 멱등 start/stop(다른 모델 서빙 중이면 명시 실패).
+- **KV 캐시 함정**: 병합본 기본 컨텍스트 262144는 KV 36.0GiB 필요 > 가용 23.72GiB → 기동 거부.
+  `bytes/token = 2×L×H_kv×D_head×dtype = 144KiB`(Qwen3-8B) → `MAX_MODEL_LEN=32768`(KV 4.5GiB)로 확정.
+  계산 공식·실측표는 `docs/vllm_serving.md`.
+
+## #12. 원격 잡 제출 무음 실패 — 3중 원인 해부 (2026-07-18, 005f551·1e46c2c)
+
+### 증상
+GUI serve/generate 제출 → "submitted" 표시, 그러나 L40 무반응: GPU 변화 없음, job dir·status·log **흔적 0**.
+
+### 원인 체인 (셋 다 걸려 있었음)
+1. **틸드 인용 버그** (`automation/remote_generation.py`): 러너 경로가 `~/...`면 shlex.quote가
+   통째로 홑따옴표로 감싸 틸드 확장이 막힘 → 원격에서 `bash '~/.../run_serve.sh'` = 리터럴 틸드
+   파일 없음 → **러너가 아예 실행 안 됨**. tmux는 세션 생성만으로 rc 0 → GUI는 submitted로 오판.
+2. **조기 실패 무음** (`VLM_server/l40/run_job.sh`): status/log 파일 생성이 kit/앱 해석 **뒤**라,
+   해석 단계에서 죽으면 에러가 tmux 세션과 함께 증발.
+3. **APP_KIT 미지정**: L40 apps에 .kit이 6개라 자동 발견 불가(`ERROR: APP_KIT 지정 필요`) —
+   GUI에 입력 칸이 없어 항상 빈 값.
+
+### 해결
+- `_tilde_safe()`: `~/` → `$HOME/`+quote (원격 sh -c가 확장) — **submit과 status 조회 양쪽** 적용.
+- run_job.sh: job dir·status·log 생성을 최상단으로 이동 + `fail()` — 조기 실패도
+  `state=failed` + `note=사유`로 기록. GUI Check Status가 note 병기.
+- GUI **App kit 필드** 신설(기본 `my_company.my_usd_composer` — prod-20260709 job.log의 실사용 앱).
+- 교훈: "제출 성공"과 "러너 실행 성공"은 다른 축 — 전자는 tmux rc, 후자는 status 파일이 진실.
+  status 파일이 생기기 전 구간을 없애는 것이 관측성의 핵심.
+
+## #13. trace CSV 시계 불일치 — sim 클럭 통일 (2026-07-18, 6e1f3b9)
+
+### 증상 (사용자 발견)
+30초 에피소드의 `_trace_*.csv`가 **99초 스팬** — 재연하면 ~3.3배 슬로모션 + 충돌 CSV(GT)와 시각 불일치.
+
+### 원인
+physics일지 #6에서 오버레이·충돌 CSV를 sim 클럭(capture_start+sim경과)으로 옮길 때
+**`facade.update()`의 `trace.tick()` 호출부만 누락** — 인자 없이 호출되어 TraceRecorder가
+wall clock(`datetime.now()`)으로 스탬프. 렌더가 sim보다 느린 만큼(30s sim ≈ 99s wall) trace가 늘어짐.
+
+### 해결 (`app/facade.py`, `physics/trace_recorder.py`)
+- 충돌 CSV와 동일 조건(`_use_sim_clock`)으로 `get_sim_clock_datetime()`을 tick에 전달.
+- TraceRecorder에 동일 타임스탬프 재기록 가드(렌더 대기 펌프 틱은 sim 클럭 정지 상태로 들어옴).
+- 재생성 실측: 스팬 29.98s ≈ 30s 정합. 교훈은 #6과 동일 — **시계는 한 곳에서만 읽는다**;
+  기록기가 여럿이면 "시계 주입"을 계약으로 강제해야 누락이 재발하지 않는다.
+
+## #14. 운영 관측성·재연→추론 UX 일괄 (2026-07-18, f17fdb8·bd4b809)
+
+| 항목 | 내용 (경로) |
+|---|---|
+| manifest 소요 시간 | `timing.setup_s/total_s` + 에피소드별 `elapsed_s`(실패도 기록) — 배치 예상 상한 공식의 실측 검증 근거 (`automation/generate_episodes.py`) |
+| 캡처 자동 재생 | playback 모드에서 Capture 시작 시 자동 play — "play→capture" 수동 순서의 정지 화면 구간 제거 (`app/capture_service.py`) |
+| serving 상태 분리 | serve 잡의 submit/status를 Serving 섹션 전용 라벨로 라우팅 — 생성 잡 상태와 혼재 해소 (`automation/window.py`) |
+| Check Serving | 잡 status 파일이 아니라 **실체**를 직접 확인: `docker ps` + `/v1/models` → `container=Up 55 minutes  api=ready` (`build_serve_check_command`) |
+
+## #15. Connect Server — 데몬·터널 통합 연결 버튼 (2026-07-18)
+
+### 배경
+REST(잡 큐) 경로를 쓰려면 ① 서버에서 데몬 기동 ② 로컬에서 SSH 터널 ③ Host 칸 교체를
+사람이 순서대로 해야 했음. 데몬은 자기 자신을 못 띄우므로(부트스트랩) 기동만은 SSH가 필수 —
+"확장이 터널을 코드로 소유한다면 기동까지 한 버튼에 묶는 게 맞다"는 검토 결론을 구현.
+
+### 구현
+- `run_api.sh`: **멱등 가드**(health 응답하면 통과 — 재실행 시 데몬 2개 포트 경합 방지) +
+  venv 활성화. 검증 중 실버그 발견: 비대화형(tmux) 셸에서 `uvicorn: not found` **즉사** —
+  venv PATH 부재. 데몬 원격 기동이 애초에 불가능했던 상태를 함께 수정.
+- `remote_generation.py`: `build_daemon_start_command`(클라이언트측 선확인 + tmux 상주 기동),
+  `SSHTunnel`(ssh -N -L 8800/38011 상주 프로세스 소유, ExitOnForwardFailure — 기존 터널과
+  중복이어도 health 통과로 무해), `connect_server`(기동→터널→로컬 health 시퀀스).
+- `window.py`: **Connect Server** 버튼 — 성공 시 Host를 `http://localhost:8800`으로 전환
+  (이후 제출은 잡 큐 경유, vLLM도 localhost:38011 직결), 토글로 Disconnect(호스트 원복),
+  창 파괴 시 터널 정리.
+
+### 검증 (L40 실측)
+1차 기동 `started` → health `{"ok":true,...}` → 2차 `running`(멱등) 3단 통과.
+후속(future work, 보완사항 §6-2): tmux→systemd user 서비스(`Restart=on-failure`,
+선행: linger 권한), 터널 생존 감시·자동 재연결.
+
+## #16. 병합 체크포인트 손상 — `2222…` 퇴화 출력의 계층 진단 (2026-07-19)
+
+### 증상
+e2e 첫 실전(재연 캡처 → vLLM 추론)에서 전 청크가 `"2222222…"` 반복. v3 평가(STRICT 0.699)와
+정면 모순. twin_view 프리셋으로 바꿔도, 학습 분포 그대로인 physics 원본 영상(ep_0001)을 넣어도 동일.
+
+### 계층 진단 (용의자를 바깥쪽부터 벗겨냄)
+| 실험 | 결과 | 기각된 가설 |
+|---|---|---|
+| 캡처 프레임 추출 육안 확인 | BEV·숫자 라벨·타임스탬프 정상 | 영상 분포 이탈 |
+| twin_view 재시도 | 동일 퇴화 | 프리셋 불일치 |
+| physics 원본(ep_0001) 추론 | 동일 퇴화 | 재연 캡처 품질 |
+| serve.info 확인 | checkpoint-133-merged 서빙 중 | 엉뚱한 모델 |
+| **텍스트만 질문**("2+2?") — vLLM 경유 | `!!!!!!!!` | 클라이언트·청킹·프롬프트 전부 |
+| **transformers 직접 로드**(vLLM 미경유, GPU 1) | 역시 `!!!!!!!!!!` | vLLM 로딩 |
+| **베이스 모델**(HF 캐시) 동일 질문 | `'Four'` 정상 | 베이스 캐시 손상 |
+
+→ **`swift export --merge_lora` 산출물 자체가 손상**. v3 평가가 좋았던 건 어댑터 직접 로드
+(`swift infer --adapters`)였기 때문 — **병합 경로는 이번이 첫 검증**이었다. 손상 시점 정황:
+최초 병합 시 ModelScope 재다운로드 → IncompleteRead 중단 → 재시도 이력.
+
+### 해결
+깨진 병합본을 `.broken`으로 격리 후 **`HF_HUB_OFFLINE=1`**(검증된 캐시만 사용, 재다운로드 차단)
+로 재병합 → transformers 텍스트 sanity `'Four'` 통과 → 컨테이너 재기동 → curl 정상 →
+GUI 추론 정상 JSON 확인.
+
+### 교훈
+1. **모델 교체·병합 후에는 텍스트 1문항 sanity를 서빙 게이트로**: "2+2 → Four" 한 줄이
+   전체 파이프라인 디버깅 몇 시간을 대체한다. 무거운 평가 이전의 최소 관문.
+2. 퇴화 반복 출력은 성능 문제가 아니라 가중치/입력 규약 손상 신호 — 지표 하락과 구분할 것.
+3. 진단은 바깥(입력)에서 안(가중치)으로 한 겹씩: 각 실험이 용의자 하나를 확정 기각하도록 설계.
+
+## #17. 이벤트 시각 앵커 정합 — eventlist base_date 하드코드 제거 (2026-07-19)
+
+### 증상 두 건
+1. Lake 모드로 Process Events 후 **Event Search에 아무것도 안 걸림**.
+2. eventlist가 **2025-01-01 기준**으로 생성됨(데이터는 2026-07-18인데).
+
+### 원인
+1. Event Search가 읽는 건 `vlm_events/` 인덱스(Lake 모드 **Generate**가 적재)인데, Generate를
+   Local 모드로 돌림 → 인덱스 미적재. Process Events의 산출물(intermediate/eventlist)은 검색
+   대상이 아님. + 기존 인덱스 1건은 병합 손상 시절 추론분이라 0 이벤트(빈 파일).
+2. `summary_service.py`의 **`base_date="2025-01-01"` 하드코드**. VLM 출력엔 오버레이 시계의
+   HH:MM:SS만 있어 날짜를 공급해야 하는데, 5월 리빙랩 데이터셋(실제로 2025-01-01 시각대)과
+   우연히 일치해 잠복해 있던 결함. 날짜만이 아니라 **이벤트 위치 조회도 그 시각으로 하므로
+   position까지 오염**됨.
+
+### 해결
+- `vlm_client/core.py`: 결과 JSON에 **`video_source`**(원본 영상 URI) 기록 — `video` 필드는
+  스테이징 임시명이라 사이드카 역추적 불가였던 구멍.
+- `summary_service.py`: base_date **3단 복원** — ① video_source 사이드카 앵커(capture_start)
+  날짜 ② 로드된 궤적 데이터 시작 날짜 ③ 레거시 고정값(최후 폴백). #10에서 vlm_events 인덱스에
+  적용한 "사이드카 앵커" 원리를 Process Events 경로에도 통일.
+- 검증: 3단 폴백 케이스 테스트 + 기존 eventlist 테스트 4/4 통과.
+
+### 남은 격차 (future work — 이벤트 클릭 재연)
+검색된 이벤트를 선택해도 재연이 안 되는 건 별개 격차: 활성 lake 데이터셋
+(`living_trajectory_1h_0_2s_parquet`)의 커버리지가 2025-01-01 00:00~01:00뿐이라 7/18 좌표가
+없음. **episodes/ raw 존의 trace CSV를 trajectory/ lake 존(parquet+manifest)으로 인제스트하는
+단계가 미구현** — 이게 생기면 검색→±5분 자동 로드→재연이 Lake 모드에서 자기완결된다.
