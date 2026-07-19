@@ -148,8 +148,12 @@ def test_generate_captions_saves_raw_result_only_to_output_root_uri(tmp_path):
 
     assert success is True
     assert output_filename is not None
-    local_output = core._outputs_base_path / output_filename
-    lake_output = remote_root / "vlm_outputs" / output_filename
+    # lake 경로의 반환값은 전체 URI — Event Post Processing 자동 전달이 bare
+    # 파일명으론 lake 산출물을 못 찾아서 바꾼 계약(2026-07-19).
+    assert output_filename.startswith(remote_root.as_uri())
+    basename = output_filename.rsplit("/", 1)[-1]
+    local_output = core._outputs_base_path / basename
+    lake_output = remote_root / "vlm_outputs" / basename
     assert not local_output.exists()
     assert lake_output.exists()
     assert json.loads(lake_output.read_text(encoding="utf-8"))["chunk_responses"]
