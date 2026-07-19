@@ -88,7 +88,7 @@ class EventSummaryService:
         if vlm_data is None:
             return False
 
-        events = consolidate_events(vlm_data, base_date="2025-01-01")
+        events = consolidate_events(vlm_data, base_date=self._resolve_base_date(vlm_data))
 
         output_jsonl_uri = self._resolve_output_uri(
             "intermediate_results",
@@ -131,6 +131,27 @@ class EventSummaryService:
             for entry in event_list
         }
         return True
+
+    def _resolve_base_date(self, vlm_data) -> str:
+        """이벤트 HH:MM:SS에 붙일 날짜 복원. 오버레이 시계엔 날짜가 없다.
+
+        ① 결과 JSON의 video_source → 사이드카 앵커(capture_start)의 날짜
+        ② 로드된 궤적 데이터의 시작 날짜 (보고 있는 데이터를 처리한다는 전제)
+        ③ 레거시 고정값 — video_source 없는 옛 JSON + 데이터 미로드일 때만
+        """
+        src = (vlm_data or {}).get("video_source") or ""
+        if src:
+            try:
+                from .event_index import sidecar_anchor
+                anchor = sidecar_anchor(src)
+                if anchor:
+                    return anchor.date().isoformat()
+            except Exception:
+                pass
+        start = getattr(self._repository, "data_start_time", None)
+        if start:
+            return start.date().isoformat()
+        return "2025-01-01"
 
     def _normalize_input_uri(self, json_path: str) -> Tuple[Optional[str], Optional[str]]:
         candidate = (json_path or "").strip()

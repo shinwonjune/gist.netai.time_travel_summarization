@@ -66,6 +66,8 @@ class NetAITimetravelDreamAI(_get_i_ext_base()):
         carb.log_info("[Extension] VLM Client window created")
         # 캡처 완료 → VLM 창 Source 자동 채움 (수동 URI 복붙 제거)
         self._core.set_capture_complete_callback(self._vlm_client_window.set_source_uri)
+        # 추론 완료 → Event Post Processing 입력 자동 채움 (같은 릴레이 제거 패턴)
+        self._vlm_client_window.set_generate_complete_callback(self._event_window.set_source_json)
 
         # Create remote jobs window (플랫폼 제어면 — 재현 제어와 분리)
         from .automation.window import RemoteGenWindow

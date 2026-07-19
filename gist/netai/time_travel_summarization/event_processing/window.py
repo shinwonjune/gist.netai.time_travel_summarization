@@ -119,6 +119,18 @@ class EventProcessingWindow:
         thread = threading.Thread(target=process_async, daemon=True)
         thread.start()
 
+    def set_source_json(self, uri: str) -> None:
+        """VLM 추론 완료 시 호출(워커 스레드 가능) — 입력 JSON 필드 자동 채움.
+
+        캡처→VLM Source 자동 채움과 동일 패턴: 산출물 경로를 사람이 복붙하는
+        릴레이를 제거하고, 처리 실행 여부만 사용자가 결정한다.
+        """
+        def _apply():
+            self._json_filename_model.set_value(uri)
+            self._update_status("VLM result ready — press Process Events")
+
+        self._ui_dispatcher.submit(_apply)
+
     def _resolve_json_input(self, json_filename: str) -> str | None:
         candidate = json_filename.strip()
         if not candidate:

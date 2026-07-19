@@ -319,6 +319,11 @@ class VLMClientCore:
                     chunk_overlap_duration=chunk_overlap_duration
                 )
             
+            # 원본 영상 URI 기록 — 결과 JSON의 video는 스테이징 임시명이라 사이드카를
+            # 역추적할 수 없다. Process Events가 base_date(사이드카 capture_start)를
+            # 복원하려면 원본 참조가 필요.
+            response["video_source"] = str(getattr(self, "_current_video_source", "") or "")
+
             # Store response
             self._last_generation_response = response
             
@@ -366,6 +371,9 @@ class VLMClientCore:
                         f"(anchor={'ok' if anchor else 'none'}) -> {idx_uri}")
                 except Exception as exc:
                     carb.log_warn(f"[VLMClient] event index write failed: {exc!r}")
+                # 반환은 전체 URI — Event Post Processing이 파일명만으론 lake 산출물을
+                # 못 찾는다(_resolve_json_input은 s3://는 그대로, bare명은 로컬 탐색).
+                output_filename = output_uri
             else:
                 output_path = self._outputs_base_path / output_filename
                 self._client.save_json(response, str(output_path))

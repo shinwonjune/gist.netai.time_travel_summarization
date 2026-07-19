@@ -17,7 +17,7 @@ class VLMClientWindow:
         self._ui_dispatcher = UiTaskDispatcher("VLMClientWindowUiDispatcher")
         
         # Create window
-        self._window = ui.Window("VLM Client", width=540, height=240)
+        self._window = ui.Window("VLM Client", width=540, height=270)
         
         with self._window.frame:
             with ui.VStack(spacing=5, style={"margin": 3}):
@@ -31,10 +31,10 @@ class VLMClientWindow:
                     self._video_filename_field = ui.StringField()
                     self._video_filename_field.model.set_value("video_19.mp4")
                 
-                # Video ID display
-                with ui.HStack(height=20, spacing=5):
-                    ui.Label("Video ID:", width=60, style={"font_size": 15})
-                    self._video_id_label = ui.Label("Not uploaded", style={"color": 0xFF888888, "font_size": 15})
+                # Video ID display — 폰트가 행 높이를 넘치면 이웃 줄과 겹친다
+                with ui.HStack(height=24, spacing=5):
+                    ui.Label("Video ID:", width=60)
+                    self._video_id_label = ui.Label("Not uploaded", style={"color": 0xFF888888})
                 
                 # Action buttons
                 with ui.HStack(height=28, spacing=8):
@@ -70,10 +70,12 @@ class VLMClientWindow:
                 with ui.HStack(height=1):
                     ui.Line(style={"color": 0xFF666666})
 
-                # Status display
-                with ui.HStack(height=20, spacing=5):
-                    ui.Label("Status:", width=50, style={"font_size": 16})
-                    self._status_label = ui.Label("Ready", style={"color": 0xFF00AA00, "font_size": 16})
+                # Status display — 긴 메시지(저장 URI 등)는 wrap+스크롤로 가둬 겹침 방지
+                with ui.HStack(height=44, spacing=5):
+                    ui.Label("Status:", width=50)
+                    with ui.ScrollingFrame(height=44):
+                        self._status_label = ui.Label("Ready", word_wrap=True,
+                                                      style={"color": 0xFF00AA00})
 
     def _on_upload_clicked(self):
         """Handle Upload button click."""
@@ -201,9 +203,19 @@ class VLMClientWindow:
         self._generate_button.enabled = True
         if success and output_filename:
             self._update_status(f"Saved: {output_filename}", is_error=False)
+            cb = getattr(self, "_generate_complete_cb", None)
+            if cb:
+                try:
+                    cb(output_filename)  # Event Post Processing 입력 자동 채움
+                except Exception as exc:
+                    carb.log_warn(f"[VLMClientWindow] generate callback failed: {exc!r}")
             return
 
         self._update_status("Generation failed. Check console for details.", is_error=True)
+
+    def set_generate_complete_callback(self, cb) -> None:
+        """추론 완료 시 산출 JSON(로컬 파일명 또는 s3 URI)을 넘길 콜백 등록."""
+        self._generate_complete_cb = cb
 
     def set_source_uri(self, uri: str) -> None:
         """메인 창 Capture 완료 시 호출(캡처 워커 스레드) — Source 필드 자동 채움.
