@@ -241,7 +241,7 @@ class SSHTunnel:
     def __init__(self, host: str, forwards):
         self.host = host
         self.forwards = list(forwards)  # [(local_port, remote_port), ...]
-        self._proc = None
+        self._proc: Optional[subprocess.Popen] = None
 
     def alive(self) -> bool:
         return self._proc is not None and self._proc.poll() is None
@@ -258,8 +258,9 @@ class SSHTunnel:
             args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
     def stop(self) -> None:
-        if self.alive():
-            self._proc.terminate()
+        proc = self._proc
+        if proc is not None and proc.poll() is None:
+            proc.terminate()
         self._proc = None
 
 
