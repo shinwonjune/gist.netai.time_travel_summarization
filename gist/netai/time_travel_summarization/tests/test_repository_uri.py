@@ -72,10 +72,15 @@ class RepositoryUriTest(unittest.TestCase):
         self.assertFalse(repository.load_from_uri("file:///nonexistent/foo.txt"))
 
     def test_extension_config_data_uri_local(self):
-        config = ExtensionConfig.from_file(str(self._package_dir / "config.json"))
+        # repo의 실제 config.json은 ${DATA_PATH} 등 로컬 .env에 의존해 CI(.env 없음)에서
+        # 깨진다 — 검증 대상은 data_uri의 상대경로→file:// 해석이므로 임시 config로 격리.
+        with tempfile.TemporaryDirectory() as td:
+            config_path = Path(td) / "config.json"
+            config_path.write_text('{"data_path": "./data/trajectory.csv"}', encoding="utf-8")
+            config = ExtensionConfig.from_file(str(config_path))
 
-        self.assertTrue(config.data_uri.startswith("file://"))
-        self.assertTrue(config.data_uri.endswith(".csv"))
+            self.assertTrue(config.data_uri.startswith("file://"))
+            self.assertTrue(config.data_uri.endswith(".csv"))
 
     def test_parse_timestamp_accepts_millisecond_and_second_precision(self):
         self.assertEqual(
