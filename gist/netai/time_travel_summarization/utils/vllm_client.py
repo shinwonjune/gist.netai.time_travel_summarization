@@ -4,7 +4,7 @@ VSS가 서버측에서 하던 일(업로드 → 청크 분할 → VLM 호출)을
     ffmpeg로 2초 청크 슬라이스 → base64 data URI(video_url)로
     POST {base_url}/v1/chat/completions → 응답 수집.
 
-- 출력 형식은 기존 파이프라인 호환: event_processing/core.py가 읽는
+- 출력 형식은 기존 파이프라인 호환: events/core.py가 읽는
   ``{"chunk_responses": [{"content": ...}, ...]}`` 구조를 유지한다.
 - 슬라이스 규칙(재인코딩·경계)은 학습 데이터 빌더(build_dataset.slice_clip)와
   동일하게 맞춘다 — 학습 클립과 추론 클립이 같은 분포여야 LoRA 성능이 이전된다.
@@ -54,6 +54,20 @@ def chunk_spans(duration_s: float, chunk_s: float) -> List[Tuple[float, float]]:
     """(start, dur) 목록. 꽉 찬 청크만 — build_dataset의 클립 규칙과 동일(잔여 버림)."""
     n = int(duration_s // chunk_s)
     return [(i * chunk_s, chunk_s) for i in range(n)]
+
+
+def _avg_logprob(out: dict) -> Optional[float]:
+    """생성 토큰들의 평균 로그확률 — 이벤트 랭킹용 신뢰 신호.
+
+    프롬프트·학습을 바꾸지 않는 추론 부산물(요청에 logprobs=True만 추가).
+    응답에 logprobs가 없으면 None(구버전 서버 호환).
+    """
+    try:
+        toks = out["choices"][0]["logprobs"]["content"]
+        lps = [t["logprob"] for t in toks if t.get("logprob") is not None]
+        return round(sum(lps) / len(lps), 4) if lps else None
+    except (KeyError, TypeError, IndexError):
+        return None
 
 
 class VLLMClient:
@@ -152,8 +166,10 @@ class VLLMClient:
                     {"type": "text", "text": final_prompt},
                 ]})
                 out = self._post({"model": model, "messages": messages,
-                                  "temperature": temperature, "max_tokens": max_tokens})
+                                  "temperature": temperature, "max_tokens": max_tokens,
+                                  "logprobs": True})
                 content = out["choices"][0]["message"]["content"]
+                avg_lp = _avg_logprob(out)
             except Exception as exc:
                 # 부분 실패는 기록하고 계속 — 조용한 누락 금지, 전체 중단도 과함
                 errors += 1
@@ -163,7 +179,8 @@ class VLLMClient:
                                         "error": repr(exc)})
                 continue
             chunk_responses.append({"chunk_idx": idx, "start_s": start,
-                                    "end_s": start + dur, "content": content})
+                                    "end_s": start + dur, "content": content,
+                                    "avg_logprob": avg_lp})
 
         return {
             "api": "openai_compat",

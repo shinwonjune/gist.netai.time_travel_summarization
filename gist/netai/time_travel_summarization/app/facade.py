@@ -14,7 +14,7 @@ import carb
 
 from . import benchmark_service, capture_service, data_service, object_service, physics_service
 from .paths import ExtensionPaths
-from ..event_processing.summary_service import EventSummaryService
+from ..events.summary_service import EventSummaryService
 from ..playback.controller import PlaybackController
 from ..playback.stage_object_controller import StageObjectController
 from ..playback.trajectory_repository import TrajectoryRepository
@@ -551,3 +551,20 @@ class TimeTravelCore:
 
     def _on_event_requested(self, timestamp: str):
         self._stage_objects.move_camera_to_event(self._events.get_event_position(timestamp))
+
+    def move_camera_to_event_at(self, t: datetime.datetime, ids) -> bool:
+        """이벤트 시각의 관련 객체 위치로 summarization 카메라 이동.
+
+        위치를 eventlist(_events) 경유가 아니라 궤적에서 직조회 — Event Search
+        인덱스 결과(ids만 있음)로도 카메라가 따라가게 한다. ids는 라벨 번호
+        (1→obj001 규약). 위치를 못 찾으면 False(카메라는 best-effort)."""
+        data = self._repository.get_data_at_time(t)
+        for n in ids or []:
+            try:
+                pos = data.get(f"obj{int(n):03d}")
+            except (TypeError, ValueError):
+                continue
+            if pos:
+                self._stage_objects.move_camera_to_event(pos)
+                return True
+        return False

@@ -9,7 +9,7 @@ from typing import Any, Callable, Optional
 import carb
 
 from .config import ExtensionConfig
-from ..event_processing.summary_service import EventSummaryService
+from ..events.summary_service import EventSummaryService
 from ..playback.trajectory_repository import TrajectoryRepository
 
 

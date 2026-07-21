@@ -30,7 +30,8 @@ class NetAITimetravelDreamAI(_get_i_ext_base()):
         import carb
 
         from .app.facade import TimeTravelCore
-        from .event_processing.window import EventProcessingWindow
+        from .events.summary_window import EventSummaryWindow
+        from .events.window import EventProcessingWindow
         from .ui.main_window import TimeTravelWindow
         from .vlm_client.core import VLMClientCore
         from .vlm_client.window import VLMClientWindow
@@ -59,6 +60,10 @@ class NetAITimetravelDreamAI(_get_i_ext_base()):
         # Create Event Processing window
         self._event_window = EventProcessingWindow(self._core, ext_id)
         carb.log_info("[Extension] Event Processing window created")
+
+        # Create Event Summary window (검색 + 이벤트 재생 제어)
+        self._event_summary_window = EventSummaryWindow(self._core, ext_id)
+        carb.log_info("[Extension] Event Summary window created")
         
         # Create VLM Client
         self._vlm_client_core = VLMClientCore()
@@ -163,6 +168,14 @@ class NetAITimetravelDreamAI(_get_i_ext_base()):
             except Exception as e:
                 carb.log_error(f"[Extension] Error destroying event window: {e}")
             self._event_window = None
+
+        # Clean up Event Summary window
+        if hasattr(self, '_event_summary_window') and self._event_summary_window:
+            try:
+                self._event_summary_window.destroy()
+            except Exception as e:
+                carb.log_error(f"[Extension] Error destroying event summary window: {e}")
+            self._event_summary_window = None
 
         # Clean up Data Generation window
         if hasattr(self, '_remote_gen_window') and self._remote_gen_window:

@@ -169,7 +169,7 @@ class VLMClientWindow:
         self._status_label.text = message
         
         if is_error:
-            self._status_label.style = {"color": 0xFFFF0000}  # Red
+            self._status_label.style = {"color": 0xFF00FFFF}  # 노랑 (omni.ui 색은 ABGR — 0xFFFF0000은 파랑이었음)
         elif is_processing:
             self._status_label.style = {"color": 0xFFFFAA00}  # Orange
         else:

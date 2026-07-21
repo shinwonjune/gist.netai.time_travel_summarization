@@ -16,7 +16,7 @@ def _install_carb_stub():
 
 _install_carb_stub()
 
-from gist.netai.time_travel_summarization.event_processing.summary_service import (  # noqa: E402
+from gist.netai.time_travel_summarization.events.summary_service import (  # noqa: E402
     EventSummaryService,
 )
 
@@ -113,7 +113,7 @@ def test_process_event_json_accepts_s3_uri_and_writes_event_outputs():
             self.written[uri] = data.decode("utf-8")
 
     adapter = FakeStorageAdapter()
-    import gist.netai.time_travel_summarization.event_processing.summary_service as summary_module
+    import gist.netai.time_travel_summarization.events.summary_service as summary_module
 
     original_from_uri = summary_module.from_uri
     summary_module.from_uri = lambda uri: adapter

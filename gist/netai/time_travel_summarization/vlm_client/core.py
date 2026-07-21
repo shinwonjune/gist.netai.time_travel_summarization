@@ -351,7 +351,7 @@ class VLMClientCore:
                 # 이벤트 인덱스 적재(best-effort) — 추론 결과를 시간축 검색
                 # 표면으로 축적. 실패해도 추론 경로는 성공으로 유지.
                 try:
-                    from ..event_processing.event_index import (
+                    from ..events.event_index import (
                         append_index, parse_events_from_vlm_result, sidecar_anchor,
                     )
 

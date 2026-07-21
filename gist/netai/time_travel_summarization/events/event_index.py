@@ -24,6 +24,7 @@ VLM은 픽셀의 오버레이 시계(HH:MM:SS, 날짜 없음)를 읽어 보고�
 from __future__ import annotations
 
 import json
+import math
 import re
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -57,6 +58,9 @@ def parse_events_from_vlm_result(result: dict) -> list[dict]:
     seen: set = set()
     for chunk in result.get("chunk_responses", []) or []:
         content = (chunk or {}).get("content") or ""
+        # 청크 avg_logprob → confidence(기하평균 토큰 확률, 0~1) — 랭킹용 신뢰 신호.
+        avg_lp = (chunk or {}).get("avg_logprob")
+        conf = round(math.exp(avg_lp), 4) if isinstance(avg_lp, (int, float)) else None
         start, end = content.find("["), content.rfind("]")
         if start < 0 or end <= start:
             continue
@@ -82,7 +86,7 @@ def parse_events_from_vlm_result(result: dict) -> list[dict]:
                 if key in seen:
                     continue
                 seen.add(key)
-                events.append({"time": time_str, "ids": norm_ids})
+                events.append({"time": time_str, "ids": norm_ids, "confidence": conf})
     return events
 
 

@@ -15,7 +15,7 @@ def _install_carb_stub():
 
 _install_carb_stub()
 
-from gist.netai.time_travel_summarization.event_processing.event_index import (  # noqa: E402
+from gist.netai.time_travel_summarization.events.event_index import (  # noqa: E402
     append_index, index_uri_for, parse_events_from_vlm_result,
     query_events, resolve_event_datetime, sidecar_anchor,
 )
@@ -33,10 +33,19 @@ def test_parse_events_tolerates_junk_and_dedupes():
             {"content": None},                        # 실패 청크 → 스킵
         ]
     }
+    # confidence: 청크 avg_logprob의 exp(기하평균 토큰 확률) — 없으면 None (2026-07-21)
     assert parse_events_from_vlm_result(result) == [
-        {"time": "00:00:01", "ids": [1, 2]},
-        {"time": "00:00:03", "ids": [3]},
+        {"time": "00:00:01", "ids": [1, 2], "confidence": None},
+        {"time": "00:00:03", "ids": [3], "confidence": None},
     ]
+
+
+def test_parse_events_attaches_chunk_confidence():
+    result = {"chunk_responses": [
+        {"content": '[{"00:00:01": [1]}]', "avg_logprob": -0.2231},
+    ]}
+    (ev,) = parse_events_from_vlm_result(result)
+    assert ev["confidence"] == 0.8  # round(exp(-0.2231), 4)
 
 
 def test_resolve_event_datetime_rollover():
