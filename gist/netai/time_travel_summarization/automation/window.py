@@ -75,11 +75,11 @@ class RemoteGenPanel:
         self._tunnel = None             # Connect Server가 소유하는 SSH 터널
         self._ssh_host = ""             # REST 전환 후 Disconnect 시 되돌릴 원래 호스트
 
-        ui.Label("Remote Data Generation", style={"font_size": 14, "font_weight": "bold"})
+        ui.Label("Remote Data Generation", height=20, style={"font_size": 14, "font_weight": "bold"})
 
         with ui.HStack(height=25, spacing=8):
             ui.Label("Host:", width=85)
-            self._host = ui.StringField()
+            self._host = ui.StringField(width=170)  # 버튼 밀림 방지 고정폭
             self._host.model.set_value(_DEFAULT_HOST)
             self._connect_btn = ui.Button("Connect Server", width=110)
             self._connect_btn.set_clicked_fn(self._on_connect_clicked)
@@ -133,7 +133,7 @@ class RemoteGenPanel:
 
         # ---- Training (LoRA) — train 잡 제출 --------------------------------- #
         ui.Spacer(height=8)
-        ui.Label("Training (LoRA)", style={"font_size": 14, "font_weight": "bold"})
+        ui.Label("Training (LoRA)", height=20, style={"font_size": 14, "font_weight": "bold"})
         with ui.HStack(height=25, spacing=8):
             ui.Label("Dataset:", width=85)
             self._train_dataset = ui.StringField()
@@ -152,7 +152,7 @@ class RemoteGenPanel:
 
         # ---- Serving (vLLM) — 전용 GPU에서 기동/중지 -------------------------- #
         ui.Spacer(height=8)
-        ui.Label("Serving (vLLM)", style={"font_size": 14, "font_weight": "bold"})
+        ui.Label("Serving (vLLM)", height=20, style={"font_size": 14, "font_weight": "bold"})
         with ui.HStack(height=25, spacing=8):
             ui.Label("Model path:", width=85)
             self._serve_model = ui.StringField()
@@ -176,12 +176,13 @@ class RemoteGenPanel:
 
         # ---- Replay Render — 좌표 구간 재연 렌더 잡 --------------------------- #
         ui.Spacer(height=8)
-        ui.Label("Replay Render", style={"font_size": 14, "font_weight": "bold"})
+        ui.Label("Replay Render", height=20, style={"font_size": 14, "font_weight": "bold"})
         with ui.HStack(height=25, spacing=8):
-            ui.Label("Start:", width=85)
-            self._replay_start = ui.StringField()
+            # "YYYY-MM-DD HH:MM:SS"(19자) 고정폭 — 창 폭 독점 방지, 두 필드 한 줄
+            ui.Label("Start:", width=45)
+            self._replay_start = ui.StringField(width=145)
             ui.Label("End:", width=35)
-            self._replay_end = ui.StringField()
+            self._replay_end = ui.StringField(width=145)
         with ui.HStack(height=25, spacing=8):
             ui.Label("Data URI:", width=85)
             self._replay_data = ui.StringField()
@@ -193,6 +194,10 @@ class RemoteGenPanel:
             submit_replay.set_clicked_fn(self._on_replay_clicked)
             ui.Label("(ISO YYYY-MM-DD HH:MM:SS; reuses Camera/Stage/GPU/upload above)",
                      style={"color": 0xFF888888})
+        with ui.HStack(height=22, spacing=8):
+            # replay 전용 상태줄 — 상단 공용 라벨(생성/학습 잡)과 분리
+            self._replay_status_label = ui.Label("", style={"color": 0xFF888888})
+        ui.Spacer()  # 남는 세로 공간을 맨 아래로 흡수 — 섹션 사이가 벌어지지 않게
 
     # ---- helpers ----------------------------------------------------------- #
 
@@ -360,30 +365,30 @@ class RemoteGenPanel:
             from ..extension import get_active_core
             core = get_active_core()
         except Exception as exc:
-            self._status_label.text = f"replay: core unavailable ({exc!r})"
+            self._replay_status_label.text = f"replay: core unavailable ({exc!r})"
             return
         if core is None:
-            self._status_label.text = "replay: no active core (open a scene first)"
+            self._replay_status_label.text = "replay: no active core (open a scene first)"
             return
         try:
             start = core.get_start_time()
             end = core.get_end_time()
         except Exception as exc:
-            self._status_label.text = f"replay: cannot read range ({exc!r})"
+            self._replay_status_label.text = f"replay: cannot read range ({exc!r})"
             return
         if start is None or end is None:
-            self._status_label.text = "replay: no playback range loaded"
+            self._replay_status_label.text = "replay: no playback range loaded"
             return
         fmt = "%Y-%m-%d %H:%M:%S"
         self._replay_start.model.set_value(start.strftime(fmt))
         self._replay_end.model.set_value(end.strftime(fmt))
-        self._status_label.text = f"replay: filled range {start.strftime(fmt)} .. {end.strftime(fmt)}"
+        self._replay_status_label.text = f"replay: filled range {start.strftime(fmt)} .. {end.strftime(fmt)}"
 
     def _on_replay_clicked(self):
         start = self._replay_start.model.get_value_as_string().strip()
         end = self._replay_end.model.get_value_as_string().strip()
         if not start or not end:
-            self._status_label.text = "replay: Start and End required (YYYY-MM-DD HH:MM:SS)"
+            self._replay_status_label.text = "replay: Start and End required (YYYY-MM-DD HH:MM:SS)"
             return
         job_id = "replay-" + datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
         upload = (f"s3://time-travel-summarization/replays/{job_id}"
@@ -397,7 +402,7 @@ class RemoteGenPanel:
             app_kit=self._app_kit.model.get_value_as_string().strip(),
             gpu=self._gpu.model.get_value_as_int(),
             upload_uri=upload,
-        ))
+        ), status_label=self._replay_status_label)
 
     def _on_status_clicked(self):
         if not self._last_job_id:
