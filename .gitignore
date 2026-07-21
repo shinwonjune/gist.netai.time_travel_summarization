@@ -44,3 +44,6 @@ ultraplan/
 # --- Antigravity CLI & Agents tooling --------------------------------------
 .antigravitycli/
 .agents/
+# --- Markdown 방침 (2026-07-21): README만 추적, 그 외 md는 기본 비추적 ------
+*.md
+!README.md
