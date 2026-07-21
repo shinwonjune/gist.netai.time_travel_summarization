@@ -390,3 +390,31 @@ GUI 추론 정상 JSON 확인.
 (`living_trajectory_1h_0_2s_parquet`)의 커버리지가 2025-01-01 00:00~01:00뿐이라 7/18 좌표가
 없음. **episodes/ raw 존의 trace CSV를 trajectory/ lake 존(parquet+manifest)으로 인제스트하는
 단계가 미구현** — 이게 생기면 검색→±5분 자동 로드→재연이 Lake 모드에서 자기완결된다.
+
+## #18. CI 첫 그린 + public repo 비밀 감사 (2026-07-19, 7f2ac2a·6d56512)
+
+### 배경
+"52b1e94 커밋의 lint-and-test 실패" 문의로 조사 → GitHub Actions 이력상 **첫 run(7/14)부터
+전 커밋이 실패**해 온 상태였음(52b1e94는 docs 14줄 커밋 — 무고). CI 동일 환경
+(py3.12 + ruff/mypy/pytest/minio, `.env` 없는 클린 체크아웃)을 로컬 venv로 재현해 특정.
+
+### 원인 → 해결
+| 실패 | 원인 | 해결 |
+|---|---|---|
+| `test_extension_config_data_uri_local` | repo 실제 config.json의 `${DATA_PATH}`가 **로컬 .env에 의존** — .env는 gitignore라 CI엔 없음 → 빈 값 | 테스트를 임시 config 파일로 격리(검증 대상은 상대경로→file:// 해석 로직) (7f2ac2a) |
+| `test_generate_captions_saves_…` | #17의 "lake 반환값=전체 URI" 계약 변경이 낸 회귀 | 테스트를 새 계약에 맞게 갱신 (190fe86) |
+| (재현 중 발견) mypy 2건 | SSHTunnel._proc이 Optional 선언 없이 None 초기화 | Optional 선언 + stop() 지역변수 내로잉 (6d56512) |
+
+재현 환경 최종: ruff 클린 · mypy 12파일 클린 · **pytest 97 passed, 0 failed** → push 시 첫 그린.
+
+### 부수: public repo 비밀 감사
+repo가 public임을 확인하고 **전체 git 히스토리**를 스캔 — 추적 파일의 키는 전부
+`nvapi-***`/`sk-proj-***` 마스킹 자리표시였고, 히스토리에도 실키 패턴(nvapi-/sk-/ghp_/AKIA)·
+MINIO/OMNI 자격증명 실값 **0건**. 노출된 저위험 정보(사설 IP, minIO 도메인, VSS 기본
+패스워드)만 인지 대상으로 기록.
+
+### 교훈
+- 테스트가 repo의 **실제 설정 파일 + 로컬 .env**를 읽으면 "내 자리에서만 통과"하는
+  환경 의존이 생긴다 — 단위 테스트는 자기 입력을 스스로 만들 것.
+- CI 실패는 "그 커밋의 diff"가 아니라 **이력 전체의 추이**부터 볼 것(전부 빨강이면
+  회귀가 아니라 환경 문제).

@@ -122,34 +122,21 @@ def _encode_chunk(rows: List[dict], fmt: str) -> Tuple[bytes, str]:
 
 # ---------- 적재 ----------
 
-def ingest_rows(
-    rows: Iterable[dict],
-    dataset_uri: str,
-    *,
-    chunk_seconds: int = 60,
-    fmt: str = "csv",
-    hz: Optional[float] = None,
-    dataset: str = "",
-) -> dict:
-    """rows를 시간 단위 청크로 분할해 dataset_uri 하위에 업로드하고 manifest를 쓴다.
+def _bucket_and_upload(
+    rows_sorted: List[dict], dataset_uri: str, chunk_seconds: int, fmt: str,
+) -> Tuple[List[dict], int, List[str], List[float], List[float]]:
+    """정렬된 rows를 청크로 나눠 업로드. (chunks, total, objids, mins, maxs) 반환.
 
-    dataset_uri: 's3://bucket/trajectory/ds1' 또는 'file:///tmp/lake/ds1'.
-    반환: 작성한 manifest dict.
+    ingest_rows(신규 생성)와 append_rows(기존에 추가)가 공유하는 몸통.
     """
     from ..storage import from_uri
 
-    fmt = fmt.lower()
-    dataset_uri = dataset_uri.rstrip("/")
-    rows = sorted(rows, key=lambda r: r["timestamp"])
-    if not rows:
-        raise ValueError("ingest_rows: no rows to ingest")
-
-    base = TrajectoryRepository.parse_timestamp(rows[0]["timestamp"])
+    base = TrajectoryRepository.parse_timestamp(rows_sorted[0]["timestamp"])
     buckets: Dict[int, List[dict]] = {}
     objids = set()
     mins = [math.inf] * 3
     maxs = [-math.inf] * 3
-    for r in rows:
+    for r in rows_sorted:
         objids.add(r["objid"])
         xyz = (float(r["x"]), float(r["y"]), float(r["z"]))
         for a in range(3):
@@ -174,6 +161,102 @@ def ingest_rows(
         from_uri(uri).put_bytes(uri, payload, content_type=content_type)
         manifest_chunks.append({"key": key, "start": c_start, "end": c_end, "rows": len(crows)})
         total += len(crows)
+    return manifest_chunks, total, sorted(objids), mins, maxs
+
+
+def append_rows(
+    rows: Iterable[dict],
+    dataset_uri: str,
+    *,
+    chunk_seconds: Optional[int] = None,
+    fmt: Optional[str] = None,
+) -> dict:
+    """기존 데이터셋에 rows를 **추가** 적재하고 manifest를 병합 갱신한다.
+
+    - 시각은 조작 없이 그대로 보존 — 이벤트 인덱스(vlm_events)의 절대 시각과
+      궤적이 일치해야 검색→점프→재연이 성립한다. 기존 청크와의 공백은 재생기의
+      공백 점프(next_data_time)가 처리하므로 연속일 필요 없음.
+    - 기존 청크와 시간이 겹치면 거부(같은 데이터 재적재 방지).
+    - manifest가 없으면 ingest_rows로 새 데이터셋 생성.
+    - 교체 전 이전 manifest를 manifest.json.bak으로 백업.
+    """
+    from ..storage import from_uri
+
+    dataset_uri = dataset_uri.rstrip("/")
+    muri = manifest_uri(dataset_uri)
+    adapter = from_uri(muri)
+    if not adapter.exists(muri):
+        return ingest_rows(rows, dataset_uri,
+                           chunk_seconds=chunk_seconds or 300, fmt=fmt or "parquet")
+    with adapter.open_read(muri) as fh:
+        old = json.loads(fh.read().decode("utf-8"))
+
+    chunk_seconds = int(chunk_seconds or old.get("chunk_seconds") or 300)
+    fmt = (fmt or old.get("format") or "parquet").lower()
+
+    rows = sorted(rows, key=lambda r: r["timestamp"])
+    if not rows:
+        raise ValueError("append_rows: no rows to append")
+
+    parse = TrajectoryRepository.parse_timestamp
+    new_start, new_end = parse(rows[0]["timestamp"]), parse(rows[-1]["timestamp"])
+    for c in old.get("chunks", []):
+        if parse(c["start"]) <= new_end and new_start <= parse(c["end"]):
+            raise ValueError(
+                f"append_rows: 시간 겹침 — 기존 청크 {c['key']} ({c['start']}..{c['end']}) 와 "
+                f"신규 rows ({rows[0]['timestamp']}..{rows[-1]['timestamp']}) 교차. "
+                "같은 데이터 재적재인지 확인할 것.")
+
+    new_chunks, total, objids, mins, maxs = _bucket_and_upload(
+        rows, dataset_uri, chunk_seconds, fmt)
+
+    chunks = sorted(old.get("chunks", []) + new_chunks, key=lambda c: parse(c["start"]))
+    old_min, old_max = old.get("coord_min"), old.get("coord_max")
+    manifest = dict(old)
+    manifest.update({
+        "objids": sorted(set(old.get("objids", [])) | set(objids)),
+        "start": chunks[0]["start"],
+        "end": max(chunks, key=lambda c: parse(c["end"]))["end"],
+        "rows": int(old.get("rows", 0)) + total,
+        "coord_min": [min(a, b) for a, b in zip(old_min, mins)] if old_min else mins,
+        "coord_max": [max(a, b) for a, b in zip(old_max, maxs)] if old_max else maxs,
+        "chunks": chunks,
+    })
+
+    bak_uri = muri + ".bak"
+    from_uri(bak_uri).put_bytes(
+        bak_uri, json.dumps(old, ensure_ascii=False, indent=2).encode("utf-8"),
+        content_type="application/json")
+    from_uri(muri).put_bytes(
+        muri, json.dumps(manifest, ensure_ascii=False, indent=2).encode("utf-8"),
+        content_type="application/json")
+    return manifest
+
+
+def ingest_rows(
+    rows: Iterable[dict],
+    dataset_uri: str,
+    *,
+    chunk_seconds: int = 60,
+    fmt: str = "csv",
+    hz: Optional[float] = None,
+    dataset: str = "",
+) -> dict:
+    """rows를 시간 단위 청크로 분할해 dataset_uri 하위에 업로드하고 manifest를 쓴다.
+
+    dataset_uri: 's3://bucket/trajectory/ds1' 또는 'file:///tmp/lake/ds1'.
+    반환: 작성한 manifest dict.
+    """
+    from ..storage import from_uri
+
+    fmt = fmt.lower()
+    dataset_uri = dataset_uri.rstrip("/")
+    rows = sorted(rows, key=lambda r: r["timestamp"])
+    if not rows:
+        raise ValueError("ingest_rows: no rows to ingest")
+
+    manifest_chunks, total, objids, mins, maxs = _bucket_and_upload(
+        rows, dataset_uri, chunk_seconds, fmt)
 
     manifest = {
         "version": 1,
