@@ -174,6 +174,26 @@ class RemoteGenPanel:
             # serve 전용 상태줄 — 상단 공용 라벨(생성/학습 잡)과 분리
             self._serve_status_label = ui.Label("", style={"color": 0xFF888888})
 
+        # ---- Replay Render — 좌표 구간 재연 렌더 잡 --------------------------- #
+        ui.Spacer(height=8)
+        ui.Label("Replay Render", style={"font_size": 14, "font_weight": "bold"})
+        with ui.HStack(height=25, spacing=8):
+            ui.Label("Start:", width=85)
+            self._replay_start = ui.StringField()
+            ui.Label("End:", width=35)
+            self._replay_end = ui.StringField()
+        with ui.HStack(height=25, spacing=8):
+            ui.Label("Data URI:", width=85)
+            self._replay_data = ui.StringField()
+            ui.Label("(empty = config default)", style={"color": 0xFF888888})
+        with ui.HStack(height=28, spacing=10):
+            use_range_btn = ui.Button("Use current range", width=130)
+            use_range_btn.set_clicked_fn(self._on_use_current_range)
+            submit_replay = ui.Button("Submit Replay", width=120)
+            submit_replay.set_clicked_fn(self._on_replay_clicked)
+            ui.Label("(ISO YYYY-MM-DD HH:MM:SS; reuses Camera/Stage/GPU/upload above)",
+                     style={"color": 0xFF888888})
+
     # ---- helpers ----------------------------------------------------------- #
 
     @staticmethod
@@ -333,6 +353,51 @@ class RemoteGenPanel:
             self._set_status(txt, self._serve_status_label)
 
         threading.Thread(target=work, daemon=True, name="ServeCheck").start()
+
+    def _on_use_current_range(self):
+        """메인 core의 현재 재생 범위(get_start/end_time)로 Start/End를 채운다."""
+        try:
+            from ..extension import get_active_core
+            core = get_active_core()
+        except Exception as exc:
+            self._status_label.text = f"replay: core unavailable ({exc!r})"
+            return
+        if core is None:
+            self._status_label.text = "replay: no active core (open a scene first)"
+            return
+        try:
+            start = core.get_start_time()
+            end = core.get_end_time()
+        except Exception as exc:
+            self._status_label.text = f"replay: cannot read range ({exc!r})"
+            return
+        if start is None or end is None:
+            self._status_label.text = "replay: no playback range loaded"
+            return
+        fmt = "%Y-%m-%d %H:%M:%S"
+        self._replay_start.model.set_value(start.strftime(fmt))
+        self._replay_end.model.set_value(end.strftime(fmt))
+        self._status_label.text = f"replay: filled range {start.strftime(fmt)} .. {end.strftime(fmt)}"
+
+    def _on_replay_clicked(self):
+        start = self._replay_start.model.get_value_as_string().strip()
+        end = self._replay_end.model.get_value_as_string().strip()
+        if not start or not end:
+            self._status_label.text = "replay: Start and End required (YYYY-MM-DD HH:MM:SS)"
+            return
+        job_id = "replay-" + datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
+        upload = (f"s3://time-travel-summarization/replays/{job_id}"
+                  if self._upload_checkbox.model.get_value_as_bool() else "")
+        self._submit_spec(JobSpec(
+            job_id=job_id, job_type="replay",
+            replay_start=start, replay_end=end,
+            data_uri=self._replay_data.model.get_value_as_string().strip(),
+            camera=self._camera.model.get_value_as_string().strip(),
+            stage=self._stage.model.get_value_as_string().strip(),
+            app_kit=self._app_kit.model.get_value_as_string().strip(),
+            gpu=self._gpu.model.get_value_as_int(),
+            upload_uri=upload,
+        ))
 
     def _on_status_clicked(self):
         if not self._last_job_id:

@@ -154,42 +154,62 @@ def start_capture(core, duration_s: float = 0.0, output_path: Optional[str] = No
 def run_capture_headless(core, duration_s: float = 0.0, output_path: Optional[str] = None,
                          camera_path: Optional[str] = None,
                          capture_start_dt: Optional[datetime.datetime] = None,
-                         render_fps: Optional[int] = None) -> Optional[str]:
+                         render_fps: Optional[int] = None,
+                         replay_start_dt: Optional[datetime.datetime] = None) -> Optional[str]:
     """Blocking offscreen capture for headless automation (no viewport).
 
     Writes the same <video>.meta.json sidecar as start_capture, then runs the
     render-product capture synchronously (it pumps the app so physics advances
     and frames render). Returns the output path on success, else None.
+
+    ``replay_start_dt`` 지정 시 재연 모드: 물리를 돌리는 대신 프레임마다 재생 헤드를
+    데이터 시각으로 세팅해 좌표 데이터를 그대로 재연·렌더한다(§6-1 투영 오차를 피하는
+    camera_params 정합 경로). 물리 전용 부수효과(충돌 recorder·sim 클럭)는 켜지 않는다.
+    None이면 기존 physics 동작(회귀 없음).
     """
     effective_duration = float(duration_s) if duration_s > 0 else 60.0
     if output_path is None:
         output_path = _default_output_path(core)
-    if core._playback.get_mode() == "physics":
+    replay = replay_start_dt is not None
+    # 충돌 recorder는 physics 재연이 아니라 시뮬레이션에서만(재연은 관찰). replay는
+    # playback 모드라 아래 가드로도 걸러지지만, 의도를 명시해 둔다.
+    if not replay and core._playback.get_mode() == "physics":
         physics_service.start_collision_recorder(core)
-    # sim-time 클럭 앵커: 이 시각 + sim 경과가 오버레이/CSV/사이드카의 단일 t0.
-    # 배치 생성은 에피소드별 무작위 t0를 주입(숫자 다양성; 실행 시각 비종속).
-    core._capture_start_dt = capture_start_dt or capture_anchor(core)
-    core._sim_time = 0.0
-    core._use_sim_clock = True
-    # 실측(프로브): 이 Kit의 app.update() 고정 스텝 = 1/60s (timeCodesPerSecond 무시).
-    # → sim은 60Hz 고정. render_fps(60의 약수)를 주면 렌더·인코딩만 데시메이션되어
-    #   비디오는 그 fps가 된다(라벨 시각은 스텝 기준이라 정합 불변). 10Hz 데이터셋은
-    #   build_dataset --content-hz 10으로 최종 데시메이션(B' 경로).
-    headless_fps = 60
-    _rfps = int(render_fps) if render_fps else headless_fps
-    vid_fps = headless_fps // max(1, int(round(headless_fps / max(1, _rfps))))
+    # 클럭 앵커. physics: sim-time 클럭(이 시각 + sim 경과)이 오버레이/CSV/사이드카의
+    # 단일 t0(배치 생성이 에피소드별 무작위 t0 주입). replay: 앵커 = 데이터 재연 시작
+    # 시각(오버레이 시계는 playback 현재시각을 직접 읽으므로 sim 클럭은 켜지 않는다).
+    core._capture_start_dt = capture_start_dt or (replay_start_dt if replay else capture_anchor(core))
+    if not replay:
+        core._sim_time = 0.0
+        core._use_sim_clock = True
+    if replay:
+        # 재연은 물리 60Hz 데시메이션이 없다 — sim=render=vid=render_fps(기본 30),
+        # 프레임마다 1 렌더. 창 길이(effective_duration) × vid_fps 프레임을 렌더한다.
+        vid_fps = int(render_fps) if render_fps else 30
+        headless_fps = vid_fps
+    else:
+        # 실측(프로브): 이 Kit의 app.update() 고정 스텝 = 1/60s (timeCodesPerSecond 무시).
+        # → sim은 60Hz 고정. render_fps(60의 약수)를 주면 렌더·인코딩만 데시메이션되어
+        #   비디오는 그 fps가 된다(라벨 시각은 스텝 기준이라 정합 불변). 10Hz 데이터셋은
+        #   build_dataset --content-hz 10으로 최종 데시메이션(B' 경로).
+        headless_fps = 60
+        _rfps = int(render_fps) if render_fps else headless_fps
+        vid_fps = headless_fps // max(1, int(round(headless_fps / max(1, _rfps))))
     # 사이드카 fps = 실제 비디오 fps여야 build_dataset의 시각→프레임 매핑이 맞는다.
     write_capture_sidecar(core, output_path, effective_duration, fps=vid_fps)
     from ..video_capture import CaptureRequest, RealtimeCaptureRunner
     output_uri = output_path if "://" in output_path else Path(output_path).resolve().as_uri()
     req = CaptureRequest(duration_s=effective_duration, fps=headless_fps,
-                         output_uri=output_uri, label="headless_capture",
+                         output_uri=output_uri,
+                         label="headless_replay" if replay else "headless_capture",
                          render_fps=vid_fps)
     try:
-        res = RealtimeCaptureRunner(core=core).capture_headless(req, camera_path=camera_path)
+        res = RealtimeCaptureRunner(core=core).capture_headless(
+            req, camera_path=camera_path, replay_start_dt=replay_start_dt)
     finally:
         core._use_sim_clock = False
-        physics_service.stop_collision_recorder(core)  # 캡처 종료 == 충돌 기록 종료
+        if not replay:
+            physics_service.stop_collision_recorder(core)  # 캡처 종료 == 충돌 기록 종료
     if not res.success:
         carb.log_warn(f"[Capture] headless FAILED: {res.error}")
         return None

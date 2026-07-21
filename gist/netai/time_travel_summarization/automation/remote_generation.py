@@ -24,9 +24,10 @@ JOB_SCHEMA_VERSION = 2
 RUNNER_REL = "gist/netai/time_travel_summarization/VLM_server/l40/run_job.sh"
 TRAIN_RUNNER_REL = "gist/netai/time_travel_summarization/VLM_server/l40/run_train.sh"
 SERVE_RUNNER_REL = "gist/netai/time_travel_summarization/VLM_server/l40/run_serve.sh"
+REPLAY_RUNNER_REL = "gist/netai/time_travel_summarization/VLM_server/l40/run_replay.sh"
 JOBS_REL = "artifacts/jobs"
 
-JOB_TYPES = ("generate", "train", "serve_start", "serve_stop")
+JOB_TYPES = ("generate", "train", "serve_start", "serve_stop", "replay")
 
 
 def runner_rel_for(job_type: str) -> str:
@@ -36,6 +37,7 @@ def runner_rel_for(job_type: str) -> str:
         "train": TRAIN_RUNNER_REL,
         "serve_start": SERVE_RUNNER_REL,
         "serve_stop": SERVE_RUNNER_REL,
+        "replay": REPLAY_RUNNER_REL,
     }[job_type]
 
 
@@ -70,6 +72,10 @@ class JobSpec:
     model_path: str = ""    # serve_start: 병합(merged) 모델 디렉토리
     port: int = 38011       # serve: vLLM 포트
     num_frames: int = 20    # serve: 클립당 프레임 예산 (train==infer 정합)
+    # ---- replay 잡 (좌표 구간 재연 렌더) ------------------------------------
+    replay_start: str = ""  # ISO "YYYY-MM-DD HH:MM:SS" (재연 시작)
+    replay_end: str = ""    # ISO "YYYY-MM-DD HH:MM:SS" (재연 끝)
+    data_uri: str = ""      # 트레이스 URI(DATA_PATH) 또는 레이크 데이터셋(LAKE_DATASET); 빈 값=config 기본
 
     def to_env(self) -> dict:
         """run_job.sh가 소비하는 env 매핑 (값은 전부 문자열; 빈 값은 전송 생략)."""
@@ -98,6 +104,9 @@ class JobSpec:
             "MODEL_PATH": self.model_path,
             "PORT": str(int(self.port)),
             "NUM_FRAMES": str(int(self.num_frames)),
+            "REPLAY_START": self.replay_start,
+            "REPLAY_END": self.replay_end,
+            "DATA_URI": self.data_uri,
         }
 
 
@@ -352,6 +361,19 @@ def _self_test() -> None:
         JobSpec(job_id="serve-1", job_type="serve_start", model_path="/models/m"),
         "/home/x/ext")
     assert "run_serve.sh" in serve_cmd and "JOB_TYPE=serve_start" in serve_cmd
+    # replay 잡: 러너 디스패치 + env 렌더링(구간·데이터 소스), 빈 값 전송 생략
+    replay_spec = JobSpec(job_id="replay-1", job_type="replay",
+                          replay_start="2026-07-18 15:35:10",
+                          replay_end="2026-07-18 15:35:40",
+                          data_uri="s3://bucket/episodes/x/ep_0000/_trace_0000.csv")
+    renv = replay_spec.to_env()
+    assert renv["REPLAY_START"] == "2026-07-18 15:35:10" and renv["JOB_TYPE"] == "replay"
+    assert renv["DATA_URI"].endswith("_trace_0000.csv")
+    replay_cmd = build_submit_command(replay_spec, "/home/x/ext")
+    assert "run_replay.sh" in replay_cmd and "JOB_TYPE=replay" in replay_cmd
+    assert "'2026-07-18 15:35:10'" in replay_cmd, "공백 포함 시각 인용 유지"
+    assert renv["MODEL_PATH"] == "" and "MODEL_PATH" not in replay_cmd, "빈 값은 명령 생략"
+    assert runner_rel_for("replay").endswith("run_replay.sh")
     # 상태 파싱
     class FakeTransport:
         def run(self, command, timeout=30.0):

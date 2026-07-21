@@ -266,12 +266,14 @@ class TimeTravelCore:
     def run_capture_headless(self, duration_s: float = 0.0, output_path: Optional[str] = None,
                              camera_path: Optional[str] = None,
                              capture_start_dt: Optional[datetime.datetime] = None,
-                             render_fps: Optional[int] = None) -> Optional[str]:
+                             render_fps: Optional[int] = None,
+                             replay_start_dt: Optional[datetime.datetime] = None) -> Optional[str]:
         return capture_service.run_capture_headless(
             self, duration_s, output_path,
             camera_path=camera_path,
             capture_start_dt=capture_start_dt,
             render_fps=render_fps,
+            replay_start_dt=replay_start_dt,
         )
 
     def stop_capture(self) -> Optional[str]:

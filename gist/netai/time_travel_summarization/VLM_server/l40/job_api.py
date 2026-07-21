@@ -92,6 +92,9 @@ class JobRequest(BaseModel):
     spawn_plan: str = ""
     keep_positions: bool = False
     seed: Optional[int] = None
+    replay_start: str = ""              # replay: ISO "YYYY-MM-DD HH:MM:SS"
+    replay_end: str = ""                # replay: ISO "YYYY-MM-DD HH:MM:SS"
+    data_uri: str = ""                  # replay: 트레이스 URI 또는 레이크 데이터셋 (빈 값=config 기본)
 
 
 def _check_key(x_api_key: Optional[str]) -> None:
@@ -164,7 +167,8 @@ def health():
             "serve_gpu": SERVE_GPU, "job_types": list(JOB_TYPES)}
 
 
-_ID_PREFIX = {"generate": "gen", "train": "train", "serve_start": "serve", "serve_stop": "serve"}
+_ID_PREFIX = {"generate": "gen", "train": "train", "serve_start": "serve",
+              "serve_stop": "serve", "replay": "replay"}
 
 
 def _validate_request(req: JobRequest) -> int:
@@ -175,12 +179,16 @@ def _validate_request(req: JobRequest) -> int:
         if req.job_type == "serve_start" and not req.model_path:
             raise HTTPException(422, "serve_start requires model_path")
         return SERVE_GPU  # 서빙은 전용 GPU 고정 (요청 gpu 무시)
-    # 생성/학습 잡은 서빙 GPU를 쓸 수 없다 (역할 분리)
+    # 생성/학습/재연 잡은 서빙 GPU를 쓸 수 없다 (역할 분리 — kit 렌더가 서빙과 경합)
     if req.gpu == SERVE_GPU:
         raise HTTPException(422, f"gpu {SERVE_GPU} is reserved for serving (SERVE_GPU)")
     if req.job_type == "train":
         if not req.dataset:
             raise HTTPException(422, "train requires dataset (server-side dir)")
+        return req.gpu
+    if req.job_type == "replay":
+        if not req.replay_start or not req.replay_end:
+            raise HTTPException(422, "replay requires replay_start and replay_end")
         return req.gpu
     # generate 고유 검증
     if req.max_objects < req.min_objects:
@@ -212,6 +220,7 @@ def create_job(req: JobRequest, x_api_key: Optional[str] = Header(default=None))
         keep_positions=req.keep_positions, seed=seed,
         job_type=req.job_type, dataset=req.dataset, train_output=req.train_output,
         model_path=req.model_path, port=req.port, num_frames=req.num_frames,
+        replay_start=req.replay_start, replay_end=req.replay_end, data_uri=req.data_uri,
     )
     ahead = _enqueue(spec)
     return {"job_id": job_id, "state": "queued", "gpu": spec.gpu,

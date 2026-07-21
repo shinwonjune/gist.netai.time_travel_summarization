@@ -4,7 +4,7 @@ import shutil
 import tempfile
 import threading
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Callable, Optional
 
@@ -601,7 +601,8 @@ class RealtimeCaptureRunner:
             shutil.rmtree(tmp_dir, ignore_errors=True)
 
     def capture_headless(self, req: CaptureRequest, stop_event=None,
-                         camera_path: Optional[str] = None) -> CaptureResult:
+                         camera_path: Optional[str] = None,
+                         replay_start_dt: Optional[datetime] = None) -> CaptureResult:
         """Offscreen capture for headless Kit (no active viewport).
 
         Renders ``/World/summarization_camera`` via a Replicator render product and
@@ -610,8 +611,15 @@ class RealtimeCaptureRunner:
         frame renders. Reuses the same overlay (timestamp + projected ID labels via
         a camera-path shim), encoder, and real-time pacing as ``capture()``.
 
+        재연 모드(``replay_start_dt`` 지정 시): 물리 대신 프레임마다 재생 헤드를
+        데이터 시각 ``replay_start_dt + seq/fps`` 로 직접 세팅한다(core.set_current_time
+        → 객체를 그 시각의 좌표로 배치). 물리 스텝·데시메이션이 없으므로 렌더 프레임과
+        sim 프레임이 1:1(_dec=1; 호출부가 req.fps=render_fps로 맞춤)이고 오버레이 시계는
+        playback 모드의 재생 헤드를 그대로 읽는다(별도 sim 클럭 불필요).
+
         NOTE: requires Kit + GPU + omni.replicator.core; verify on hardware.
         """
+        _replay = replay_start_dt is not None
         import asyncio
         try:
             asyncio.get_event_loop()
@@ -634,7 +642,8 @@ class RealtimeCaptureRunner:
             "sim_fps": req.fps,
             "render_decimation": _dec,
             "duration_s": req.duration_s,
-            "frame_clock": "headless_sync_app_pump",
+            "frame_clock": "replay_data_time" if _replay else "headless_sync_app_pump",
+            "capture_mode": "replay" if _replay else "physics",
         }
         tmp_dir = Path(tempfile.mkdtemp(prefix="ttsum_hl_"))
         tmp_mp4 = tmp_dir / f"hl_{datetime.now().strftime('%Y%m%dT%H%M%S')}.mp4"
@@ -922,9 +931,16 @@ class RealtimeCaptureRunner:
                     break
                 probing = seq < _PROBE_FRAMES
                 render_this = (seq % _dec == 0)
-                # 프레임의 sim 시각을 먼저 고정: 이 update 중의 충돌(in-step)과 직후
-                # 오버레이(post-step)가 같은 sim-time(seq/fps)으로 스탬프된다.
-                if self._core is not None and hasattr(self._core, "set_sim_time"):
+                # 프레임의 시각을 먼저 고정.
+                #  physics: sim-time(seq/fps) — 이 update 중 충돌(in-step)과 직후
+                #    오버레이(post-step)가 같은 sim 시각으로 스탬프.
+                #  replay: 재생 헤드를 데이터 시각으로 직접 세팅 → 객체가 그 시각 좌표로
+                #    배치되고 오버레이 시계도 playback 현재시각을 그대로 읽는다(물리 없음).
+                if _replay:
+                    if self._core is not None and hasattr(self._core, "set_current_time"):
+                        self._core.set_current_time(
+                            replay_start_dt + timedelta(seconds=seq / max(1, _vid_fps)))
+                elif self._core is not None and hasattr(self._core, "set_sim_time"):
                     self._core.set_sim_time(seq * _expected_dt)
                 # advance simulation (wall-clock 페이싱 없음): 렌더 스텝만 orchestrator,
                 # 나머지는 물리-only 전진 — 어느 쪽이든 1스텝 = 1/60 sim.
