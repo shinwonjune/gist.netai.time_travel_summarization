@@ -36,14 +36,20 @@ def parse_dt(value: str) -> datetime.datetime:
 
 def validate_window(start: datetime.datetime, end: datetime.datetime,
                     data_start: Optional[datetime.datetime],
-                    data_end: Optional[datetime.datetime]) -> Optional[str]:
+                    data_end: Optional[datetime.datetime],
+                    grace_s: float = 0.0) -> Optional[str]:
     """재연 구간이 유효(end>start)하고 데이터 범위 안인지 검사. 문제 없으면 None,
-    아니면 영어 에러 문자열(러너 note·GUI status에 그대로 노출)."""
+    아니면 영어 에러 문자열(러너 note·GUI status에 그대로 노출).
+
+    grace_s: end가 데이터 끝을 이 초만큼 넘는 것은 허용. trace 마지막 샘플은
+    duration - 1/fps에 찍히는데 API는 초 단위라 "정확히 duration 요청"이
+    수십 ms 차이로 거부되는 것을 막는다(재생은 데이터 끝으로 클램프됨).
+    """
     if end <= start:
         return f"replay window empty: end {end} <= start {start}"
     if data_start is not None and start < data_start:
         return f"replay start {start} before data start {data_start}"
-    if data_end is not None and end > data_end:
+    if data_end is not None and end > data_end + datetime.timedelta(seconds=grace_s):
         return f"replay end {end} after data end {data_end}"
     return None
 
@@ -128,13 +134,16 @@ def run(args, core=None) -> None:
         core.regenerate_astronauts_from_loaded_data()
     core.set_playback_mode()
 
-    err = validate_window(start, end, core.get_data_start_time(), core.get_data_end_time())
+    data_end = core.get_data_end_time()
+    err = validate_window(start, end, core.get_data_start_time(), data_end, grace_s=1.0)
     if err:
         raise RuntimeError(err)
 
-    # 재생 범위=[start,end]로 설정하고 시작점으로 이동(set_current_time 클램프 근거).
-    if not core.load_time_range(start, end):
-        raise RuntimeError(f"load_time_range failed for {start}..{end}")
+    # 재생 범위=[start, min(end, 데이터 끝)]으로 설정(grace로 통과한 수십 ms 초과분
+    # 클램프). 영상 duration은 요청값 유지 — physics 원본과 청크 수 정합.
+    range_end = min(end, data_end) if data_end is not None else end
+    if not core.load_time_range(start, range_end):
+        raise RuntimeError(f"load_time_range failed for {start}..{range_end}")
 
     duration = (end - start).total_seconds()
     name = replay_output_name(start, end)
@@ -190,6 +199,12 @@ def _self_test() -> None:
     assert "before data start" in validate_window(parse_dt("2026-07-18 14:59:00"), e, ds, de)
     assert "after data end" in validate_window(s, parse_dt("2026-07-18 16:00:01"), ds, de)
     assert validate_window(s, e, None, None) is None
+    # grace: 데이터 끝을 1초 이내로 넘는 end는 허용(trace 마지막 샘플 17ms 부족 실측)
+    de_short = de - datetime.timedelta(milliseconds=17)
+    assert "after data end" in validate_window(s, de, ds, de_short)
+    assert validate_window(s, de, ds, de_short, grace_s=1.0) is None
+    assert "after data end" in validate_window(
+        s, de + datetime.timedelta(seconds=2), ds, de_short, grace_s=1.0)
     # 결정적 파일명
     assert replay_output_name(s, e) == "replay_20260718T153510_20260718T153540"
     print("replay_range self-test OK")

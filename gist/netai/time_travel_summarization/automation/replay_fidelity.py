@@ -393,37 +393,54 @@ def phase_plan(args, runs: List[str], out: Path) -> List[dict]:
     return pairs
 
 
+def _resolve_replay_job(pair_id: str) -> Tuple[str, str]:
+    """이 쌍의 유효 job_id와 서버 상태를 찾는다.
+
+    실패한 job_id는 재제출이 불가(409 — status 파일이 남음)하므로, failed면
+    -r2, -r3.. 접미사로 다음 시도 id를 찾는다. 반환 상태: "new"(미제출) 또는
+    서버 state(queued|starting|running|done).
+    """
+    for attempt in range(1, 10):
+        jid = f"fid-{pair_id}" + ("" if attempt == 1 else f"-r{attempt}")
+        try:
+            st = api_get(f"/jobs/{jid}")
+        except urllib.error.HTTPError as e:
+            if e.code == 404:
+                return jid, "new"
+            raise
+        if st.get("state") != "failed":
+            return jid, str(st.get("state"))
+    raise RuntimeError(f"{pair_id}: r9까지 전부 실패 — 잡 로그 확인 필요")
+
+
 def phase_replay(args, pairs: List[dict], out: Path) -> None:
     """쌍마다 replay 잡 제출(file:// 트레이스, 원본과 동일 stage/camera/fps) 후 완주 대기."""
     todo = []
     for p in pairs:
-        job_id = f"fid-{p['pair_id']}"
+        job_id, state = _resolve_replay_job(p["pair_id"])
         p["job_id"] = job_id
         if (out / "replays" / job_id).is_dir():   # 이미 가져온 쌍은 통째로 스킵
             continue
-        try:
-            st = api_get(f"/jobs/{job_id}")
-            if st.get("state") == "done":
-                todo.append((p, job_id, True))    # 렌더 완료 — fetch만 남음
-                continue
-        except urllib.error.HTTPError:
-            pass                                   # 미제출 — 아래에서 제출
-        start = datetime.datetime.fromisoformat(p["capture_start"])
-        end = start + datetime.timedelta(seconds=p["duration_s"])
-        fmt = "%Y-%m-%d %H:%M:%S"
-        trace_uri = (f"file://{args.remote_ext_root}/artifacts/episodes/"
-                     f"{p['run']}/{p['ep']}/{p['trace']}")
-        try:
-            api_post("/jobs", {
-                "job_type": "replay", "job_id": job_id, "gpu": args.gpu,
-                "replay_start": start.strftime(fmt), "replay_end": end.strftime(fmt),
-                "data_uri": trace_uri, "render_fps": p["fps"], "app_kit": APP_KIT,
-                "camera": p["camera"], "stage": p["stage"]})
-            print(f"[replay] submitted {job_id}")
-        except urllib.error.HTTPError as e:
-            if e.code != 409:                      # 409 = 이전 실행에서 제출됨 — 폴링만
-                raise
-        todo.append((p, job_id, False))
+        if state == "done":
+            todo.append((p, job_id, True))        # 렌더 완료 — fetch만 남음
+            continue
+        if state == "new":
+            start = datetime.datetime.fromisoformat(p["capture_start"])
+            end = start + datetime.timedelta(seconds=p["duration_s"])
+            fmt = "%Y-%m-%d %H:%M:%S"
+            trace_uri = (f"file://{args.remote_ext_root}/artifacts/episodes/"
+                         f"{p['run']}/{p['ep']}/{p['trace']}")
+            try:
+                api_post("/jobs", {
+                    "job_type": "replay", "job_id": job_id, "gpu": args.gpu,
+                    "replay_start": start.strftime(fmt), "replay_end": end.strftime(fmt),
+                    "data_uri": trace_uri, "render_fps": p["fps"], "app_kit": APP_KIT,
+                    "camera": p["camera"], "stage": p["stage"]})
+                print(f"[replay] submitted {job_id}")
+            except urllib.error.HTTPError as e:
+                if e.code != 409:                  # 409 = 경합 제출 — 폴링으로 합류
+                    raise
+        todo.append((p, job_id, False))           # queued/starting/running 포함
 
     (out / "pairs.json").write_text(json.dumps(pairs, indent=1, ensure_ascii=False),
                                     encoding="utf-8")
