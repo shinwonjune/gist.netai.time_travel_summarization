@@ -104,7 +104,7 @@ class EventProcessingWindow:
         """
         def _apply():
             self._json_filename_model.set_value(uri)
-            self._update_status("VLM result ready — press Process Events")
+            self._update_status("VLM result ready - press Process Events")
 
         self._ui_dispatcher.submit(_apply)
 

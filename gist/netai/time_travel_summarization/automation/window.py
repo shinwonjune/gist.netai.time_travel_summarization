@@ -46,7 +46,7 @@ class RemoteGenWindow:
         from ..ui.task_dispatcher import UiTaskDispatcher
 
         self._dispatcher = UiTaskDispatcher("RemoteGenWindowUiDispatcher")
-        self._window = ui.Window("Remote Jobs", width=520, height=600)
+        self._window = ui.Window("Remote Jobs", width=520, height=540)
         with self._window.frame:
             with ui.VStack(spacing=5):
                 self._panel = RemoteGenPanel(self._dispatcher)
@@ -170,8 +170,7 @@ class RemoteGenPanel:
             stop_btn.set_clicked_fn(self._on_serve_stop_clicked)
             check_btn = ui.Button("Check Serving", width=110)
             check_btn.set_clicked_fn(self._on_serve_check_clicked)
-        with ui.HStack(height=22, spacing=8):
-            # serve 전용 상태줄 — 상단 공용 라벨(생성/학습 잡)과 분리
+            # serve 전용 상태 — 버튼 행 인라인(별도 빈 행을 두면 섹션 사이가 벌어져 보임)
             self._serve_status_label = ui.Label("", style={"color": 0xFF888888})
 
         # ---- Replay Render — 좌표 구간 재연 렌더 잡 --------------------------- #
@@ -192,10 +191,7 @@ class RemoteGenPanel:
             use_range_btn.set_clicked_fn(self._on_use_current_range)
             submit_replay = ui.Button("Submit Replay", width=120)
             submit_replay.set_clicked_fn(self._on_replay_clicked)
-            ui.Label("(ISO YYYY-MM-DD HH:MM:SS; reuses Camera/Stage/GPU/upload above)",
-                     style={"color": 0xFF888888})
-        with ui.HStack(height=22, spacing=8):
-            # replay 전용 상태줄 — 상단 공용 라벨(생성/학습 잡)과 분리
+            # replay 전용 상태 — 버튼 행 인라인 (Camera/Stage/GPU/upload는 상단 값 재사용)
             self._replay_status_label = ui.Label("", style={"color": 0xFF888888})
         ui.Spacer()  # 남는 세로 공간을 맨 아래로 흡수 — 섹션 사이가 벌어지지 않게
 
@@ -422,7 +418,7 @@ class RemoteGenPanel:
                 extra = f" ({st.get('episodes_done', '?')}/{st.get('total', '?')})"
             note = st.get("note", "")  # 실패 사유·부가 정보 (모든 잡 타입)
             if note:
-                extra += f" — {note}"
+                extra += f" - {note}"
             self._set_status(f"{job_id}: {state}{extra}", label)
 
         threading.Thread(target=work, daemon=True, name="RemoteGenStatus").start()

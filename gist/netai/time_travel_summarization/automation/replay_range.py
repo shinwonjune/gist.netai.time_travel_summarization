@@ -99,7 +99,11 @@ def run(args, core=None) -> None:
     import omni.kit.app  # noqa: F401  (ensures Kit context)
 
     # generate_episodes의 검증된 부팅/카메라 해석을 재사용(중복 방지).
-    from .generate_episodes import _ensure_stage, _resolve_camera
+    # 절대 임포트 필수: kit --exec는 이 파일을 패키지 밖 일반 스크립트로 실행하므로
+    # 상대 임포트(from .)는 "no known parent package"로 즉사한다(L40 실측).
+    from gist.netai.time_travel_summarization.automation.generate_episodes import (
+        _ensure_stage, _resolve_camera,
+    )
 
     core = core or _get_core()
     out_root = Path(args.out)

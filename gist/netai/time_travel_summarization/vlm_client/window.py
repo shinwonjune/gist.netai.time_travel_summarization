@@ -226,7 +226,7 @@ class VLMClientWindow:
         """
         def _apply():
             self._video_filename_field.model.set_value(uri)
-            self._update_status("Capture ready — press Upload", is_error=False)
+            self._update_status("Capture ready - press Upload", is_error=False)
 
         self._ui_dispatcher.submit(_apply)
 

@@ -334,7 +334,7 @@ class EventSummaryWindow:
 
             self._ui_dispatcher.submit(_jump)
             done.wait(timeout=10.0)
-            self._set_status_threadsafe(f"Playing {i}/{total} — {t.strftime('%H:%M:%S')}")
+            self._set_status_threadsafe(f"Playing {i}/{total} - {t.strftime('%H:%M:%S')}")
             while self._play_all_active and self._generation.is_current(generation):
                 cur = self._core.get_current_time()
                 if playback_reached_end(cur, t, play_length) or cur >= self._core.get_end_time():
