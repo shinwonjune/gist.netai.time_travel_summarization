@@ -96,10 +96,15 @@ class VLMClientCore:
         
         Args:
             video_source: Video filename (relative to videos/ directory) or storage URI
-            
+
         Returns:
             True if successful, False otherwise
         """
+        # minIO 콘솔 복사(`버킷/키`) 입력에 s3:// 접두 — openai/vss 두 경로 공통 초입.
+        from ..storage import normalize_source
+
+        video_source = normalize_source(video_source)
+
         if not self._client:
             carb.log_error("[VLMClient] Client not initialized")
             return False

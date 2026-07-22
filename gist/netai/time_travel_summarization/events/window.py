@@ -30,6 +30,8 @@ class EventProcessingWindow:
     
     def _build_ui(self):
         """Build the event processing window UI."""
+        from ..ui.workspace import close_existing_window
+        close_existing_window("Event Post Processing")  # 핫리로드 유령 창 방지
         self._window = ui.Window("Event Post Processing", width=440, height=260)
 
         with self._window.frame:
@@ -109,7 +111,9 @@ class EventProcessingWindow:
         self._ui_dispatcher.submit(_apply)
 
     def _resolve_json_input(self, json_filename: str) -> str | None:
-        candidate = json_filename.strip()
+        from ..storage import normalize_source
+
+        candidate = normalize_source(json_filename)  # minIO 콘솔 복사(`버킷/키`)에 s3:// 접두
         if not candidate:
             return None
 

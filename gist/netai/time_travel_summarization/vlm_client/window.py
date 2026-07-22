@@ -7,6 +7,13 @@ import threading
 from ..ui.task_dispatcher import UiTaskDispatcher
 
 
+def _shorten(text: str, limit: int = 48) -> str:
+    """긴 URI/경로를 UI 한 줄에 맞게 중간 생략 — omni.ui Label은 넘쳐도 안 잘라 이웃과 겹친다."""
+    if text is None:
+        return ""
+    return text if len(text) <= limit else text[:20] + "..." + text[-(limit - 23):]
+
+
 class VLMClientWindow:
     """VLM Client UI Window."""
     
@@ -17,6 +24,8 @@ class VLMClientWindow:
         self._ui_dispatcher = UiTaskDispatcher("VLMClientWindowUiDispatcher")
         
         # Create window
+        from ..ui.workspace import close_existing_window
+        close_existing_window("VLM Client")  # 핫리로드 유령 창 방지
         self._window = ui.Window("VLM Client", width=540, height=270)
         
         with self._window.frame:
@@ -179,7 +188,11 @@ class VLMClientWindow:
         self._upload_button.enabled = True
         if success:
             video_id = self._vlm_core.get_current_video_id() or "Unknown"
-            self._video_id_label.text = video_id
+            # 긴 URI/경로는 축약해 넣는다 — 전체 값은 tooltip으로 보존.
+            self._video_id_label.text = _shorten(video_id)
+            set_tooltip = getattr(self._video_id_label, "set_tooltip", None)
+            if callable(set_tooltip):
+                set_tooltip(video_id)
             self._video_id_label.style = {"color": 0xFF00AA00}
             self._delete_button.enabled = True
             self._generate_button.enabled = True

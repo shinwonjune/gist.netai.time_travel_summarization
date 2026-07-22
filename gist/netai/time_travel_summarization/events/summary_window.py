@@ -96,6 +96,8 @@ class EventSummaryWindow:
     def _build_ui(self):
         import omni.ui as ui
 
+        from ..ui.workspace import close_existing_window
+        close_existing_window("Event Summary")  # 핫리로드 유령 창 방지
         self._window = ui.Window("Event Summary", width=460, height=380)
         with self._window.frame:
             with ui.VStack(spacing=6, style={"margin": 3}):

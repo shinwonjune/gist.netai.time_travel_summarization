@@ -20,6 +20,8 @@ class TimeTravelWindow:
         self._ui_dispatcher = UiTaskDispatcher("TimeTravelWindowUiDispatcher")
         
         # Create window
+        from .workspace import close_existing_window
+        close_existing_window("Time Travel")  # 핫리로드 유령 창 방지
         self._window = ui.Window("Time Travel", width=500, height=510)
         
         with self._window.frame:

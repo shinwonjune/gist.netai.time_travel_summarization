@@ -46,6 +46,8 @@ class RemoteGenWindow:
         from ..ui.task_dispatcher import UiTaskDispatcher
 
         self._dispatcher = UiTaskDispatcher("RemoteGenWindowUiDispatcher")
+        from ..ui.workspace import close_existing_window
+        close_existing_window("Remote Jobs")  # 핫리로드 유령 창 방지
         self._window = ui.Window("Remote Jobs", width=520, height=540)
         with self._window.frame:
             with ui.VStack(spacing=5):
@@ -389,10 +391,13 @@ class RemoteGenPanel:
         job_id = "replay-" + datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
         upload = (f"s3://time-travel-summarization/replays/{job_id}"
                   if self._upload_checkbox.model.get_value_as_bool() else "")
+        from ..storage import normalize_source
+        # minIO 콘솔 복사(`버킷/키`) Data URI 입력에 s3:// 접두
+        data_uri = normalize_source(self._replay_data.model.get_value_as_string())
         self._submit_spec(JobSpec(
             job_id=job_id, job_type="replay",
             replay_start=start, replay_end=end,
-            data_uri=self._replay_data.model.get_value_as_string().strip(),
+            data_uri=data_uri,
             camera=self._camera.model.get_value_as_string().strip(),
             stage=self._stage.model.get_value_as_string().strip(),
             app_kit=self._app_kit.model.get_value_as_string().strip(),

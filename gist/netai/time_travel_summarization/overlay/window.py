@@ -16,6 +16,8 @@ class OverlayControlWindow:
         self._overlay = overlay
         
         # Create compact control window
+        from ..ui.workspace import close_existing_window
+        close_existing_window("View Overlay")  # 핫리로드 유령 창 방지
         self._window = ui.Window(
             "View Overlay", 
             width=180, 
