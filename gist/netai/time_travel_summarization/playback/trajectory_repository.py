@@ -97,6 +97,15 @@ class TrajectoryRepository:
     def get_lookup_mode(self) -> str:
         return self._lookup_mode
 
+    def get_object_ids(self) -> List[str]:
+        """전체 데이터에 등장하는 objid 합집합(시각순 무관, 정렬).
+
+        객체 재생성이 이걸 써야 중간에 등장하는 트랙(fragmentation의 새 ID 등)도
+        prim이 만들어진다 — 시작 시각 스냅숏 폴백은 t=start에 없는 objid를
+        누락시켜 '투명 충돌'을 만들었다(frag 실측). lake_repository와 동일 계약.
+        """
+        return sorted(self.get_object_time_ranges().keys())
+
     def get_object_time_ranges(self) -> Dict[str, Tuple[datetime.datetime, datetime.datetime]]:
         """objid별 (first_sample_t, last_sample_t) 반환. 최초 호출 시 계산·캐시.
 

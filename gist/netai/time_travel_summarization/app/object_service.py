@@ -104,6 +104,19 @@ def auto_generate_astronauts(core) -> Dict[str, str]:
     return prim_map
 
 
+def _prim_index_for(objid: str, fallback: int, used: set) -> int:
+    """prim 인덱스 = objid의 숫자 — 화면 라벨(prim 이름 끝 3자리)이 데이터 ID를
+    그대로 따라가게 한다. enumerate 순번을 쓰면 objid가 불연속일 때(예: obj001·
+    obj003만 존재) 라벨이 다른 ID로 어긋난다. 숫자가 아니거나 충돌하면 폴백."""
+    suffix = objid[3:] if objid.startswith("obj") else objid[-3:]
+    if suffix.isdigit() and int(suffix) not in used:
+        return int(suffix)
+    idx = fallback
+    while idx in used:
+        idx += 1
+    return idx
+
+
 def regenerate_astronauts_from_loaded_data(core) -> Dict[str, str]:
     if not core._config:
         carb.log_error("[TimeTravel] Config must be loaded before auto-generation")
@@ -128,8 +141,11 @@ def regenerate_astronauts_from_loaded_data(core) -> Dict[str, str]:
     core._stage_objects.clear_timetravel_objects()
 
     prim_map = {}
-    for i, objid in enumerate(objids, start=1):
-        prim_path = core.create_astronaut_prim(i)
+    used_indices: set = set()
+    for pos, objid in enumerate(sorted(objids), start=1):
+        idx = _prim_index_for(str(objid), fallback=pos, used=used_indices)
+        used_indices.add(idx)
+        prim_path = core.create_astronaut_prim(idx)
         if prim_path:
             prim_map[objid] = prim_path
         else:
