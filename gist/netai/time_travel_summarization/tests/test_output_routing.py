@@ -95,8 +95,8 @@ def test_lake_source_switch_regenerates_astronauts_even_when_auto_generate_is_of
             self.created.append((index, astronaut_usd))
             return f"/World/TimeTravel_Objects/Astronaut{index:03d}"
 
-        def update_stage_objects(self, prim_map, data):
-            self.updated = (dict(prim_map), dict(data))
+        def update_stage_objects(self, prim_map, data, visibility=None):
+            self.updated = (dict(prim_map), dict(data), visibility)
 
         def hide_all_cameras(self):
             pass

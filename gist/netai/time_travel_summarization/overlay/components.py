@@ -59,12 +59,20 @@ class ObjectIdManipulator(sc.Manipulator):
                     alignment=ui.Alignment.CENTER,
                 )
 
+        self._set_transform_visible(self._prim_visible())
         self._last_position = tuple(translation)
 
     def update_position(self):
         if (not self._prim or not self._prim.IsValid()) and not self.rebind_current_prim():
             return
         if not self._transform:
+            return
+
+        # prim이 숨겨졌으면(트랙 시작 전/종료 후) 라벨도 함께 숨긴다 — 안 그러면
+        # 지워진 죽은 트랙 위에 ID 라벨만 떠 가짜 충돌로 오인된다.
+        visible = self._prim_visible()
+        self._set_transform_visible(visible)
+        if not visible:
             return
 
         translation = self._get_world_translation()
@@ -82,6 +90,22 @@ class ObjectIdManipulator(sc.Manipulator):
     def _get_world_translation(self):
         xform_cache = UsdGeom.XformCache()
         return xform_cache.GetLocalToWorldTransform(self._prim).ExtractTranslation()
+
+    def _prim_visible(self) -> bool:
+        if not self._prim or not self._prim.IsValid():
+            return False
+        try:
+            return UsdGeom.Imageable(self._prim).ComputeVisibility() != UsdGeom.Tokens.invisible
+        except Exception:
+            return True
+
+    def _set_transform_visible(self, visible: bool):
+        if not self._transform:
+            return
+        try:
+            self._transform.visible = visible
+        except Exception:
+            pass
 
 
 class PrimLabelRegistry:

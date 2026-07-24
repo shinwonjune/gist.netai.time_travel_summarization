@@ -40,7 +40,8 @@ docs/
 ./docs/
 video/
 ultraplan/
-
+replay_fidelity/
+artifacts/
 # --- Antigravity CLI & Agents tooling --------------------------------------
 .antigravitycli/
 .agents/

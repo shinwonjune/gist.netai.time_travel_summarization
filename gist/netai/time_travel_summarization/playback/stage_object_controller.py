@@ -50,17 +50,38 @@ class StageObjectController:
         xformable.SetXformOpOrder([translate_op, rotate_op, scale_op])
         camera_prim.GetVisibilityAttr().Set("invisible")
 
-    def update_stage_objects(self, prim_map: Dict[str, str], data: Dict[str, Tuple[float, float, float]]):
+    def update_stage_objects(
+        self,
+        prim_map: Dict[str, str],
+        data: Dict[str, Tuple[float, float, float]],
+        visibility: Optional[Dict[str, bool]] = None,
+    ):
+        """prim 위치를 data로 갱신하고, visibility가 주어지면 objid별 보임/숨김을 토글한다.
+
+        visibility[objid]=False면 그 prim을 USD invisible로 숨긴다(삭제가 아니라 토글이라
+        시간 스크럽 왕복 시 다시 보임). 트랙 시작 전/종료 후 객체를 화면에서 지워
+        죽은 트랙 잔상이 가짜 충돌로 읽히는 것을 막는다. data에 없는 objid는 위치를
+        건드리지 않아(기존 hold 동작) 트랙 내부 결손 구간은 마지막 좌표를 유지한다.
+        """
         stage = self.get_stage()
-        if not stage or not data:
+        if not stage:
             return
 
         for objid, prim_path in prim_map.items():
-            if objid not in data:
-                continue
-
             prim = stage.GetPrimAtPath(prim_path)
             if not prim or not prim.IsValid():
+                continue
+
+            if visibility is not None:
+                is_visible = visibility.get(objid)
+                if is_visible is not None:
+                    imageable = UsdGeom.Imageable(prim)
+                    if is_visible:
+                        imageable.MakeVisible()
+                    else:
+                        imageable.MakeInvisible()
+
+            if not data or objid not in data:
                 continue
 
             xformable = UsdGeom.Xformable(prim)
@@ -86,6 +107,10 @@ class StageObjectController:
         for objid, prim_path in prim_map.items():
             prim = stage.GetPrimAtPath(prim_path)
             if not prim or not prim.IsValid():
+                continue
+            # 숨긴 객체(트랙 시작 전/종료 후)는 오버레이 라벨에서도 빼야, 재연기가 지운
+            # 죽은 트랙에 라벨만 남아 VLM이 가짜 충돌로 읽는 일을 막는다.
+            if UsdGeom.Imageable(prim).ComputeVisibility() == UsdGeom.Tokens.invisible:
                 continue
             try:
                 translation = xform_cache.GetLocalToWorldTransform(prim).ExtractTranslation()

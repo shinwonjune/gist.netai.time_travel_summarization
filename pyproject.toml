@@ -28,6 +28,7 @@ files = [
     "gist/netai/time_travel_summarization/video_capture/types.py",
     "gist/netai/time_travel_summarization/video_capture/frame_queue.py",
     "gist/netai/time_travel_summarization/timefmt.py",
+    "gist/netai/time_travel_summarization/playback/visibility.py",
     "gist/netai/time_travel_summarization/events/event_index.py",
     "gist/netai/time_travel_summarization/app/data_service.py",
     "gist/netai/time_travel_summarization/app/object_service.py",

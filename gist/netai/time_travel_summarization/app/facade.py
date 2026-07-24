@@ -18,6 +18,7 @@ from ..events.summary_service import EventSummaryService
 from ..playback.controller import PlaybackController
 from ..playback.stage_object_controller import StageObjectController
 from ..playback.trajectory_repository import TrajectoryRepository
+from ..playback.visibility import DEFAULT_VISIBILITY_TOL_S, compute_object_visibility
 
 DEFAULT_ASTRONAUT_USD = object_service.DEFAULT_ASTRONAUT_USD
 
@@ -168,7 +169,22 @@ class TimeTravelCore:
         current_time = self._playback.get_current_time()
         if not current_time:
             return
-        self._stage_objects.update_stage_objects(self._prim_map, self.get_data_at_time(current_time))
+        self._stage_objects.update_stage_objects(
+            self._prim_map,
+            self.get_data_at_time(current_time),
+            self._object_visibility_at(current_time),
+        )
+
+    def _object_visibility_at(self, current_time: datetime.datetime) -> Optional[Dict[str, bool]]:
+        """current_time에서 objid별 보임/숨김. 트랙 범위 정보가 없으면(physics/합성
+        객체 등) None — 이 경우 visibility 토글 없이 위치만 갱신한다."""
+        ranges_fn = getattr(self._repository, "get_object_time_ranges", None)
+        if not callable(ranges_fn):
+            return None
+        ranges = ranges_fn()
+        if not ranges:
+            return None
+        return compute_object_visibility(current_time, ranges, DEFAULT_VISIBILITY_TOL_S)
 
     def set_to_earliest_time(self):
         if self._repository.data_start_time:

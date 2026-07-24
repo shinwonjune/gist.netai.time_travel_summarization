@@ -18,6 +18,9 @@ class TrajectoryRepository:
         self._timestamps: List[str] = []
         self._data_start_time: Optional[datetime.datetime] = None
         self._data_end_time: Optional[datetime.datetime] = None
+        # objid별 (first_sample_t, last_sample_t) — load 시 1회 계산·캐시. 재생기가
+        # 트랙 시작 전/종료 후 객체를 숨겨 죽은 트랙 잔상(가짜 충돌)을 막는 근거.
+        self._object_ranges: Dict[str, Tuple[datetime.datetime, datetime.datetime]] = {}
         # lookup mode
         self._lookup_mode: str = "linear"
         self._hybrid = LkvForwardBisectHybrid()
@@ -93,6 +96,29 @@ class TrajectoryRepository:
 
     def get_lookup_mode(self) -> str:
         return self._lookup_mode
+
+    def get_object_time_ranges(self) -> Dict[str, Tuple[datetime.datetime, datetime.datetime]]:
+        """objid별 (first_sample_t, last_sample_t) 반환. 최초 호출 시 계산·캐시.
+
+        _data를 직접 세팅하는 경로(테스트)와 load_from_uri 양쪽을 지원하도록 지연 계산.
+        clear()가 캐시를 비우므로 재로드 시 자동 갱신된다.
+        """
+        if not self._object_ranges and self._timestamps:
+            self._object_ranges = self._compute_object_ranges()
+        return self._object_ranges
+
+    def _compute_object_ranges(self) -> Dict[str, Tuple[datetime.datetime, datetime.datetime]]:
+        # _timestamps는 오름차순 정렬 보장 → 첫 등장=first, 이후 갱신=last.
+        acc: Dict[str, List[datetime.datetime]] = {}
+        for ts_str in self._timestamps:
+            dt = self.parse_timestamp(ts_str)
+            for objid in self._data.get(ts_str, {}):
+                span = acc.get(objid)
+                if span is None:
+                    acc[objid] = [dt, dt]
+                else:
+                    span[1] = dt
+        return {objid: (span[0], span[1]) for objid, span in acc.items()}
 
     def get_data_at_time(self, timestamp: datetime.datetime) -> Dict[str, Tuple[float, float, float]]:
         if self._bench_active:
