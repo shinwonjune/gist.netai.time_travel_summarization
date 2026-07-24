@@ -45,10 +45,13 @@ CONDITIONS: List[dict] = [
     {"name": "occ-hold", "kind": "occlusion", "policy": "hold", "dur_s": 3.0},
     {"name": "occ-linear", "kind": "occlusion", "policy": "linear", "dur_s": 3.0},
     {"name": "occ-extrap", "kind": "occlusion", "policy": "extrap", "dur_s": 3.0},
-    {"name": "ds10", "kind": "downsample", "hz": 10},
-    {"name": "ds5", "kind": "downsample", "hz": 5},
-    {"name": "ds2", "kind": "downsample", "hz": 2},
-    {"name": "ds1", "kind": "downsample", "hz": 1},
+    # dsr* = 시간 기반 다운샘플의 '실측' Hz (소스 60Hz 무관). 이전 ds*는 60Hz를
+    # 30Hz로 오인해 실측 주기가 라벨의 2배였음 → 구분되는 새 이름으로 재생성.
+    {"name": "dsr20", "kind": "downsample", "hz": 20},
+    {"name": "dsr10", "kind": "downsample", "hz": 10},
+    {"name": "dsr5", "kind": "downsample", "hz": 5},
+    {"name": "dsr2", "kind": "downsample", "hz": 2},
+    {"name": "dsr1", "kind": "downsample", "hz": 1},
 ]
 
 
@@ -67,29 +70,44 @@ def abs_dt(cap_start: datetime.datetime, sec_of_day: int) -> datetime.datetime:
         + datetime.timedelta(seconds=sec_of_day)
 
 
-def apply_remap(gt: Dict[int, Set[int]], remap: Optional[dict]) -> Dict[int, Set[int]]:
-    """교란을 GT 라벨에도 적용한 '화면 기준 정답' 생성. remap 없으면 그대로."""
+def apply_remap(gt: Dict[int, Set[int]], remap) -> Dict[int, Set[int]]:
+    """교란을 GT 라벨에도 적용한 '화면 기준 정답' 생성. remap 없으면 그대로.
+
+    remap은 단일 op(dict) 또는 op 리스트 — 전 이벤트 교란(frag 다중 rename)이
+    여러 op을 순서대로 적용하기 위함. 각 op: swap(pair) 또는 rename(from,to),
+    after_s 이후 시각에만 적용.
+    """
     if not remap:
         return gt
+    ops = remap if isinstance(remap, list) else [remap]
     out: Dict[int, Set[int]] = {}
     for t, ids in gt.items():
         ids = set(ids)
-        if t >= remap["after_s"]:
-            if remap["type"] == "swap":
-                a, b = remap["pair"]
-                ids = {b if i == a else a if i == b else i for i in ids}
-            elif remap["type"] == "rename":
-                ids = {remap["to"] if i == remap["from"] else i for i in ids}
+        for op in ops:
+            if t >= op["after_s"]:
+                if op["type"] == "swap":
+                    a, b = op["pair"]
+                    ids = {b if i == a else a if i == b else i for i in ids}
+                elif op["type"] == "rename":
+                    ids = {op["to"] if i == op["from"] else i for i in ids}
         out[t] = ids
     return out
 
 
-def plan_perturbation(cond: dict, pair: dict,
-                      label_to_objid: Dict[int, str]) -> Tuple[dict, Optional[dict]]:
-    """조건 x 에피소드 -> 구체 파라미터(시각·대상 확정)와 GT remap 스펙.
+def _sec(t: datetime.datetime) -> int:
+    return t.hour * 3600 + t.minute * 60 + t.second
 
-    이벤트가 있는 에피소드는 첫 GT 이벤트를 표적으로(귀속·검출 하락 측정),
-    없는 에피소드는 중앙부 기본값으로(가짜 충돌 유발 여부 = FP 프로브).
+
+def plan_perturbation(cond: dict, pair: dict,
+                      label_to_objid: Dict[int, str]) -> Tuple[dict, object]:
+    """조건 x 에피소드 -> 실행 계획(plan)과 GT remap.
+
+    - gaussian/downsample: 전역 교란(모든 행) — 표적 개념 없음.
+    - switch: 첫 이벤트 3s 전 1회 영구 스왑(당사자x비당사자) — 이후 전 이벤트 파급.
+    - occ/frag: **모든 GT 이벤트**를 표적으로(전 이벤트 교란) — 에피소드당 이벤트
+      수만큼 교란해 표본을 늘린다. occ은 이벤트마다 참가자 1명을 그 이벤트 구간
+      가림, frag는 충돌 참가 객체별로 첫 충돌 전 1회 fragment(새 ID 영구).
+    plan은 사이드카에 그대로 저장(계보). remap은 op 리스트(화면GT 생성).
     """
     cap = datetime.datetime.fromisoformat(pair["capture_start"])
     dur = float(pair["duration_s"])
@@ -97,23 +115,9 @@ def plan_perturbation(cond: dict, pair: dict,
     kind = cond["kind"]
 
     if kind == "gaussian":
-        return {"sigma": cond["sigma"]}, None
+        return {"kind": "gaussian", "sigma": cond["sigma"]}, None
     if kind == "downsample":
-        return {"keep_every": 30 // int(cond["hz"])}, None
-
-    if events:
-        ev_t, ev_ids = events[0]
-        ev_dt = abs_dt(cap, ev_t)
-        target = ev_ids[0]
-        # 스왑 상대는 반드시 "비당사자": 당사자끼리 스왑하면 쌍이 집합이라
-        # {a,b}->{b,a}로 원GT 기준에서도 안 틀려 교란이 무효가 된다.
-        outsider = next((lbl for lbl in sorted(label_to_objid)
-                         if lbl not in ev_ids), None)
-        pair_labels = [target, outsider] if outsider is not None else ev_ids[:2]
-    else:
-        ev_dt = cap + datetime.timedelta(seconds=dur / 2)
-        target = sorted(label_to_objid)[0]
-        pair_labels = sorted(label_to_objid)[:2]
+        return {"kind": "downsample", "hz": cond["hz"]}, None
 
     def clamp(t: datetime.datetime) -> datetime.datetime:
         lo = cap + datetime.timedelta(seconds=1)
@@ -121,50 +125,74 @@ def plan_perturbation(cond: dict, pair: dict,
         return max(lo, min(t, hi))
 
     if kind == "switch":
+        # 표적 = 첫 이벤트. 스왑 상대는 비당사자(당사자끼리는 집합이라 {a,b}->{b,a} 무효).
+        ev_dt = abs_dt(cap, events[0][0]) if events \
+            else cap + datetime.timedelta(seconds=dur / 2)
+        ev_ids = events[0][1] if events else sorted(label_to_objid)[:1]
+        target = ev_ids[0]
+        outsider = next((lbl for lbl in sorted(label_to_objid) if lbl not in ev_ids),
+                        sorted(label_to_objid)[-1])
         t_s = clamp(ev_dt - datetime.timedelta(seconds=3))
-        a, b = pair_labels
-        remap = {"type": "swap", "after_s": _sec(t_s), "pair": [a, b]}
-        return {"t_s": t_s.isoformat(), "a": label_to_objid[a],
-                "b": label_to_objid[b]}, remap
-    if kind == "frag":
-        t0 = clamp(ev_dt - datetime.timedelta(seconds=4))
-        t1 = clamp(ev_dt - datetime.timedelta(seconds=2))
-        new_label = max(label_to_objid) + 1
-        remap = {"type": "rename", "after_s": _sec(t1),
-                 "from": target, "to": new_label}
-        return {"t0": t0.isoformat(), "t1": t1.isoformat(),
-                "obj": label_to_objid[target], "new_id": f"obj{new_label:03d}"}, remap
+        remap = [{"type": "swap", "after_s": _sec(t_s), "pair": [target, outsider]}]
+        return {"kind": "switch", "t_s": t_s.isoformat(),
+                "a": label_to_objid[target], "b": label_to_objid[outsider]}, remap
+
     if kind == "occlusion":
         half = datetime.timedelta(seconds=cond["dur_s"] / 2)
-        t0, t1 = clamp(ev_dt - half), clamp(ev_dt + half)
-        return {"t0": t0.isoformat(), "t1": t1.isoformat(),
-                "obj": label_to_objid[target], "policy": cond["policy"]}, None
+        targets = events or [(int((_sec(cap) + dur / 2)), sorted(label_to_objid)[:1])]
+        ops = []
+        for ev_t, ev_ids in targets:
+            ev_dt = abs_dt(cap, ev_t)
+            t0, t1 = clamp(ev_dt - half), clamp(ev_dt + half)
+            if t1 > t0:
+                ops.append({"obj": label_to_objid[ev_ids[0]], "t0": t0.isoformat(),
+                            "t1": t1.isoformat(), "policy": cond["policy"]})
+        return {"kind": "occlusion", "ops": ops}, None
+
+    if kind == "frag":
+        # 충돌 참가 객체별로 1회 fragment — 그 객체의 첫 충돌 [−4s,−2s) 가림 후 새 ID.
+        # 각 원본 라벨은 최대 1회 개명(1:1 remap) → ID 부기 단순. 이후 그 객체의
+        # 모든 충돌이 화면GT에서 새 라벨로 이어진다.
+        first_ev: Dict[int, int] = {}
+        for ev_t, ev_ids in events:
+            for lb in ev_ids:
+                first_ev.setdefault(lb, ev_t)
+        ops, remap = [], []
+        next_label = max(label_to_objid) + 1
+        for lb in sorted(first_ev):
+            ev_dt = abs_dt(cap, first_ev[lb])
+            t0 = clamp(ev_dt - datetime.timedelta(seconds=4))
+            t1 = clamp(ev_dt - datetime.timedelta(seconds=2))
+            if t1 <= t0:
+                continue  # 창이 데이터 시작에 눌려 무효 → 이 객체는 건너뜀
+            ops.append({"obj": label_to_objid[lb], "t0": t0.isoformat(),
+                        "t1": t1.isoformat(), "new_id": f"obj{next_label:03d}"})
+            remap.append({"type": "rename", "after_s": _sec(t1),
+                          "from": lb, "to": next_label})
+            next_label += 1
+        return {"kind": "frag", "ops": ops}, remap
     raise ValueError(f"unknown kind {kind}")
 
 
-def _sec(t: datetime.datetime) -> int:
-    return t.hour * 3600 + t.minute * 60 + t.second
+def perturb_rows(plan: dict, rows: List[dict], seed: int) -> List[dict]:
+    def _dt(s: str) -> datetime.datetime:
+        return datetime.datetime.fromisoformat(s)
 
-
-def perturb_rows(cond: dict, params: dict, rows: List[dict], seed: int) -> List[dict]:
-    kind = cond["kind"]
+    kind = plan["kind"]
     if kind == "gaussian":
-        return gaussian(rows, params["sigma"], seed)
+        return gaussian(rows, plan["sigma"], seed)
     if kind == "downsample":
-        return downsample(rows, params["keep_every"])
+        return downsample(rows, plan["hz"])
     if kind == "switch":
-        return id_switch(rows, datetime.datetime.fromisoformat(params["t_s"]),
-                         params["a"], params["b"])
-    if kind == "frag":
-        return fragmentation(rows, params["obj"],
-                             datetime.datetime.fromisoformat(params["t0"]),
-                             datetime.datetime.fromisoformat(params["t1"]),
-                             params["new_id"])
+        return id_switch(rows, _dt(plan["t_s"]), plan["a"], plan["b"])
     if kind == "occlusion":
-        return occlusion(rows, params["obj"],
-                         datetime.datetime.fromisoformat(params["t0"]),
-                         datetime.datetime.fromisoformat(params["t1"]),
-                         params["policy"])
+        for op in plan["ops"]:
+            rows = occlusion(rows, op["obj"], _dt(op["t0"]), _dt(op["t1"]), op["policy"])
+        return rows
+    if kind == "frag":
+        for op in plan["ops"]:
+            rows = fragmentation(rows, op["obj"], _dt(op["t0"]), _dt(op["t1"]), op["new_id"])
+        return rows
     raise ValueError(kind)
 
 
@@ -223,11 +251,11 @@ def phase_perturb(cond: dict, pairs: List[dict], fid_out: Path, out: Path) -> No
             continue
         rows = load_trace((fid_out / "episodes" / p["run"] / p["ep"] / p["trace"])
                           .read_text(encoding="utf-8"))
-        params, remap = plan_perturbation(cond, p, p["label_to_objid"])
+        plan, remap = plan_perturbation(cond, p, p["label_to_objid"])
         seed = stable_seed(cond["name"], p["pair_id"])
-        out_rows = perturb_rows(cond, params, rows, seed)
+        out_rows = perturb_rows(plan, rows, seed)
         (tdir / f"{p['pair_id']}.meta.json").write_text(json.dumps(
-            {"condition": cond, "params": params, "gt_remap": remap, "seed": seed,
+            {"condition": cond, "plan": plan, "gt_remap": remap, "seed": seed,
              "rows_in": len(rows), "rows_out": len(out_rows)},
             indent=1, ensure_ascii=False), encoding="utf-8")
         csv_path.write_text(dump_trace(out_rows), encoding="utf-8")
@@ -250,8 +278,9 @@ def phase_replay(cond: dict, pairs: List[dict], args, out: Path) -> Dict[str, st
     jobs: Dict[str, str] = {}
     todo = []
     fmt = "%Y-%m-%d %H:%M:%S"
+    tag = getattr(args, "run_tag", "ptb")
     for p in pairs:
-        jid, state = resolve_job(f"ptb-{cond['name']}-{p['pair_id']}")
+        jid, state = resolve_job(f"{tag}-{cond['name']}-{p['pair_id']}")
         jobs[p["pair_id"]] = jid
         if (out / "replays" / jid).is_dir() or state == "done":
             continue
@@ -481,6 +510,8 @@ def main() -> None:
     ap.add_argument("--conditions", nargs="*", default=[c["name"] for c in CONDITIONS],
                     help="돌릴 조건 이름 부분집합")
     ap.add_argument("--gpu", type=int, default=1)
+    ap.add_argument("--run-tag", default="ptb",
+                    help="잡 ID 접두 — 서버의 옛 동명 잡(다른 의미론) 재사용을 피하려 새 태그 지정")
     ap.add_argument("--ssh-host", default=DEFAULT_SSH_HOST)
     ap.add_argument("--remote-ext-root", default=DEFAULT_REMOTE_EXT)
     ap.add_argument("--analyze-fp", action="store_true",
@@ -521,30 +552,32 @@ def main() -> None:
 
 def _self_test() -> None:
     cap = "2026-07-22T17:06:35"
+    # 두 이벤트(17:06:50={1,3}, 17:06:56={3,4})로 전 이벤트 교란을 검증
     pair = {"pair_id": "x-ep-0000", "capture_start": cap, "duration_s": 30.0,
-            "gt_events": {"61610": [1, 3]}}        # 17:06:50 = 61610s
+            "gt_events": {"61610": [1, 3], "61616": [3, 4]}}
     l2o = {1: "obj001", 2: "obj002", 3: "obj003", 4: "obj004"}
-    # switch: 이벤트 3s 전, "당사자 1 x 비당사자 2" 스왑 — 당사자끼리는 집합
-    # 불변({1,3}->{3,1})이라 금지. 화면 GT는 {1,3}->{2,3}으로 실제로 틀려진다.
-    params, remap = plan_perturbation({"name": "switch", "kind": "switch"}, pair, l2o)
-    assert params["a"] == "obj001" and params["b"] == "obj002"
-    assert remap == {"type": "swap", "after_s": 61607, "pair": [1, 2]}
+    # switch: 첫 이벤트 3s 전, "당사자 1 x 비당사자 2" 스왑(remap은 op 리스트)
+    plan, remap = plan_perturbation({"name": "switch", "kind": "switch"}, pair, l2o)
+    assert plan["a"] == "obj001" and plan["b"] == "obj002"
+    assert remap == [{"type": "swap", "after_s": 61607, "pair": [1, 2]}]
     assert apply_remap({61610: {1, 3}}, remap) == {61610: {2, 3}}
     assert apply_remap({61600: {1, 3}}, remap) == {61600: {1, 3}}   # 스위칭 전 불변
-    # frag: 새 라벨 5, [ev-4, ev-2) 가림
-    params, remap = plan_perturbation({"name": "frag", "kind": "frag"}, pair, l2o)
-    assert params["new_id"] == "obj005" and remap["to"] == 5
-    assert apply_remap({61610: {1, 3}}, remap) == {61610: {5, 3}}
-    # 이벤트 없는 에피소드: 중앙부 기본값
-    empty = {**pair, "gt_events": {}}
-    params, remap = plan_perturbation(
+    # frag 전 이벤트: 충돌 참가 객체(1,3,4) 각각 새 ID로 개명 → 다중 rename remap
+    plan, remap = plan_perturbation({"name": "frag", "kind": "frag"}, pair, l2o)
+    froms = {op["from"]: op["to"] for op in remap}
+    assert set(froms) == {1, 3, 4} and set(froms.values()) == {5, 6, 7}
+    # 첫 충돌 시각 {1,3} 모두 개명, 라벨 2는 충돌 없어 불변
+    remapped = apply_remap({61610: {1, 3}, 61616: {3, 4}}, remap)
+    assert 1 not in remapped[61610] and 3 not in remapped[61610]   # 둘 다 새 ID로
+    # occ 전 이벤트: 이벤트 수만큼 op(2개), remap 없음
+    plan, remap = plan_perturbation(
         {"name": "occ-hold", "kind": "occlusion", "policy": "hold", "dur_s": 3.0},
-        empty, l2o)
-    assert params["obj"] == "obj001" and remap is None
-    # downsample 파라미터
-    params, _ = plan_perturbation({"name": "ds5", "kind": "downsample", "hz": 5},
-                                  pair, l2o)
-    assert params["keep_every"] == 6
+        pair, l2o)
+    assert plan["kind"] == "occlusion" and len(plan["ops"]) == 2 and remap is None
+    # downsample: hz 그대로 전달
+    plan, _ = plan_perturbation({"name": "dsr5", "kind": "downsample", "hz": 5},
+                                pair, l2o)
+    assert plan["hz"] == 5
     # 시드 결정성
     assert stable_seed("a", "b") == stable_seed("a", "b") != stable_seed("a", "c")
 

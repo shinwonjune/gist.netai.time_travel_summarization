@@ -131,14 +131,23 @@ def occlusion(rows: List[Row], obj: str, t0: datetime.datetime,
     return sorted(kept + fills, key=lambda r: (r["t"], r["objid"]))
 
 
-def downsample(rows: List[Row], keep_every: int) -> List[Row]:
-    """객체별 샘플 시퀀스에서 keep_every개마다 1개 유지 (30Hz//k Hz). 시각 무조작."""
-    counters: Dict[str, int] = {}
+def downsample(rows: List[Row], hz: float) -> List[Row]:
+    """시간 기반 다운샘플 — 객체별로 직전 채택 후 1/hz초 경과 시 다음 샘플 채택.
+
+    소스 기록 주기(실측 60Hz)와 무관하게 정확히 목표 Hz를 낸다. 이전의
+    'keep_every개마다' 방식은 소스 주기 가정(30Hz)이 틀리면(실측 60Hz) 산출
+    주기가 2배로 어긋났다(일지 #24). 시각은 조작하지 않는다.
+    """
+    interval = 1.0 / float(hz)
+    last: Dict[str, datetime.datetime] = {}
     out = []
-    for r in sorted(rows, key=lambda r: (r["objid"], r["t"])):
-        i = counters.get(str(r["objid"]), 0)
-        counters[str(r["objid"])] = i + 1
-        if i % keep_every == 0:
+    for r in sorted(rows, key=lambda r: (str(r["objid"]), r["t"])):
+        oid = str(r["objid"])
+        prev = last.get(oid)
+        t = r["t"]
+        assert isinstance(t, datetime.datetime)
+        if prev is None or (t - prev).total_seconds() >= interval - 1e-9:
+            last[oid] = t
             out.append(r)
     return sorted(out, key=lambda r: (r["t"], r["objid"]))
 
@@ -210,10 +219,17 @@ def _self_test() -> None:
     except ValueError:
         pass
 
-    # downsample: 30->10Hz 상당(3개 중 1개), 객체별 독립
-    ds = downsample(rows, 3)
-    assert sum(str(r["objid"]) == "obj001" for r in ds) == 4      # 0,3,6,9
-    assert sum(str(r["objid"]) == "obj002" for r in ds) == 4
+    # downsample 시간 기반: 소스 10Hz(0.1s 간격) → 5Hz(0.2s)면 0/0.2/0.4/0.6/0.8 = 5개
+    ds5 = downsample(rows, 5)
+    assert sum(str(r["objid"]) == "obj001" for r in ds5) == 5
+    assert sum(str(r["objid"]) == "obj002" for r in ds5) == 5
+    # 2Hz(0.5s)면 0/0.5 = 2개. 소스 주기가 바뀌어도(120Hz) 같은 결과여야 한다
+    dense = [mk(i * 0.05, "obj001", 0.0) for i in range(20)]   # 20Hz 소스
+    assert sum(1 for _ in downsample(dense, 2)) == 2           # 0/0.5s = 2개 (주기 무관)
+    # 30->10Hz 상당(3개 중 1개), 객체별 독립
+    ds = downsample(rows, 100)  # 10Hz 소스에 100Hz 요청 → 전부 유지(10개)
+    assert sum(str(r["objid"]) == "obj001" for r in ds) == 10
+    assert sum(str(r["objid"]) == "obj002" for r in ds) == 10
     print("perturb self-test OK")
 
 
