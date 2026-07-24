@@ -19,7 +19,9 @@ jobs:
           python-version: "3.12"
 
       - name: Install tools
-        run: pip install ruff mypy pytest minio
+        # 버전 고정 — 미고정 설치는 새 ruff/mypy 릴리스가 코드 변경 없이 CI를
+        # 깨뜨린다(실측: ruff가 기본 룰셋 확장). select 고정(pyproject)과 이중 방어.
+        run: pip install "ruff==0.16.0" "mypy==2.3.0" pytest minio
 
       - name: Lint (ruff)
         run: ruff check gist/
