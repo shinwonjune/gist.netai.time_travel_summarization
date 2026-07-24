@@ -210,6 +210,7 @@ def load_pairs(fid_out: Path) -> List[dict]:
         meta = json.loads(metas[0].read_text(encoding="utf-8"))
         p["label_to_objid"] = {int(v): k for k, v in
                                (meta.get("objid_to_label") or {}).items()}
+        p["collision_distance"] = float(meta.get("collision_distance", 72.0))
     return pairs
 
 
@@ -353,6 +354,124 @@ def phase_report(pairs: List[dict], fid_out: Path, out: Path,
 
 
 # --------------------------------------------------------------------------- #
+# FP 원인 분류 — 유령 경로/노이즈 근접이 FP를 만들었는지 좌표로 판정
+# --------------------------------------------------------------------------- #
+def positions_by_label(rows: List[dict]) -> Dict[int, List[Tuple[float, float, float, float]]]:
+    """trace rows -> {라벨: [(초, x, y, z)] 시각순}. 라벨 = objid 끝 3자리."""
+    by: Dict[int, List[Tuple[float, float, float, float]]] = {}
+    for r in rows:
+        t = r["t"]
+        sec = t.hour * 3600 + t.minute * 60 + t.second + t.microsecond / 1e6
+        by.setdefault(int(str(r["objid"])[-3:]), []).append(
+            (sec, float(r["x"]), float(r["y"]), float(r["z"])))
+    for samples in by.values():
+        samples.sort()
+    return by
+
+
+def _pos_at(samples: List[Tuple[float, float, float, float]],
+            s: float) -> Optional[Tuple[float, float, float]]:
+    """시각 s의 '화면상' 위치 — 재연기와 동일한 hold 의미론.
+
+    s 이전 마지막 샘플 위치(없으면 첫 샘플)를 쓴다. 샘플이 끝난 뒤에도 마지막
+    위치를 유지한다 — 렌더러가 죽은 트랙(frag의 정지 분신)과 결손 구간을
+    마지막 좌표로 계속 그리기 때문에, 화면 기준 근접 판정도 같은 규칙이어야
+    분신 유발 FP를 '환각'으로 오분류하지 않는다.
+    """
+    import bisect
+    if not samples:
+        return None
+    times = [t for t, _x, _y, _z in samples]
+    i = bisect.bisect_right(times, s) - 1
+    return samples[max(i, 0)][1:]
+
+
+def min_pair_distance(by: Dict[int, List], s_lo: float, s_hi: float,
+                      labels: Optional[List[int]] = None,
+                      step: float = 0.1) -> Optional[Tuple[float, Tuple[int, int]]]:
+    """[s_lo,s_hi] 창에서 (지정 라벨들 간) 최소 쌍 거리. 표본 없으면 None."""
+    cand = sorted(labels) if labels else sorted(by)
+    best: Optional[Tuple[float, Tuple[int, int]]] = None
+    s = s_lo
+    while s <= s_hi + 1e-9:
+        pos = {lb: _pos_at(by[lb], s) for lb in cand if lb in by}
+        ok = [(lb, p) for lb, p in pos.items() if p is not None]
+        for i in range(len(ok)):
+            for j in range(i + 1, len(ok)):
+                (la, pa), (lb2, pb) = ok[i], ok[j]
+                d = ((pa[0] - pb[0]) ** 2 + (pa[1] - pb[1]) ** 2
+                     + (pa[2] - pb[2]) ** 2) ** 0.5
+                if best is None or d < best[0]:
+                    best = (d, (la, lb2))
+        s += step
+    return best
+
+
+def classify_fp(fp_ids: Set[int], fp_sec: int, by: Dict[int, List],
+                thr: float) -> dict:
+    """FP 한 건의 원인 분류.
+
+    contact     주장된 ID들끼리 창(±1s+해당 초) 안에서 판정 거리 이내 접근
+                — "화면상 닿아 보였다"(데이터 유래 FP)
+    near        1.5x 거리 이내 접근 — 시각적으로 겹쳐 보였을 개연성
+    none        주장 쌍은 멀리 있었음 — 모델 자체 환각
+    phantom-id  주장 라벨이 데이터에 아예 없음(존재하지 않는 객체) — 환각
+    """
+    missing = [i for i in fp_ids if i not in by]
+    if missing:
+        return {"verdict": "phantom-id", "missing": missing}
+    got = min_pair_distance(by, fp_sec - 1, fp_sec + 2, sorted(fp_ids)) \
+        if len(fp_ids) >= 2 else None
+    if got is None:
+        return {"verdict": "none", "min_dist": None}
+    d, pair = got
+    verdict = "contact" if d <= thr else "near" if d <= 1.5 * thr else "none"
+    return {"verdict": verdict, "min_dist": round(d, 1), "pair": list(pair)}
+
+
+def analyze_fp(pairs: List[dict], fid_out: Path, out: Path,
+               cond_names: List[str]) -> None:
+    """조건별(+clean 베이스라인) FP를 좌표 근접으로 원인 분류 -> fp_report.md."""
+    def trace_path(cond: Optional[str], p: dict) -> Path:
+        if cond is None:                                  # 베이스라인 = 원본 trace
+            return fid_out / "episodes" / p["run"] / p["ep"] / p["trace"]
+        return out / "traces" / cond / f"{p['pair_id']}.csv"
+
+    def pred_path(cond: Optional[str], p: dict) -> Path:
+        if cond is None:
+            return fid_out / "infer" / f"{p['pair_id']}_replay.json"
+        return out / "infer" / f"{cond}_{p['pair_id']}.json"
+
+    rows_out: List[str] = ["# FP cause analysis - coordinate proximity",
+                           "", "| condition | FP | contact | near | none | phantom-id |",
+                           "|---|---|---|---|---|---|"]
+    detail: Dict[str, list] = {}
+    for cond in [None] + list(cond_names):
+        name = cond or "baseline(clean)"
+        counts = {"contact": 0, "near": 0, "none": 0, "phantom-id": 0}
+        items = []
+        for p in pairs:
+            by = positions_by_label(load_trace(
+                trace_path(cond, p).read_text(encoding="utf-8")))
+            gt = {int(t): set(ids) for t, ids in p["gt_events"].items()}
+            pred = parse_pred_events(json.loads(
+                pred_path(cond, p).read_text(encoding="utf-8")))
+            for sec, ids in match_events(gt, pred, tol=1)["fp"]:
+                c = classify_fp(set(ids), sec, by, p["collision_distance"])
+                counts[c["verdict"]] += 1
+                items.append({"pair_id": p["pair_id"], "sec": sec,
+                              "ids": list(ids), **c})
+        total = sum(counts.values())
+        rows_out.append(f"| {name} | {total} | {counts['contact']} | "
+                        f"{counts['near']} | {counts['none']} | {counts['phantom-id']} |")
+        detail[name] = items
+    (out / "fp_analysis.json").write_text(
+        json.dumps(detail, indent=1, ensure_ascii=False), encoding="utf-8")
+    (out / "fp_report.md").write_text("\n".join(rows_out) + "\n", encoding="utf-8")
+    print("\n".join(rows_out))
+
+
+# --------------------------------------------------------------------------- #
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -364,6 +483,8 @@ def main() -> None:
     ap.add_argument("--gpu", type=int, default=1)
     ap.add_argument("--ssh-host", default=DEFAULT_SSH_HOST)
     ap.add_argument("--remote-ext-root", default=DEFAULT_REMOTE_EXT)
+    ap.add_argument("--analyze-fp", action="store_true",
+                    help="FP 원인 분류만 로컬 실행 (터널·렌더 불필요)")
     ap.add_argument("--self-test", action="store_true")
     args = ap.parse_args()
     if args.self_test:
@@ -374,6 +495,10 @@ def main() -> None:
     out = Path(args.out).resolve()
     out.mkdir(parents=True, exist_ok=True)
     pairs = load_pairs(fid_out)
+    if args.analyze_fp:
+        analyze_fp(pairs, fid_out, out,
+                   [c["name"] for c in CONDITIONS if c["name"] in set(args.conditions)])
+        return
     conds = [c for c in CONDITIONS if c["name"] in set(args.conditions)]
     n_jobs = len(conds) * len(pairs)
     print(f"[plan] {len(conds)} conditions x {len(pairs)} pairs = {n_jobs} replay jobs "
@@ -422,6 +547,37 @@ def _self_test() -> None:
     assert params["keep_every"] == 6
     # 시드 결정성
     assert stable_seed("a", "b") == stable_seed("a", "b") != stable_seed("a", "c")
+
+    # FP 원인 분류: 두 객체가 5초에 접근(거리 50), 나머지 시각은 원거리(300)
+    base = datetime.datetime(2026, 7, 22, 17, 0, 0)
+    rows = []
+    for i in range(0, 100):                      # 10초 x 10Hz
+        s = i / 10.0
+        x1 = 0.0
+        x2 = 300.0 - (250.0 if abs(s - 5.0) < 0.3 else 0.0)   # 5초 부근만 50까지 접근
+        rows.append({"t": base + datetime.timedelta(seconds=s), "objid": "obj001",
+                     "x": x1, "y": 90.0, "z": 0.0})
+        rows.append({"t": base + datetime.timedelta(seconds=s), "objid": "obj002",
+                     "x": x2, "y": 90.0, "z": 0.0})
+    by = positions_by_label(rows)
+    assert set(by) == {1, 2} and len(by[1]) == 100
+    got = min_pair_distance(by, 4.0 + 61200, 6.0 + 61200)     # 17:00:04~06 (초는 자정 기준)
+    assert got is not None and abs(got[0] - 50.0) < 1e-6 and got[1] == (1, 2)
+    # 접근 시각의 FP -> contact, 원거리 시각 -> none, 없는 라벨 -> phantom-id
+    assert classify_fp({1, 2}, 61205, by, thr=72.0)["verdict"] == "contact"
+    assert classify_fp({1, 2}, 61208, by, thr=72.0)["verdict"] == "none"
+    assert classify_fp({1, 6}, 61205, by, thr=72.0)["verdict"] == "phantom-id"
+    # near: thr를 40으로 낮추면 50은 1.5x(60) 이내
+    assert classify_fp({1, 2}, 61205, by, thr=40.0)["verdict"] == "near"
+    # 죽은 트랙 hold 의미론: obj001 샘플이 3초에 끝나도(분신) 마지막 위치에
+    # 남아 있는 것으로 본다 — 8초에 obj002가 그 자리를 지나가면 contact.
+    dead = [{"t": base + datetime.timedelta(seconds=i / 10.0), "objid": "obj001",
+             "x": 0.0, "y": 90.0, "z": 0.0} for i in range(0, 30)]         # 0~3s에서 사망
+    dead += [{"t": base + datetime.timedelta(seconds=i / 10.0), "objid": "obj002",
+              "x": 500.0 - (500.0 if abs(i / 10.0 - 8.0) < 0.3 else 0.0),
+              "y": 90.0, "z": 0.0} for i in range(0, 100)]
+    by2 = positions_by_label(dead)
+    assert classify_fp({1, 2}, 61208, by2, thr=72.0)["verdict"] == "contact"
     print("perturb_eval self-test OK")
 
 
