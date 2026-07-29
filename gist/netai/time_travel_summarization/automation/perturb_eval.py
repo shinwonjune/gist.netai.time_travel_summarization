@@ -263,21 +263,42 @@ def phase_perturb(cond: dict, pairs: List[dict], fid_out: Path, out: Path) -> No
 
 
 def phase_push(cond: dict, pairs: List[dict], args, out: Path) -> None:
-    marker = out / "traces" / cond["name"] / ".pushed"
-    if marker.exists():
-        return
+    """조건 trace 전량을 매번 push(tar 덮어씀 — 작은 CSV라 저렴).
+
+    이전엔 조건별 `.pushed` 마커로 스킵했는데, 나중에 pair가 추가되면(에피소드
+    증량) 마커 때문에 신규 trace가 영영 업로드 안 돼 렌더가 데이터 없이 전멸했다
+    (실측: 증량 15에피소드 전부 스킵). 멱등 재업로드가 안전하다.
+    """
     names = [f"{p['pair_id']}.csv" for p in pairs]
     ssh_tar_push(args.ssh_host, out / "traces" / cond["name"], names,
                  f"{args.remote_ext_root}/artifacts/perturbed/{cond['name']}")
-    marker.write_text("ok", encoding="utf-8")
     print(f"[{cond['name']}] pushed {len(names)} traces")
 
 
+def _submit_replay(jid: str, cond: dict, p: dict, args) -> None:
+    fmt = "%Y-%m-%d %H:%M:%S"
+    start = datetime.datetime.fromisoformat(p["capture_start"])
+    end = start + datetime.timedelta(seconds=p["duration_s"])
+    try:
+        api_post("/jobs", {
+            "job_type": "replay", "job_id": jid, "gpu": args.gpu,
+            "replay_start": start.strftime(fmt), "replay_end": end.strftime(fmt),
+            "data_uri": (f"file://{args.remote_ext_root}/artifacts/"
+                         f"perturbed/{cond['name']}/{p['pair_id']}.csv"),
+            "render_fps": p["fps"], "app_kit": APP_KIT,
+            "camera": p["camera"], "stage": p["stage"]})
+        print(f"[{cond['name']}] submitted {jid}", flush=True)
+    except urllib.error.HTTPError as e:
+        if e.code != 409:
+            raise
+
+
 def phase_replay(cond: dict, pairs: List[dict], args, out: Path) -> Dict[str, str]:
-    """반환: pair_id -> job_id (렌더 완료 보장)."""
+    """반환: pair_id -> job_id (렌더 완료된 쌍만). 실패 잡은 인라인 2회 재시도 후
+    그래도 안 되면 스킵 — 한 잡의 산발적 실패(주로 Nucleus 로드 지연 타임아웃)가
+    전체 런을 죽이지 않게 한다. 스킵은 로그로 남긴다(무언 누락 금지)."""
     jobs: Dict[str, str] = {}
     todo = []
-    fmt = "%Y-%m-%d %H:%M:%S"
     tag = getattr(args, "run_tag", "ptb")
     for p in pairs:
         jid, state = resolve_job(f"{tag}-{cond['name']}-{p['pair_id']}")
@@ -285,25 +306,35 @@ def phase_replay(cond: dict, pairs: List[dict], args, out: Path) -> Dict[str, st
         if (out / "replays" / jid).is_dir() or state == "done":
             continue
         if state == "new":
-            start = datetime.datetime.fromisoformat(p["capture_start"])
-            end = start + datetime.timedelta(seconds=p["duration_s"])
-            try:
-                api_post("/jobs", {
-                    "job_type": "replay", "job_id": jid, "gpu": args.gpu,
-                    "replay_start": start.strftime(fmt),
-                    "replay_end": end.strftime(fmt),
-                    "data_uri": (f"file://{args.remote_ext_root}/artifacts/"
-                                 f"perturbed/{cond['name']}/{p['pair_id']}.csv"),
-                    "render_fps": p["fps"], "app_kit": APP_KIT,
-                    "camera": p["camera"], "stage": p["stage"]})
-                print(f"[{cond['name']}] submitted {jid}")
-            except urllib.error.HTTPError as e:
-                if e.code != 409:
-                    raise
-        todo.append(jid)
+            _submit_replay(jid, cond, p, args)
+        todo.append((p, jid))
     per_job = (180 + 30 * 8 + 60) * 1.2 + 60
-    for i, jid in enumerate(todo):
-        poll_job(jid, per_job * (len(todo) - i), label=jid)
+    skipped = []
+    for i, (p, jid) in enumerate(todo):
+        try:
+            poll_job(jid, per_job * (len(todo) - i), label=jid)
+            continue
+        except RuntimeError as e:
+            print(f"[{cond['name']}] {jid} failed ({e}); 재시도", flush=True)
+        ok = False
+        for _ in range(2):                       # 새 -rN id로 재제출·재폴링
+            nxt, _st = resolve_job(f"{tag}-{cond['name']}-{p['pair_id']}")
+            if nxt == jid:
+                break
+            _submit_replay(nxt, cond, p, args)
+            jid = nxt
+            try:
+                poll_job(nxt, per_job, label=nxt)
+                jobs[p["pair_id"]] = nxt
+                ok = True
+                break
+            except RuntimeError as e2:
+                print(f"[{cond['name']}] {nxt} 재시도 실패 ({e2})", flush=True)
+        if not ok:
+            skipped.append(p["pair_id"])
+            jobs.pop(p["pair_id"], None)
+    if skipped:
+        print(f"[{cond['name']}] SKIPPED {len(skipped)}: {skipped}", flush=True)
     return jobs
 
 
@@ -320,6 +351,8 @@ def phase_infer(cond: dict, pairs: List[dict], jobs: Dict[str, str],
     idir = out / "infer"
     idir.mkdir(exist_ok=True)
     for p in pairs:
+        if p["pair_id"] not in jobs:      # 렌더 스킵된 쌍 — 추론 대상 아님
+            continue
         dst = idir / f"{cond['name']}_{p['pair_id']}.json"
         if dst.exists():
             continue
@@ -337,9 +370,14 @@ def score_side(pairs: List[dict], pred_path, out: Path, remap_dir: Optional[Path
     """한 조건(또는 베이스라인)의 집계: 원GT·화면GT 2기준 det/att F1 + FP."""
     agg = {"orig": {"det_tp": 0, "att_tp": 0, "fn": 0, "fp": 0},
            "screen": {"det_tp": 0, "att_tp": 0, "fn": 0, "fp": 0}}
+    scored = 0
     for p in pairs:
+        pp = pred_path(p)
+        if not pp.exists():        # 렌더 스킵된 쌍 — 추론 파일 없음, 채점에서 제외
+            continue
+        scored += 1
         gt = {int(t): set(ids) for t, ids in p["gt_events"].items()}
-        pred = parse_pred_events(json.loads(pred_path(p).read_text(encoding="utf-8")))
+        pred = parse_pred_events(json.loads(pp.read_text(encoding="utf-8")))
         remap = None
         if remap_dir is not None:
             side = json.loads((remap_dir / f"{p['pair_id']}.meta.json")
@@ -349,7 +387,8 @@ def score_side(pairs: List[dict], pred_path, out: Path, remap_dir: Optional[Path
             c = match_events(g, pred, tol=1)["counts"]
             for k in agg[basis]:
                 agg[basis][k] += c[k]
-    for basis in agg:
+    agg["n_scored"] = scored
+    for basis in ("orig", "screen"):
         c = agg[basis]
         c["f1_det"] = f1(c["det_tp"], c["fp"], c["fn"])
         c["f1_att"] = f1(c["att_tp"], c["fp"] + c["det_tp"] - c["att_tp"], c["fn"])
@@ -480,8 +519,10 @@ def analyze_fp(pairs: List[dict], fid_out: Path, out: Path,
         counts = {"contact": 0, "near": 0, "none": 0, "phantom-id": 0}
         items = []
         for p in pairs:
-            by = positions_by_label(load_trace(
-                trace_path(cond, p).read_text(encoding="utf-8")))
+            tpath, ppath = trace_path(cond, p), pred_path(cond, p)
+            if not (tpath.exists() and ppath.exists()):   # 스킵된 쌍 제외
+                continue
+            by = positions_by_label(load_trace(tpath.read_text(encoding="utf-8")))
             gt = {int(t): set(ids) for t, ids in p["gt_events"].items()}
             pred = parse_pred_events(json.loads(
                 pred_path(cond, p).read_text(encoding="utf-8")))

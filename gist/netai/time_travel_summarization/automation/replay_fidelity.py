@@ -445,9 +445,48 @@ def phase_replay(args, pairs: List[dict], out: Path) -> None:
     (out / "pairs.json").write_text(json.dumps(pairs, indent=1, ensure_ascii=False),
                                     encoding="utf-8")
     per_job_bound = (180 + 30 * 8 + 60) * 1.2 + 60
+    skipped = []
     for i, (p, job_id, done) in enumerate(todo):
-        if not done:                               # 순차 큐 — 대기분까지 상한에 반영
+        if done:
+            continue
+        try:                                       # 순차 큐 — 대기분까지 상한에 반영
             poll_job(job_id, per_job_bound * (len(todo) - i), label=job_id)
+            continue
+        except RuntimeError as e:
+            print(f"[replay] {job_id} failed ({e}); 재시도")
+        ok = False
+        for _ in range(2):                         # 새 -rN id로 재제출·재폴링
+            nxt, _st = _resolve_replay_job(p["pair_id"])
+            if nxt == job_id:
+                break
+            start = datetime.datetime.fromisoformat(p["capture_start"])
+            end = start + datetime.timedelta(seconds=p["duration_s"])
+            fmt = "%Y-%m-%d %H:%M:%S"
+            try:
+                api_post("/jobs", {
+                    "job_type": "replay", "job_id": nxt, "gpu": args.gpu,
+                    "replay_start": start.strftime(fmt), "replay_end": end.strftime(fmt),
+                    "data_uri": (f"file://{args.remote_ext_root}/artifacts/episodes/"
+                                 f"{p['run']}/{p['ep']}/{p['trace']}"),
+                    "render_fps": p["fps"], "app_kit": APP_KIT,
+                    "camera": p["camera"], "stage": p["stage"]})
+            except urllib.error.HTTPError as ex:
+                if ex.code != 409:
+                    raise
+            job_id = nxt
+            p["job_id"] = nxt
+            try:
+                poll_job(nxt, per_job_bound, label=nxt)
+                ok = True
+                break
+            except RuntimeError as e2:
+                print(f"[replay] {nxt} 재시도 실패 ({e2})")
+        if not ok:
+            p["_skip"] = True
+            skipped.append(p["pair_id"])
+    if skipped:
+        print(f"[replay] SKIPPED {len(skipped)}: {skipped}")
+        pairs[:] = [p for p in pairs if not p.get("_skip")]   # 다운스트림에서 제외
 
 
 def phase_fetch_replays(args, pairs: List[dict], out: Path) -> None:
