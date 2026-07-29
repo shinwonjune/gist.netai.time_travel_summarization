@@ -335,6 +335,13 @@ def phase_replay(cond: dict, pairs: List[dict], args, out: Path) -> Dict[str, st
             jobs.pop(p["pair_id"], None)
     if skipped:
         print(f"[{cond['name']}] SKIPPED {len(skipped)}: {skipped}", flush=True)
+        # 체계적 실패 가드: 시도한 렌더의 대부분이 실패하면 산발 사고가 아니라
+        # 데이터 누락/서버 이상(실측: push 버그로 신규 trace 전량 미업로드 → 전멸).
+        # 조용히 스킵하고 계속하면 며칠을 낭비하므로 즉시 중단해 알린다.
+        if len(todo) >= 4 and len(skipped) >= 0.6 * len(todo):
+            raise RuntimeError(
+                f"[{cond['name']}] 체계적 렌더 실패: 시도 {len(todo)}건 중 "
+                f"{len(skipped)}건 스킵 — 데이터 누락/서버 이상 의심, 중단")
     return jobs
 
 
