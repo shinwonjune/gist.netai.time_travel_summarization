@@ -19,6 +19,12 @@
 #   - tini: 아래 ENTRYPOINT 주석 참고.
 FROM nvcr.io/nvidia/omniverse/ov-base-ubuntu-22:2026.2.3
 
+# 베이스 이미지는 비-root 사용자로 기본 설정돼 apt가 권한 거부(EACCES)로 실패한다
+# (실측: "List directory /var/lib/apt/lists/partial is missing - Permission denied").
+# 빌드 시 root로 전환해 설치한다. 런타임도 root로 도는데, 이는 container_lib.sh가
+# 셰이더 캐시를 /root/.nvidia-omniverse에 마운트하는 경로와 일치한다.
+USER root
+
 RUN apt-get update && apt-get install -y --no-install-recommends \
       ffmpeg \
       ca-certificates \
