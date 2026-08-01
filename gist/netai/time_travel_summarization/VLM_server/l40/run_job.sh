@@ -105,19 +105,35 @@ BOUND=$(( (180 + EPISODES * (DUR_INT * 8 + 30)) * 12 / 10 ))
 echo "[job $JOB_ID] episodes=$EPISODES duration=${DURATION}s gpu=$GPU bound=${BOUND}s"
 echo "[job $JOB_ID] log: $LOG"
 
-CUDA_VISIBLE_DEVICES="$GPU" "$KIT" "$APP" \
-  --no-window \
+# 공용 kit 인자 (베어메탈/컨테이너 공통) — activeGpu만 분기별로 따로 붙인다
+# (컨테이너 안에선 --gpus device=N이 그 GPU 하나를 인덱스 0으로 remap하므로
+#  호스트 GPU 인덱스가 아니라 항상 0을 넘겨야 한다. docker/container_lib.sh 참고).
+COMMON_ARGS=(--no-window \
   --ext-folder "$(dirname "$EXT_ROOT")" \
   --enable gist.netai.time_travel_summarization \
   --enable omni.replicator.core \
   --/app/settings/fabricDefaultStageFrameHistoryCount=3 \
-  --/app/content/emptyStageOnStart=true \
-  --/renderer/activeGpu="$GPU" \
-  --/renderer/multiGpu/enabled=false \
-  --exec "$EXEC_ARGS" \
-  > "$LOG" 2>&1 &
+  --/app/content/emptyStageOnStart=true)
+
+if [ "${USE_CONTAINER:-0}" = "1" ]; then
+  # shellcheck source=docker/container_lib.sh
+  source "$SCRIPT_DIR/docker/container_lib.sh"
+  CONTAINER_NAME="ttsum-gen-$JOB_ID"
+  container_kit_launch "$CONTAINER_NAME" "$KIT_ROOT" "$EXT_ROOT" "$GPU" "$KIT" "$APP" \
+    "${COMMON_ARGS[@]}" \
+    --/renderer/multiGpu/enabled=false \
+    --exec "$EXEC_ARGS" \
+    > "$LOG" 2>&1 &
+else
+  CUDA_VISIBLE_DEVICES="$GPU" "$KIT" "$APP" \
+    "${COMMON_ARGS[@]}" \
+    --/renderer/activeGpu="$GPU" \
+    --/renderer/multiGpu/enabled=false \
+    --exec "$EXEC_ARGS" \
+    > "$LOG" 2>&1 &
+fi
 KIT_PID=$!
-trap 'kill -TERM "$KIT_PID" 2>/dev/null || true' INT TERM
+trap 'kill -TERM "$KIT_PID" 2>/dev/null || true; [ "${USE_CONTAINER:-0}" = "1" ] && container_cleanup "$CONTAINER_NAME"' INT TERM
 
 START=$SECONDS
 while kill -0 "$KIT_PID" 2>/dev/null; do
@@ -136,6 +152,7 @@ if kill -0 "$KIT_PID" 2>/dev/null; then
   kill -KILL "$KIT_PID" 2>/dev/null || true
 fi
 wait "$KIT_PID" 2>/dev/null || true
+[ "${USE_CONTAINER:-0}" = "1" ] && container_cleanup "$CONTAINER_NAME"  # 안전망 — 강제종료 경로 대비
 
 DONE_EPS=$(grep -c '\[gen\] ep .* -> ' "$LOG" 2>/dev/null || true)
 if grep -q '\[gen\] done\.' "$LOG" 2>/dev/null; then
