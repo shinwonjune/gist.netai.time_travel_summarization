@@ -32,6 +32,10 @@ container_kit_launch() {
   local ext_parent; ext_parent="$(dirname "$ext_root")"
   local envfile="${L40_ENV_FILE:-$HOME/wonjune/.env.l40}"
   local cache_vol="${KIT_SHADER_CACHE_VOL:-ttsum-kit-shadercache}"
+  # kit 빌드의 kit 바이너리·target-deps는 packman 캐시(~/.cache/packman)로의 심링크라
+  # (실측: kit -> /home/netai/.cache/packman/chk/kit-kernel/...), 이 캐시를 같은 절대
+  # 경로로 마운트해야 컨테이너에서 링크가 안 끊긴다. PM_PACKAGES_ROOT 미설정 시 기본값.
+  local pm_cache="${PM_PACKAGES_ROOT:-$HOME/.cache/packman}"
   local env_args=()
   [ -f "$envfile" ] && env_args=(--env-file "$envfile")
 
@@ -47,6 +51,7 @@ container_kit_launch() {
     -v "$kit_root:$kit_root" \
     -v "$ext_parent:$ext_parent" \
     -v "$cache_vol:/root/.nvidia-omniverse" \
+    -v "$pm_cache:$pm_cache" \
     "${env_args[@]}" \
     "$image" \
     "$kit_bin" "$app" "$@" --/renderer/activeGpu=0
