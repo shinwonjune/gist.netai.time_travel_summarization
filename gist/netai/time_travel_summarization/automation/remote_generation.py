@@ -13,10 +13,22 @@ Kit 의존이 없어 어느 파이썬에서든 임포트·테스트 가능 (self
 """
 from __future__ import annotations
 
+import os
 import shlex
 import subprocess
 from dataclasses import dataclass
 from typing import Optional, Tuple
+
+# 컨테이너 격리 스위치는 잡별 요청 필드(JobSpec)가 아니라 "인프라 결정"이라 제출 셸의
+# 환경에서 읽는다. REST 경로는 job_api 데몬의 os.environ이 러너로 전파되어 같은 역할을
+# 하므로(job_api._worker), 아래 패스스루는 SSH/local 직결 제출에만 해당한다. 설정된
+# 것만 러너 env 접두사에 실어, 미설정 시 명령은 종전과 완전히 동일하다.
+# 주의: 값은 원격 셸 기준으로 해석된다(SSH면 원격 서버의 경로/이미지 태그).
+_CONTAINER_ENV_PASSTHROUGH = (
+    "USE_CONTAINER",         # 1이면 러너가 kit을 docker로 감싼다
+    "KIT_CONTAINER_IMAGE",   # 컨테이너 이미지 태그 (USE_CONTAINER=1일 때 필수)
+    "L40_ENV_FILE",          # minIO/Nucleus 자격증명 파일 (기본값 있으면 생략 가능)
+)
 
 JOB_SCHEMA_VERSION = 2
 
@@ -207,8 +219,13 @@ def build_submit_command(spec: JobSpec, remote_ext_root: str) -> str:
     """
     runner_tok = _tilde_safe(
         f"{remote_ext_root.rstrip('/')}/{runner_rel_for(spec.job_type)}")
-    envs = " ".join(
-        f"{k}={shlex.quote(v)}" for k, v in spec.to_env().items() if v != "")
+    env_map = {k: v for k, v in spec.to_env().items() if v != ""}
+    # 컨테이너 격리 스위치(운영자 env)를 러너로 전달 — 설정된 것만, JobSpec은 불변.
+    for k in _CONTAINER_ENV_PASSTHROUGH:
+        v = os.environ.get(k)
+        if v:
+            env_map[k] = v
+    envs = " ".join(f"{k}={shlex.quote(v)}" for k, v in env_map.items())
     inner = f"{envs} bash {runner_tok}"
     session = shlex.quote(f"job-{spec.job_id}")
     return f"tmux new-session -d -s {session} {shlex.quote(inner)} && echo SUBMITTED"
@@ -374,6 +391,20 @@ def _self_test() -> None:
     assert "'2026-07-18 15:35:10'" in replay_cmd, "공백 포함 시각 인용 유지"
     assert renv["MODEL_PATH"] == "" and "MODEL_PATH" not in replay_cmd, "빈 값은 명령 생략"
     assert runner_rel_for("replay").endswith("run_replay.sh")
+    # 컨테이너 스위치 패스스루: 제출 셸 env에 있으면 러너 접두사에 실리고, 없으면 미포함.
+    assert "USE_CONTAINER" not in cmd, "미설정 시 컨테이너 env 미포함"
+    _saved = {k: os.environ.get(k) for k in ("USE_CONTAINER", "KIT_CONTAINER_IMAGE")}
+    try:
+        os.environ["USE_CONTAINER"] = "1"
+        os.environ["KIT_CONTAINER_IMAGE"] = "ttsum-kit-runtime:2026.2.3"
+        cc = build_submit_command(spec, "/home/x/ext")
+        assert "USE_CONTAINER=1" in cc and "ttsum-kit-runtime:2026.2.3" in cc, "설정 시 전달"
+    finally:
+        for k, v in _saved.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
     # 상태 파싱
     class FakeTransport:
         def run(self, command, timeout=30.0):
