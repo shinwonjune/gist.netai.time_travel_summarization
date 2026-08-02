@@ -48,6 +48,7 @@ container_kit_launch() {
     -e CUDA_VISIBLE_DEVICES=0 \
     -e ACCEPT_EULA=Y \
     -e PRIVACY_CONSENT=Y \
+    -e OMNI_KIT_ALLOW_ROOT=1 \
     -v "$kit_root:$kit_root" \
     -v "$ext_parent:$ext_parent" \
     -v "$cache_vol:/root/.nvidia-omniverse" \
