@@ -26,7 +26,8 @@ FROM nvcr.io/nvidia/omniverse/ov-base-ubuntu-22:2026.2.3
 #     - ca-certificates: 검증(로컬 mp4 렌더)엔 불필요. 향후 minIO HTTPS 업로드가
 #       필요하면 호스트 인증서 마운트(-v /etc/ssl/certs:/etc/ssl/certs:ro)로 해결.
 #
-# 이 이미지가 베이스에 더하는 것은 단 하나: 런타임을 root로 고정(USER root)해
-# container_lib.sh의 셰이더 캐시 마운트(/root/.nvidia-omniverse) 쓰기를 가능케 함.
-# (베이스는 비-root 기본이라 그대로 쓰면 /root/ 쓰기가 막힌다.)
-USER root
+# 이 이미지는 베이스에 아무것도 더하지 않는다(사실상 base와 동일 — KIT_CONTAINER_IMAGE
+# 태그를 위한 빌드 대상일 뿐). 런타임 사용자는 container_lib.sh가 `--user $(id -u):$(id -g)`
+# 로 호스트(netai) 사용자를 넘겨 결정한다 → 산출물이 netai 소유가 되고 kit이 root 실행을
+# 거부하는 문제(allow-root)도 없다. 따라서 USER root를 두지 않는다.
+# (원한다면 KIT_CONTAINER_IMAGE에 이 베이스 이미지를 직접 지정해 빌드를 생략해도 된다.)
