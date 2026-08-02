@@ -12,27 +12,21 @@
 # 런타임에 볼륨 마운트로 재사용한다(docker/container_lib.sh 참고). 이 이미지는 그
 # 위에 얹는 최소 OS 레이어(kit이 번들한 파이썬 환경 밖의 시스템 바이너리)만 담당한다.
 #
-# 필요 apt 패키지 근거:
-#   - ffmpeg: video_capture/encoder.py가 system ffmpeg로 폴백(imageio 미가용 시) —
-#             베어메탈 L40엔 이미 설치돼 있지만 컨테이너 안엔 없으므로 필수.
-#   - ca-certificates: minIO(HTTPS, api.minio.mobilex.kr) 업로드에 TLS 검증 필요.
-#   - tini: 아래 ENTRYPOINT 주석 참고.
 FROM nvcr.io/nvidia/omniverse/ov-base-ubuntu-22:2026.2.3
 
-# 베이스 이미지는 비-root 사용자로 기본 설정돼 apt가 권한 거부(EACCES)로 실패한다
-# (실측: "List directory /var/lib/apt/lists/partial is missing - Permission denied").
-# 빌드 시 root로 전환해 설치한다. 런타임도 root로 도는데, 이는 container_lib.sh가
-# 셰이더 캐시를 /root/.nvidia-omniverse에 마운트하는 경로와 일치한다.
+# apt 설치는 하지 않는다 — 두 가지 이유:
+#  1) 베이스 이미지의 apt가 NVIDIA 사내 저장소(urm.nvidia.com)를 바라보는데, 이는
+#     L40에서 해석 불가한 호스트라 `apt-get install`이 "Unable to locate package"로
+#     실패한다(실측). 공개 Ubuntu 저장소를 추가하지 않는 한 apt로는 아무것도 못 받는다.
+#  2) 애초에 불필요하다:
+#     - ffmpeg: 렌더 인코더(video_capture/encoder.py)가 imageio(kit 파이썬 환경에
+#       번들된 imageio_ffmpeg 바이너리)를 우선 사용하고 system ffmpeg는 폴백일 뿐이다.
+#       kit _build를 볼륨 마운트하므로 imageio는 컨테이너 안에서도 그대로 가용.
+#     - tini: `docker run --init`(Docker 내장 tini, container_lib.sh 참고)로 대체.
+#     - ca-certificates: 검증(로컬 mp4 렌더)엔 불필요. 향후 minIO HTTPS 업로드가
+#       필요하면 호스트 인증서 마운트(-v /etc/ssl/certs:/etc/ssl/certs:ro)로 해결.
+#
+# 이 이미지가 베이스에 더하는 것은 단 하나: 런타임을 root로 고정(USER root)해
+# container_lib.sh의 셰이더 캐시 마운트(/root/.nvidia-omniverse) 쓰기를 가능케 함.
+# (베이스는 비-root 기본이라 그대로 쓰면 /root/ 쓰기가 막힌다.)
 USER root
-
-RUN apt-get update && apt-get install -y --no-install-recommends \
-      ffmpeg \
-      ca-certificates \
-      tini \
-    && rm -rf /var/lib/apt/lists/*
-
-# tini를 PID 1로 둔다 — kit 프로세스가 그대로 컨테이너 PID 1이 되면 SIGTERM
-# 처리·좀비 reap이 불완전해질 수 있다. run_job.sh/run_replay.sh의 워치독은
-# `docker run`(--sig-proxy 기본 on)으로 보낸 신호가 tini를 거쳐 컨테이너 안
-# kit 프로세스까지 정상 전달되는 것을 전제로 트랩·타임아웃 로직을 재사용한다.
-ENTRYPOINT ["/usr/bin/tini", "--"]

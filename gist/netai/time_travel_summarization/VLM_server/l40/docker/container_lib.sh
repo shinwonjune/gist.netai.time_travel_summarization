@@ -37,7 +37,7 @@ container_kit_launch() {
 
   docker rm -f "$name" >/dev/null 2>&1 || true   # 이전 이상종료로 남은 동명 컨테이너 정리
 
-  docker run --rm --name "$name" \
+  docker run --rm --init --name "$name" \
     --gpus "\"device=$gpu\"" \
     --network host \
     -e NVIDIA_DRIVER_CAPABILITIES=all \
