@@ -32,7 +32,6 @@ SSH 경로로 제출한 잡과 완전히 동일하게 동작한다.
 from __future__ import annotations
 
 import os
-import queue
 import re
 import subprocess
 import sys
@@ -51,6 +50,9 @@ sys.path.insert(0, str(EXT_ROOT))
 from gist.netai.time_travel_summarization.automation.remote_generation import (  # noqa: E402
     JOB_TYPES, JOBS_REL, JobSpec, runner_rel_for,
 )
+from gist.netai.time_travel_summarization.VLM_server.l40.job_store import (  # noqa: E402
+    JobExists, store_from_url,
+)
 
 JOBS_DIR = EXT_ROOT / JOBS_REL
 API_KEY = os.environ.get("JOB_API_KEY", "")
@@ -61,8 +63,16 @@ _JOB_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,80}$")  # 경로 조작 �
 
 app = FastAPI(title="TTS Generation Job API", version="1.0")
 
-_queues: dict[int, "queue.Queue[JobSpec]"] = {}
-_known: set[str] = set()
+# 잡 스토어: 상태·큐의 영속 소스 오브 트루스(SQLite 기본, Postgres 선택 — JOB_STORE_URL).
+# 파일 status는 러너가 쓰는 "진행·로그 채널"로 병존(아래 _worker/get_job 병합).
+STORE = store_from_url(os.environ.get("JOB_STORE_URL"))
+# 부팅 복원: 재시작으로 비종료(running 등) 잔류한 잡을 queued로 되돌려 재시도.
+# 단일 노드(SQLite)는 0(전부 복원)이 안전 — 살아있는 다른 노드가 없다. 다중 노드
+# Postgres는 워커 리스/하트비트가 필요(범위 밖, 설계 §9); 그때는 threshold를 크게.
+_REQUEUE_STALE_SEC = int(os.environ.get("JOB_STORE_REQUEUE_STALE_SEC", "0"))
+STORE.requeue_stale(_REQUEUE_STALE_SEC)
+
+_workers: set[int] = set()  # 워커 스레드가 이미 뜬 gpu
 _lock = threading.Lock()
 
 
@@ -126,11 +136,20 @@ def _read_status(job_id: str) -> Optional[dict]:
 
 
 def _worker(gpu: int) -> None:
-    q = _queues[gpu]
+    """스토어에서 이 gpu의 잡을 원자적으로 집어 러너 실행 후 종료 상태를 확정(reconcile).
+
+    큐(queue.Queue)를 스토어 폴링으로 대체 — claim_next로 집는 순간 DB는 이미 running이라
+    데몬이 죽어도 그 잡은 DB에 남고, 재부팅 시 requeue_stale이 되돌린다(재시도).
+    """
     while True:
-        spec = q.get()
+        spec = STORE.claim_next(gpu)  # 원자적 집기(이미 running 표시됨)
+        if spec is None:
+            time.sleep(1)             # 빈 큐 폴링
+            continue
         try:
-            _write_status(spec.job_id, "starting", {"gpu": gpu, "job_type": spec.job_type})
+            # DB running + 파일 running 병기(파일은 GUI /log·진행률의 실시간 채널).
+            STORE.mark(spec.job_id, "running", extra={"gpu": gpu})
+            _write_status(spec.job_id, "running", {"gpu": gpu, "job_type": spec.job_type})
             env = dict(os.environ)
             env.update({k: v for k, v in spec.to_env().items() if v != ""})
             runner = EXT_ROOT / runner_rel_for(spec.job_type)
@@ -139,31 +158,45 @@ def _worker(gpu: int) -> None:
                 # 러너가 status를 running→done|failed로 갱신하며 동기 완주.
                 # serve_start도 "vLLM 기동 + 준비 확인"까지가 잡이고 상주 프로세스는
                 # 러너 밖에서 계속 산다(큐를 막지 않음).
-                subprocess.run(["bash", str(runner)], env=env,
-                               stdout=f, stderr=subprocess.STDOUT)
+                rc = subprocess.run(["bash", str(runner)], env=env,
+                                    stdout=f, stderr=subprocess.STDOUT).returncode
+            # 종료 상태 reconcile: 러너가 파일에 쓴 done/failed를 신뢰, 없으면 반환코드로.
+            fin = _read_status(spec.job_id)
+            state = fin.get("state") if fin else None
+            if state not in ("done", "failed"):
+                state = "done" if rc == 0 else "failed"
+            note = (fin or {}).get("note", "") if state == "done" else \
+                (fin or {}).get("error", "") or f"rc={rc}"
+            STORE.mark(spec.job_id, state, note=note)
         except Exception as exc:  # 워커는 절대 죽지 않는다 (다음 잡 계속)
+            STORE.mark(spec.job_id, "failed", note=repr(exc))
             _write_status(spec.job_id, "failed", {"error": repr(exc)})
-        finally:
-            q.task_done()
 
 
-def _enqueue(spec: JobSpec) -> int:
-    """GPU별 큐에 적재. 첫 잡이면 그 GPU 전담 워커 스레드를 시작. 대기 수 반환."""
+def _ensure_worker(gpu: int) -> None:
+    """해당 gpu 전담 워커 스레드를 (없으면) 지연 기동. 큐 대신 스토어를 폴링한다."""
     with _lock:
-        q = _queues.get(spec.gpu)
-        if q is None:
-            q = _queues[spec.gpu] = queue.Queue()
-            threading.Thread(target=_worker, args=(spec.gpu,),
-                             daemon=True, name=f"gpu{spec.gpu}-worker").start()
-        waiting = q.qsize()
-        _write_status(spec.job_id, "queued", {"gpu": spec.gpu, "ahead": waiting})
-        q.put(spec)
-        return waiting
+        if gpu in _workers:
+            return
+        _workers.add(gpu)
+        threading.Thread(target=_worker, args=(gpu,),
+                         daemon=True, name=f"gpu{gpu}-worker").start()
+
+
+def _resume_pending_workers() -> None:
+    """부팅 복원(requeue_stale) 후, 대기 잡이 있는 gpu의 워커를 미리 기동한다.
+    이게 없으면 재시작으로 되살아난 잡이 '새 제출이 올 때까지' 처리되지 않는다
+    (워커는 create_job에서만 지연 기동되므로). import(uvicorn 로드) 시 1회 호출."""
+    for gpu in STORE.counts_by_gpu():
+        _ensure_worker(gpu)
+
+
+_resume_pending_workers()
 
 
 @app.get("/health")
 def health():
-    return {"ok": True, "queues": {g: q.qsize() for g, q in _queues.items()},
+    return {"ok": True, "queues": STORE.counts_by_gpu(),
             "serve_gpu": SERVE_GPU, "job_types": list(JOB_TYPES)}
 
 
@@ -206,10 +239,6 @@ def create_job(req: JobRequest, x_api_key: Optional[str] = Header(default=None))
     job_id = req.job_id or f"{prefix}-" + datetime.now().strftime("%Y%m%d-%H%M%S")
     if not _JOB_ID_RE.match(job_id):
         raise HTTPException(422, "job_id: 영숫자 . _ - 만 허용")
-    with _lock:
-        if job_id in _known or (JOBS_DIR / job_id / "status").exists():
-            raise HTTPException(409, f"job_id {job_id!r} already exists")
-        _known.add(job_id)
     seed = req.seed if req.seed is not None else int(time.time()) % 2_000_000_000
     spec = JobSpec(
         job_id=job_id, episodes=req.episodes, duration=req.duration, gpu=gpu,
@@ -222,7 +251,14 @@ def create_job(req: JobRequest, x_api_key: Optional[str] = Header(default=None))
         model_path=req.model_path, port=req.port, num_frames=req.num_frames,
         replay_start=req.replay_start, replay_end=req.replay_end, data_uri=req.data_uri,
     )
-    ahead = _enqueue(spec)
+    # dedup은 스토어 UNIQUE(job_id) — 중복이면 JobExists → 409.
+    try:
+        STORE.register(spec)
+    except JobExists:
+        raise HTTPException(409, f"job_id {job_id!r} already exists")
+    ahead = max(0, STORE.counts_by_gpu().get(gpu, 1) - 1)  # 자기 자신 제외한 대기 수
+    _write_status(job_id, "queued", {"gpu": gpu, "ahead": ahead})  # 파일 병기(로그/GUI)
+    _ensure_worker(gpu)  # 이 gpu 워커 지연 기동(스토어 폴링)
     return {"job_id": job_id, "state": "queued", "gpu": spec.gpu,
             "job_type": spec.job_type, "ahead": ahead, "seed": seed}
 
@@ -231,13 +267,12 @@ def create_job(req: JobRequest, x_api_key: Optional[str] = Header(default=None))
 def list_jobs(x_api_key: Optional[str] = Header(default=None)):
     _check_key(x_api_key)
     jobs = []
-    if JOBS_DIR.exists():
-        for d in sorted(JOBS_DIR.iterdir()):
-            st = _read_status(d.name)
-            if st:
-                jobs.append({"job_id": d.name, "state": st.get("state"),
-                             "episodes_done": st.get("episodes_done"),
-                             "total": st.get("total")})
+    for row in STORE.list():  # 스토어가 소스 오브 트루스(디렉토리 스캔 대체)
+        # 진행 필드는 러너 status 파일에서 병합(episodes_done/total).
+        st = _read_status(row["job_id"]) or {}
+        jobs.append({"job_id": row["job_id"], "state": row.get("state"),
+                     "episodes_done": st.get("episodes_done"),
+                     "total": st.get("total")})
     return {"jobs": jobs}
 
 
@@ -246,10 +281,14 @@ def get_job(job_id: str, x_api_key: Optional[str] = Header(default=None)):
     _check_key(x_api_key)
     if not _JOB_ID_RE.match(job_id):
         raise HTTPException(422, "bad job_id")
-    st = _read_status(job_id)
-    if st is None:
+    row = STORE.get(job_id)          # 생명주기 상태의 소스 오브 트루스
+    if row is None:
         raise HTTPException(404, f"unknown job {job_id!r}")
-    return st
+    # 러너 status 파일의 진행 필드(episodes_done/total 등)를 병합해 응답 형태 유지.
+    # DB의 state가 최종 권위 — 파일 값이 있어도 state는 스토어 값으로 덮어쓴다.
+    st = _read_status(job_id) or {}
+    merged = {**st, **row}
+    return merged
 
 
 @app.get("/jobs/{job_id}/log")
