@@ -18,10 +18,9 @@ kit 비의존 순수 파이썬 — WSL stdlib에서 임포트·self-test 가능(
 from __future__ import annotations
 
 import json
-import os
 import sqlite3
 import sys
-from dataclasses import asdict
+from dataclasses import asdict, fields
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Iterable, Optional
@@ -58,10 +57,16 @@ def _spec_to_json(spec: JobSpec) -> str:
     return json.dumps(asdict(spec))
 
 
+_SPEC_FIELDS = frozenset(f.name for f in fields(JobSpec))  # 스키마 진화 내성용
+
+
 def _spec_from_raw(raw) -> JobSpec:
-    """spec_json → JobSpec. SQLite는 TEXT(str), Postgres JSONB는 dict로 돌려준다."""
+    """spec_json → JobSpec. SQLite는 TEXT(str), Postgres JSONB는 dict로 돌려준다.
+
+    미지 키는 무시한다 — JobSpec에서 필드가 제거돼도 구 행 복원이 깨지지 않게
+    (필드 추가는 dataclass 기본값이 흡수: 양방향 스키마 내성)."""
     d = json.loads(raw) if isinstance(raw, (str, bytes)) else dict(raw)
-    return JobSpec(**d)
+    return JobSpec(**{k: v for k, v in d.items() if k in _SPEC_FIELDS})
 
 
 def _clean_row(row) -> dict:
@@ -417,6 +422,10 @@ def _self_test() -> None:
         assert False, "중복 register가 예외를 던져야"
     except JobExists:
         pass
+
+    # 2-1) 스키마 내성 — 구 행에 남은 미지 키(제거된 필드)는 무시하고 복원
+    legacy = dict(asdict(spec), removed_field="x")
+    assert _spec_from_raw(json.dumps(legacy)).job_id == "gen-1"
 
     # 3) requeue_stale — running 잔류 잡을 queued로 복원
     store.register(JobSpec(job_id="gen-2", gpu=1))

@@ -66,11 +66,9 @@ app = FastAPI(title="TTS Generation Job API", version="1.0")
 # 잡 스토어: 상태·큐의 영속 소스 오브 트루스(SQLite 기본, Postgres 선택 — JOB_STORE_URL).
 # 파일 status는 러너가 쓰는 "진행·로그 채널"로 병존(아래 _worker/get_job 병합).
 STORE = store_from_url(os.environ.get("JOB_STORE_URL"))
-# 부팅 복원: 재시작으로 비종료(running 등) 잔류한 잡을 queued로 되돌려 재시도.
-# 단일 노드(SQLite)는 0(전부 복원)이 안전 — 살아있는 다른 노드가 없다. 다중 노드
-# Postgres는 워커 리스/하트비트가 필요(범위 밖, 설계 §9); 그때는 threshold를 크게.
-_REQUEUE_STALE_SEC = int(os.environ.get("JOB_STORE_REQUEUE_STALE_SEC", "0"))
-STORE.requeue_stale(_REQUEUE_STALE_SEC)
+# 부팅 복원은 아래 _requeue_dead_jobs()가 담당 — "러너가 실제로 죽은 잡만" 되돌린다.
+# 무조건 requeue(requeue_stale(0)) 금지: 데몬이 죽어도 러너 subprocess(bash→kit/컨테이너)는
+# 고아로 계속 돌 수 있어, 산 잡을 되돌리면 같은 잡이 GPU에서 이중 실행된다.
 
 _workers: set[int] = set()  # 워커 스레드가 이미 뜬 gpu
 _lock = threading.Lock()
@@ -139,7 +137,7 @@ def _worker(gpu: int) -> None:
     """스토어에서 이 gpu의 잡을 원자적으로 집어 러너 실행 후 종료 상태를 확정(reconcile).
 
     큐(queue.Queue)를 스토어 폴링으로 대체 — claim_next로 집는 순간 DB는 이미 running이라
-    데몬이 죽어도 그 잡은 DB에 남고, 재부팅 시 requeue_stale이 되돌린다(재시도).
+    데몬이 죽어도 그 잡은 DB에 남고, 재부팅 시 _requeue_dead_jobs가 (죽었을 때만) 되돌린다.
     """
     while True:
         spec = STORE.claim_next(gpu)  # 원자적 집기(이미 running 표시됨)
@@ -183,14 +181,48 @@ def _ensure_worker(gpu: int) -> None:
                          daemon=True, name=f"gpu{gpu}-worker").start()
 
 
+_LIVE_STATUS_SEC = 120  # 러너가 30s 주기로 status를 갱신 — 4배 여유로 생존 판정
+
+
+def _status_fresh(updated: str, within_s: int = _LIVE_STATUS_SEC) -> bool:
+    """status 파일의 updated(ISO)가 within_s 이내면 러너 생존으로 본다."""
+    try:
+        t = datetime.fromisoformat(updated)
+    except (TypeError, ValueError):
+        return False
+    if t.tzinfo is None:
+        t = t.astimezone()  # 구식 naive 기록 방어 — 로컬 타임존 부여
+    return (datetime.now(timezone.utc) - t).total_seconds() < within_s
+
+
+def _requeue_dead_jobs() -> int:
+    """부팅 복원 — DB에 running으로 남은 잡 중 러너가 '실제로 죽은 것만' queued로.
+
+    데몬이 재시작돼도 이전 러너(bash→kit/컨테이너)는 고아 subprocess로 계속 돌 수 있다.
+    무조건 requeue하면 같은 잡이 두 번 실행돼 GPU 경합·산출물 충돌이 난다(파일+메모리큐
+    방식엔 없던, 영속화가 들여온 실패 모드라 이 가드가 필수). 생존 판정: 러너가 30s마다
+    갱신하는 status 파일의 updated가 최근이면 산 것으로 보고 running 그대로 둔다 — 그
+    잡의 종료는 get_job의 lazy reconcile이 확정한다."""
+    n = 0
+    for row in STORE.list(states=["running"]):
+        jid = row["job_id"]
+        st = _read_status(jid)
+        if st and _status_fresh(st.get("updated", "")):
+            continue  # 고아 러너 생존 — 이중 실행 방지
+        STORE.mark(jid, "queued", note="requeued at boot (no live runner)")
+        n += 1
+    return n
+
+
 def _resume_pending_workers() -> None:
-    """부팅 복원(requeue_stale) 후, 대기 잡이 있는 gpu의 워커를 미리 기동한다.
+    """부팅 복원(_requeue_dead_jobs) 후, 대기 잡이 있는 gpu의 워커를 미리 기동한다.
     이게 없으면 재시작으로 되살아난 잡이 '새 제출이 올 때까지' 처리되지 않는다
     (워커는 create_job에서만 지연 기동되므로). import(uvicorn 로드) 시 1회 호출."""
     for gpu in STORE.counts_by_gpu():
         _ensure_worker(gpu)
 
 
+_requeue_dead_jobs()
 _resume_pending_workers()
 
 
@@ -287,6 +319,11 @@ def get_job(job_id: str, x_api_key: Optional[str] = Header(default=None)):
     # 러너 status 파일의 진행 필드(episodes_done/total 등)를 병합해 응답 형태 유지.
     # DB의 state가 최종 권위 — 파일 값이 있어도 state는 스토어 값으로 덮어쓴다.
     st = _read_status(job_id) or {}
+    # lazy reconcile: 부팅 가드(_requeue_dead_jobs)가 살려둔 고아 러너가 이후 완주하면
+    # 워커가 없어 DB가 running으로 영원히 남는다 — 조회 시점에 파일의 종료 상태로 확정.
+    if row.get("state") == "running" and st.get("state") in ("done", "failed"):
+        STORE.mark(job_id, st["state"], note=st.get("note", "") or st.get("error", ""))
+        row["state"] = st["state"]
     merged = {**st, **row}
     return merged
 
