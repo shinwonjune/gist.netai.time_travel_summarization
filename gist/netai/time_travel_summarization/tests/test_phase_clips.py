@@ -73,8 +73,8 @@ class PlanEpisodeTest(unittest.TestCase):
         col = [_col_row(15.0, "obj001"), _col_row(15.1, "obj002")]
         plans = plan_episode("collision", [], col, BASE, 30.0, n_control=0)
         conds = sorted(p["condition"] for p in plans)
-        self.assertEqual(conds, ["approach_only", "full", "no_approach",
-                                 "no_aftermath", "no_contact"])
+        self.assertEqual(conds, ["approach_only", "full", "no_aftermath",
+                                 "no_approach", "no_contact"])
 
     def test_bounds_filter(self):
         """접촉이 t=1s면 approach_only([-2.2,-0.2])는 범위 밖 -> 제외."""
