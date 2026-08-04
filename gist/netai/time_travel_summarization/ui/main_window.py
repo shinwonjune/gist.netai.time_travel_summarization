@@ -168,6 +168,17 @@ class TimeTravelWindow:
                     self._wander_speed_field.model.set_value(self._core.get_wander_speed())
                     self._wander_speed_field.model.add_end_edit_fn(self._on_wander_speed_changed)
                     ui.Label("units/s", width=55)
+                    # near-miss 안무(GUI 육안 확인용): gap cm, 0이면 기존 wander.
+                    # 컨트롤러 생성 시점에만 반영되므로 값 변경 후 Physics를 다시 눌러야 한다.
+                    # 방식(swerve 기본|stop)은 여기 콤보로 노출하지 않는다 — facade
+                    # 기본값(swerve)을 그대로 쓰며, stop을 보려면 코드/env로 지정
+                    # (_on_near_miss_gap_changed 독스트링 참조).
+                    ui.Label("Near-miss gap:", width=95)
+                    self._near_miss_field = ui.FloatField(width=60)
+                    self._near_miss_field.model.set_value(0.0)
+                    self._near_miss_field.model.add_end_edit_fn(self._on_near_miss_gap_changed)
+                    ui.Label("cm (0=off, re-click Physics; mode=swerve default)", width=250,
+                             style={"color": 0xFF888888})
                     ui.Spacer()
 
                 with ui.HStack(height=28, spacing=8):
@@ -376,6 +387,16 @@ class TimeTravelWindow:
         if not self._core.set_wander_speed(speed):
             model.set_value(self._core.get_wander_speed())
     
+    def _on_near_miss_gap_changed(self, model):
+        """near-miss 안무 간격(cm; 0=끔). 다음 Physics 클릭부터 적용.
+
+        방식(swerve|stop)은 GUI에 별도 토글이 없다 — facade 기본값 "swerve"(감속
+        없이 스침) 그대로 쓰인다. GUI로 stop(v1, 감속+정지+방향전환 대조군)을 보고
+        싶으면 코드에서 ``core.set_near_miss_mode("stop")``을 gap 설정 전에 호출하거나,
+        headless 배치는 ``NEAR_MISS_MODE=stop`` 환경변수(run_job.sh)를 쓴다 — GUI
+        토글은 간단하지 않아(콤보 하나 추가+상태 배선) 스코프에서 제외했다."""
+        self._core.set_near_miss_gap(model.get_value_as_float())
+
     def _on_event_checkbox_changed(self, model):
         """Handle event summary checkbox change."""
         requested_value = model.get_value_as_bool()

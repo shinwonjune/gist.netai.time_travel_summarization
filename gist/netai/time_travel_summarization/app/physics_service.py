@@ -210,6 +210,19 @@ def set_physics_mode(core) -> None:
     # 발화하므로 사이드카에는 2.0r을 기록 → 오프라인 recall 분석이 라벨과 같은
     # 규칙을 재현한다. (fallback 탐지 2.2r과 정의가 다름에 주의)
     core._collision_distance = 2.0 * max(proxy_radii) if proxy_radii else 1.0 * m_to_units
+    # near-miss: gap이 접촉 거리(2r)보다 넉넉히 커야 GT가 0으로 유지된다.
+    # 작으면 안무가 "정지"하기 전에 프록시가 먼저 닿아 contact report(kind=object)가 발화한다.
+    near_miss_gap = float(getattr(core, "_near_miss_gap", 0.0) or 0.0)
+    near_miss_mode = getattr(core, "_near_miss_mode", "swerve") or "swerve"
+    if near_miss_gap > 0.0:
+        carb.log_warn(
+            f"[Physics] near-miss gap={near_miss_gap:.1f} mode={near_miss_mode} "
+            f"(접촉거리 2r={core._collision_distance:.1f})")
+        if near_miss_gap <= core._collision_distance * 1.1:
+            carb.log_warn(
+                f"[Physics] near-miss gap {near_miss_gap:.1f} <= 접촉거리 2r×1.1 "
+                f"({core._collision_distance * 1.1:.1f}) — 접촉 발생 위험(GT 오염). gap을 올릴 것"
+            )
     core._wander = WanderController(
         rigid_prims,
         speed=core._wander_speed,
@@ -218,6 +231,8 @@ def set_physics_mode(core) -> None:
         bounds_half=bounds_half,
         wall_margin=wall_margin,
         collision_distance=collision_distance,
+        near_miss_gap=near_miss_gap,
+        near_miss_mode=near_miss_mode,
         seed=core._wander_seed,
     )
 

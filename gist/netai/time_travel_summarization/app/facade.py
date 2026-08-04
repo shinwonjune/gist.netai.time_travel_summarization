@@ -56,6 +56,12 @@ class TimeTravelCore:
         self._sim_time: float = 0.0
         self._use_sim_clock: bool = False
         self._wander_seed = None
+        # near-miss 안무 간격(cm; 0=비활성) — set_physics_mode가 WanderController에 전달.
+        self._near_miss_gap = 0.0
+        # near-miss 안무 방식(swerve|stop, 기본 swerve) — GUI 육안 검수에서 stop(v1,
+        # 감속+정지+방향전환)이 "보이지 않는 벽" 인상으로 기각돼 swerve가 기본이다.
+        # stop은 감속 단서 vs 근접 단서를 분리해 보는 대조군으로 옵션으로 남겨둔다.
+        self._near_miss_mode = "swerve"
         # 캡처 완료 알림(성공 시 output URI 전달) — extension.py가 VLM 창을 배선.
         self._capture_complete_cb = None
         # 재생 공백 점프: 데이터 공백이 이 값(초)을 넘으면 시계를 다음 데이터로
@@ -375,6 +381,21 @@ class TimeTravelCore:
     def set_wander_seed(self, seed) -> None:
         """에피소드 재현성: set_physics_mode 전에 호출하면 wander heading이 seed 결정적."""
         self._wander_seed = seed
+
+    def set_near_miss_gap(self, gap: float) -> None:
+        """near-miss 안무 활성화(gap>0, cm): 짝끼리 gap까지 접근했다 흩어진다(방식은
+        set_near_miss_mode) — 접촉이 없어 GT 충돌 0건. set_physics_mode 전에 호출해야
+        반영된다(그때 컨트롤러 생성)."""
+        self._near_miss_gap = max(0.0, float(gap))
+
+    def set_near_miss_mode(self, mode: str) -> None:
+        """near-miss 안무 방식 선택: "swerve"(기본, 감속 없이 스침) 또는 "stop"(v1,
+        감속+정지+방향전환 — 대조군 옵션). set_physics_mode 전에 호출해야 반영된다."""
+        mode = str(mode).strip().lower()
+        if mode not in ("swerve", "stop"):
+            carb.log_warn(f"[TimeTravel] invalid near_miss_mode: {mode!r} -> swerve")
+            mode = "swerve"
+        self._near_miss_mode = mode
 
     def start_wander(self) -> bool:
         """Start PhysX wandering when Physics mode has created a controller."""

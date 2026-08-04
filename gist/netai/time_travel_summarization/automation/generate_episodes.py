@@ -15,8 +15,16 @@ Run (headless Kit with the extension enabled):
     kit --no-window --enable <ext> --exec "automation/generate_episodes.py -- \
         --episodes 50 --out artifacts/episodes --duration 40"
 
+near-miss 모드(--near-miss): 짝끼리 접근하다 중심거리 --near-miss-gap 근처에서
+흩어지기를 반복 — 접촉이 없으므로 GT 충돌이 0건인 대조 에피소드(VLM이 "가까워졌다"
+만으로 충돌을 오탐하는지 보는 시험용). --near-miss-mode로 안무를 고른다: 기본
+"swerve"(감속 없이 스침 — GUI 육안 검수에서 "보이지 않는 벽" 인상을 준 v1을 대체),
+"stop"은 v1(감속+정지+방향전환) — 감속 단서 vs 근접 단서를 분리해 보는 대조군으로
+옵션으로 남긴다. 생성 직후 trace로 자체 검증(어느 모드든 좌표 불변식은 동일).
+
 Pure helpers are importable/testable without Kit:
     python automation/generate_episodes.py --self-test
+    python automation/generate_episodes.py --check-trace <trace.csv> --near-miss-gap 95
 """
 
 from __future__ import annotations
@@ -154,6 +162,48 @@ def organize_outputs(out_root: Path, idx: int, video: Path,
             shutil.move(str(src), str(dst))
             moved[label] = str(dst)
     return ep_dir
+
+
+def check_near_miss_trace(text: str, gap: float, tol: float = 2.0,
+                          near_eps: Optional[float] = None) -> dict:
+    """near-miss 에피소드의 trace 자체 검증(순수 — Kit·외부 패키지 불필요).
+
+    두 가지를 동시에 봐야 에피소드가 쓸모 있다:
+      (a) 모든 쌍의 최소 중심거리 ≥ gap - tol   → 접촉이 없었다(GT 0건과 정합)
+      (b) 최소한 한 쌍이 gap + near_eps 안까지  → 접근이 실제로 일어났다
+          (안 그러면 "그냥 멀리 떨어져 돌아다닌 영상" = 근접 오탐 시험에 무의미)
+    tol은 30Hz 샘플링이 최근접 순간을 놓쳐 생기는 오차 여유, near_eps 기본값은 gap의 15%.
+    거리는 rule_baseline·GT 라벨러와 같은 3D 중심거리.
+    """
+    if near_eps is None:
+        near_eps = 0.15 * gap
+    frames: Dict[str, Dict[str, Tuple[float, float, float]]] = {}
+    for line in text.splitlines()[1:]:
+        if not line.strip():
+            continue
+        ts, objid, x, y, z = (c.strip() for c in line.split(","))
+        frames.setdefault(ts, {})[objid] = (float(x), float(y), float(z))
+    pair_min: Dict[Tuple[str, str], float] = {}
+    for objs in frames.values():
+        ids = sorted(objs)
+        for i in range(len(ids)):
+            for j in range(i + 1, len(ids)):
+                pa, pb = objs[ids[i]], objs[ids[j]]
+                d = sum((pa[k] - pb[k]) ** 2 for k in range(3)) ** 0.5
+                key = (ids[i], ids[j])
+                if d < pair_min.get(key, float("inf")):
+                    pair_min[key] = d
+    min_pair = min(pair_min, key=lambda k: pair_min[k]) if pair_min else None
+    min_dist = pair_min[min_pair] if min_pair else float("inf")
+    approached = [k for k, d in pair_min.items() if d <= gap + near_eps]
+    violations = sorted((round(d, 2), k) for k, d in pair_min.items() if d < gap - tol)
+    return {
+        "ok": bool(pair_min) and not violations and bool(approached),
+        "frames": len(frames), "pairs": len(pair_min),
+        "min_dist": round(min_dist, 2) if pair_min else None,
+        "min_pair": min_pair, "approached": len(approached),
+        "violations": [{"pair": k, "min_dist": d} for d, k in violations[:10]],
+    }
 
 
 def parse_spawn_plan(plan_str: Optional[str], zones: dict, n_objects: int) -> List[Tuple[str, int]]:
@@ -537,6 +587,11 @@ def run(args, core=None) -> None:
         core.set_wander_speed(cfg.speed)
         if hasattr(core, "set_wander_seed"):
             core.set_wander_seed(cfg.seed)  # heading 재현성(페이싱 재현과 별개)
+        # near-miss 안무는 컨트롤러 생성 시점(set_physics_mode)에 결정된다 → 그 전에 지정.
+        if hasattr(core, "set_near_miss_gap"):
+            core.set_near_miss_gap(args.near_miss_gap if getattr(args, "near_miss", False) else 0.0)
+        if hasattr(core, "set_near_miss_mode"):
+            core.set_near_miss_mode(getattr(args, "near_miss_mode", "swerve"))
         core.set_physics_mode()
         trace_path = str((out_root / f"_trace_{cfg.idx:04d}.csv").resolve())
         video_path = str((out_root / f"_video_{cfg.idx:04d}.mp4").resolve())
@@ -552,6 +607,18 @@ def run(args, core=None) -> None:
         core.stop_wander()
         core.stop_trace()
         core.set_playback_mode()
+        if getattr(args, "near_miss", False):
+            # 좌표로 즉시 자체 검증 — 접촉 없음(GT 0의 필요조건) + 접근이 실제로 일어남.
+            try:
+                res = check_near_miss_trace(Path(trace_path).read_text(encoding="utf-8"),
+                                            args.near_miss_gap)
+                print(f"[gen] near-miss check ep {cfg.idx} mode={getattr(args, 'near_miss_mode', 'swerve')}: "
+                      f"{'OK' if res['ok'] else 'FAIL'} "
+                      f"min_d={res['min_dist']} pair={res['min_pair']} "
+                      f"approached={res['approached']}/{res['pairs']} frames={res['frames']} "
+                      f"violations={res['violations']}")
+            except Exception as e:
+                print(f"[gen] near-miss check ep {cfg.idx}: FAILED to read trace: {e!r}")
         if not produced:
             ep_elapsed[cfg.idx] = round(_time.monotonic() - ep_t0, 1)
             print(f"[gen] ep {cfg.idx}: capture failed; skipping")
@@ -647,6 +714,27 @@ def _self_test() -> None:
     assert all(abs(p[1] - 95.0) < 1e-9 for p in pos2.values()), "spawn = floor + 5cm"
     assert sample_floor_positions(bounds2, ["a"], 7, lambda h0, h1: None, 90.0) == {}
     assert sample_floor_positions(bounds2, ["a"], 7, lambda h0, h1: 300.0, 90.0) == {}, "tol window"
+
+    # near-miss trace 검증: 접근했고(gap 근처까지) 접촉은 없어야 통과
+    def nm_trace(dists) -> str:
+        out = ["timestamp,objid,x,y,z"]
+        for i, d in enumerate(dists):
+            ts = f"2026-07-28 10:00:{i // 10:02d}.{(i % 10) * 100:03d}"
+            out.append(f"{ts},obj001,0.000,90.000,0.000")
+            out.append(f"{ts},obj002,{d:.3f},90.000,0.000")
+        return "\n".join(out) + "\n"
+    ok = check_near_miss_trace(nm_trace([400, 300, 200, 100, 96, 100, 200, 400]), gap=95.0)
+    assert ok["ok"] and ok["min_dist"] == 96.0 and ok["approached"] == 1, ok
+    assert ok["min_pair"] == ("obj001", "obj002") and ok["frames"] == 8, ok
+    # 접촉(gap 아래로 붙음) → FAIL + 위반 쌍 보고
+    hit = check_near_miss_trace(nm_trace([400, 200, 80, 200]), gap=95.0)
+    assert not hit["ok"] and hit["violations"][0]["pair"] == ("obj001", "obj002"), hit
+    # 접근 자체가 없으면(멀찍이만) 대조 데이터로 무의미 → FAIL
+    far = check_near_miss_trace(nm_trace([400, 380, 360, 400]), gap=95.0)
+    assert not far["ok"] and far["approached"] == 0 and not far["violations"], far
+    # tol 여유: gap - tol 이상이면 통과(30Hz 샘플링이 최근접 순간을 놓치는 경우)
+    assert check_near_miss_trace(nm_trace([400, 94, 400]), gap=95.0, tol=2.0)["ok"]
+    assert check_near_miss_trace("timestamp,objid,x,y,z\n", gap=95.0)["ok"] is False
     with tempfile.TemporaryDirectory() as d:
         root = Path(d)
         v = root / "_video_0003.mp4"
@@ -695,6 +783,20 @@ def main() -> None:
                     help='구역별 객체 수 배정 "zoneA:2,zoneB:2" (합계 = 객체 수; min==max 필요)')
     ap.add_argument("--spawn-floor", type=float, default=89.5,
                     help="기본 구역의 바닥 높이(cm; run18~20 레이캐스트 실측값)")
+    ap.add_argument("--near-miss", action="store_true",
+                    help="near-miss 안무: 짝끼리 접근했다 gap에서 멈추고 흩어지기를 반복 — "
+                         "접촉이 없어 GT 충돌 0건(근접만으로 오탐하는지 보는 대조 데이터셋)")
+    ap.add_argument("--near-miss-gap", type=float, default=95.0,
+                    help="near-miss 최소 중심거리(cm). 기본 95 = 룰 베이스라인 접촉 임계 "
+                         "τ=90(rule_baseline.py) 바깥 → 좌표 직결 검출기도 발화하지 않아야 함")
+    ap.add_argument("--near-miss-mode", type=str, default="swerve", choices=["swerve", "stop"],
+                    help="near-miss 안무 방식. swerve(기본): 감속 없이 방향만 굽혀 스쳐 "
+                         "지나감(gap 불변식은 반경 성분 캡으로 동일 보증). stop(v1): "
+                         "감속+정지+방향전환 — GUI 육안 검수에서 '충돌처럼 보인다'는 "
+                         "이유로 기각됐으나 감속 단서 대조군으로 옵션 유지")
+    ap.add_argument("--check-trace", type=str, default=None,
+                    help="오프라인 검증: trace CSV 경로를 --near-miss-gap 기준으로 판정하고 종료 "
+                         "(Kit 불필요; 통과 시 종료코드 0)")
     ap.add_argument("--extra-objects", type=int, default=0,
                     help="궤적 데이터 외 합성 우주인 추가 수(physics 전용; keep-positions와 양립 불가)")
     ap.add_argument("--upload-uri", type=str, default=None,
@@ -705,6 +807,15 @@ def main() -> None:
     if args.self_test:
         _self_test()
         return
+    if args.check_trace:
+        res = check_near_miss_trace(Path(args.check_trace).read_text(encoding="utf-8"),
+                                    args.near_miss_gap)
+        print(f"[check] {'OK' if res['ok'] else 'FAIL'} gap={args.near_miss_gap} "
+              f"min_d={res['min_dist']} pair={res['min_pair']} "
+              f"approached={res['approached']}/{res['pairs']} frames={res['frames']}")
+        for v in res["violations"]:
+            print(f"[check] violation: {v['pair']} min_d={v['min_dist']}")
+        raise SystemExit(0 if res["ok"] else 1)
     try:
         run(args)
     finally:
