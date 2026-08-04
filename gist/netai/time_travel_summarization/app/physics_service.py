@@ -223,6 +223,7 @@ def set_physics_mode(core) -> None:
                 f"[Physics] near-miss gap {near_miss_gap:.1f} <= 접촉거리 2r×1.1 "
                 f"({core._collision_distance * 1.1:.1f}) — 접촉 발생 위험(GT 오염). gap을 올릴 것"
             )
+    # v3 조향 파라미터(None이면 컨트롤러가 env → 코드 기본값 순으로 해결한다).
     core._wander = WanderController(
         rigid_prims,
         speed=core._wander_speed,
@@ -233,8 +234,17 @@ def set_physics_mode(core) -> None:
         collision_distance=collision_distance,
         near_miss_gap=near_miss_gap,
         near_miss_mode=near_miss_mode,
+        near_miss_avoid_frac=getattr(core, "_near_miss_avoid_frac", None),
+        near_miss_turn_radius_frac=getattr(core, "_near_miss_turn_radius_frac", None),
+        near_miss_aim_frac=getattr(core, "_near_miss_aim_frac", None),
         seed=core._wander_seed,
     )
+    if near_miss_gap > 0.0 and near_miss_mode == "swerve":
+        w = core._wander
+        carb.log_warn(
+            f"[Physics] near-miss swerve steering: avoid={w._nm_avoid_frac:g}x gap "
+            f"({near_miss_gap * w._nm_avoid_frac:.0f}), turn radius={w._nm_turn_radius_frac:g}x gap "
+            f"({near_miss_gap * w._nm_turn_radius_frac:.0f}), aim={w._nm_aim_frac:g}x gap")
 
     try:
         import omni.timeline

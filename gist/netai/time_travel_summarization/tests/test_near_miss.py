@@ -6,6 +6,7 @@
   2) generate_episodes.check_near_miss_trace — 산출된 trace로 그 불변식과 "접근이
      실제로 일어났다"를 사후 판정하는 오프라인 체크.
 """
+import math
 import unittest
 
 from gist.netai.time_travel_summarization.automation.generate_episodes import check_near_miss_trace
@@ -41,13 +42,14 @@ class _Sim:
     """가짜 프림 + 오일러 적분: 컨트롤러가 고른 (heading, speed)를 그대로 위치에 반영."""
 
     def __init__(self, positions: dict, gap: float, speed: float = 240.0, dt: float = 1.0 / 60.0,
-                 near_miss_mode: str = "swerve"):
+                 near_miss_mode: str = "swerve", **wc_kwargs):
         self.pos = {p: list(v) for p, v in positions.items()}
         self.dt = dt
         self.applied: dict = {}
         wc = WanderController(
             [_FakePrim(p) for p in self.pos], speed=speed, near_miss_gap=gap,
             near_miss_mode=near_miss_mode, near_miss_hold_s=1.0, near_miss_depart_s=2.0, seed=3,
+            **wc_kwargs,
         )
         wc._world_position = lambda prim: _FixedVec(tuple(self.pos[str(prim.GetPath())]))
         wc._last_dt = dt
@@ -67,8 +69,12 @@ class _Sim:
 
     def run_tracked(self, steps: int):
         """run()의 내부 구현 겸 확장판 — 스텝별 (최소거리, 그 스텝에 적용된 speed dict)도
-        함께 반환한다. swerve의 "근접 중에도 감속 없음"·"통과 후 재이격" 검증에 필요."""
+        함께 반환한다. swerve의 "근접 중에도 감속 없음"·"통과 후 재이격" 검증에 필요.
+
+        v3의 조향률 검증용으로 스텝별 헤딩 각(rad)도 ``self.headings``에 남긴다 —
+        반환 튜플을 늘리면 기존 호출부가 전부 바뀌므로 속성으로 둔다."""
         dists, applied_log, phases = [], [], set()
+        self.headings = []
         for i in range(steps):
             now = i * self.dt
             self.applied.clear()
@@ -79,9 +85,22 @@ class _Sim:
                 d = self.wc._direction.get(path) or (0.0, 0.0, 0.0)
                 for k in range(3):
                     self.pos[path][k] += d[k] * v * self.dt
+            self.headings.append({p: math.atan2(d[2], d[0])
+                                  for p in self.applied
+                                  for d in [self.wc._direction.get(p) or (1.0, 0.0, 0.0)]})
             dists.append(self.min_distance())
             applied_log.append(dict(self.applied))
         return dists, phases, applied_log
+
+    def turn_rates_deg(self):
+        """``run_tracked`` 뒤에 호출 — 객체별·스텝별 헤딩 변화량(deg) 목록."""
+        out = []
+        for i in range(1, len(self.headings)):
+            prev, cur = self.headings[i - 1], self.headings[i]
+            for p, ang in cur.items():
+                if p in prev:
+                    out.append(math.degrees(abs((ang - prev[p] + math.pi) % (2 * math.pi) - math.pi)))
+        return out
 
     def run(self, steps: int):
         """반환: (전 스텝 최소거리, 관측된 페이즈 집합)"""
@@ -112,12 +131,109 @@ class NearMissChoreographyTest(unittest.TestCase):
         self.assertEqual(len(wc._near_miss_partners(["/W/a", "/W/b", "/W/c"])), 2)
 
     def test_approach_heading_points_at_partner(self):
-        sim = _Sim({"/W/a": [0.0, 90.0, 0.0], "/W/b": [1000.0, 90.0, 0.0]}, gap=95.0)
+        """approach 페이즈의 목표 헤딩은 짝 방향이다.
+
+        v3에서 조향률 상한이 생기면서 "한 틱 만에 짝 방향으로 스냅"은 더 이상 성립하지
+        않는다(초기 랜덤 헤딩에서 목표까지 상한 각속도로 돌아간다). 그래서 검증을 둘로
+        나눈다 — 상한을 끄면 예전과 똑같이 정확히 짝을 향하고(목표 자체는 그대로라는
+        확인), 상한이 켜진 기본값에서는 상한 안에서 짝 방향으로 수렴한다."""
+        far = {"/W/a": [0.0, 90.0, 0.0], "/W/b": [1000.0, 90.0, 0.0]}
+        # (1) 조향률 상한 없음(turn_radius_frac=0) — 목표 헤딩이 곧 적용 헤딩
+        sim = _Sim(dict(far), gap=95.0, near_miss_turn_radius_frac=0.0)
         sim.wc._initialize_directions()
         sim.wc._near_miss_step(0.0)
         self.assertAlmostEqual(sim.wc._direction["/W/a"][0], 1.0, places=6)   # a는 +x(b쪽)
         self.assertAlmostEqual(sim.wc._direction["/W/b"][0], -1.0, places=6)  # b는 -x(a쪽)
         self.assertEqual(sim.wc._nm_phase, "approach")
+
+        # (2) 기본값 — 한 틱에 스냅하지는 않지만, 회피 반경 밖에서 짝 방향으로 수렴한다.
+        sim2 = _Sim(dict(far), gap=95.0)
+        sim2.wc._initialize_directions()
+        for i in range(60):                    # 1초면 상한 각속도로 180도까지 돈다
+            sim2.wc._near_miss_step(i * sim2.dt)
+        self.assertGreater(sim2.wc._direction["/W/a"][0], 0.999)
+        self.assertLess(sim2.wc._direction["/W/b"][0], -0.999)
+
+    def test_v3_steering_rate_stays_under_cap(self):
+        """v3 조향률 상한: 틱당 헤딩 변화가 상한(= speed / 최소 선회 반경 × dt) 이하.
+
+        v2가 GUI에서 기각된 직접 원인이 "gap 코앞에서 한두 틱에 일어나는 급선회"였으므로,
+        그 급선회가 없다는 것을 곡률의 상한으로 고정한다. 상한을 넘을 수 있는 유일한
+        경로는 불변식을 지키는 하드 캡(``_swerve_direction``)과 응급 이탈인데, 둘 다
+        1:1 스침에서는 발동하지 않아야 한다(발동한다면 회피가 너무 늦게 시작했다는 뜻)."""
+        gap = 95.0
+        sim = _Sim({"/W/a": [0.0, 90.0, 0.0], "/W/b": [900.0, 90.0, 0.0]}, gap=gap)
+        sim.run_tracked(600)
+        cap_deg = math.degrees(sim.wc._near_miss_turn_rate() * sim.dt)
+        self.assertGreater(cap_deg, 0.0, "상한이 계산되지 않음")
+        worst = max(sim.turn_rates_deg())
+        self.assertLessEqual(worst, cap_deg * 1.01,
+                             f"급선회 잔존: {worst:.2f}deg/tick > 상한 {cap_deg:.2f}")
+
+    def test_v3_steering_rate_scales_with_turn_radius(self):
+        # 상한은 gap 배수로 준 최소 선회 반경에서 유도된다 — 반경 2배면 각속도 절반.
+        base = WanderController(prims=[], near_miss_gap=95.0, speed=240.0,
+                                near_miss_turn_radius_frac=1.0)
+        wide = WanderController(prims=[], near_miss_gap=95.0, speed=240.0,
+                                near_miss_turn_radius_frac=2.0)
+        self.assertAlmostEqual(base._near_miss_turn_rate(), 240.0 / 95.0, places=9)
+        self.assertAlmostEqual(wide._near_miss_turn_rate(), base._near_miss_turn_rate() / 2.0)
+        # 0이면 "상한 없음" — 목표 헤딩을 그대로 쓴다.
+        self.assertEqual(
+            WanderController(prims=[], near_miss_gap=95.0, near_miss_turn_radius_frac=0.0)
+            ._near_miss_turn_rate(), 0.0)
+
+    def test_v3_avoidance_begins_far_outside_gap(self):
+        """v3 회피 개시 반경: gap의 2배보다 먼 거리에서 이미 직진 경로를 벗어난다.
+
+        v2는 반경 캡이 gap 코앞에서야 걸려 그때까지 정면으로 직진했다 — "미리 피해
+        간다"는 인상이 안 생긴 이유다. 여기서는 두 객체를 정확히 마주보게 놓고(초기
+        랜덤 헤딩을 지워 편차의 원인을 회피 하나로 좁힌다) 진행축을 벗어난 성분이
+        처음 생기는 순간의 쌍 거리를 잰다."""
+        gap = 95.0
+        sim = _Sim({"/W/a": [0.0, 90.0, 0.0], "/W/b": [1200.0, 90.0, 0.0]}, gap=gap)
+        sim.wc._direction["/W/a"] = (1.0, 0.0, 0.0)     # 서로 정면 — 직진이면 z 성분 0
+        sim.wc._direction["/W/b"] = (-1.0, 0.0, 0.0)
+        first_dev_dist = None
+        for i in range(400):
+            sim.applied.clear()
+            sim.wc._initialize_directions()
+            sim.wc._near_miss_step(i * sim.dt)
+            if first_dev_dist is None and abs(sim.wc._direction["/W/a"][2]) > 1e-9:
+                first_dev_dist = sim.min_distance()
+            for path, v in sim.applied.items():
+                d = sim.wc._direction.get(path) or (0.0, 0.0, 0.0)
+                for k in range(3):
+                    sim.pos[path][k] += d[k] * v * sim.dt
+        self.assertIsNotNone(first_dev_dist, "회피가 전혀 시작되지 않음")
+        self.assertGreaterEqual(
+            first_dev_dist, 2.0 * gap,
+            f"회피 개시가 너무 늦음: d={first_dev_dist:.1f} (gap 2배={2*gap:.1f} 이상이어야)")
+
+    def test_v3_tunables_resolve_from_env(self):
+        # GUI 육안 검수에서 완만함을 되풀이 조정하므로 코드 수정 없이 env로 돌아가야 한다.
+        # 우선순위는 명시 인자 > env > 기본값.
+        import os
+
+        keys = ("TTS_NEAR_MISS_AVOID_FRAC", "TTS_NEAR_MISS_TURN_RADIUS_FRAC", "TTS_NEAR_MISS_AIM_FRAC")
+        saved = {k: os.environ.get(k) for k in keys}
+        try:
+            os.environ.update({keys[0]: "4.5", keys[1]: "2.5", keys[2]: "1.2"})
+            wc = WanderController(prims=[], near_miss_gap=95.0)
+            self.assertEqual((wc._nm_avoid_frac, wc._nm_turn_radius_frac, wc._nm_aim_frac),
+                             (4.5, 2.5, 1.2))
+            # 명시 인자가 env를 이긴다
+            self.assertEqual(WanderController(prims=[], near_miss_avoid_frac=6.0)._nm_avoid_frac, 6.0)
+            # 숫자가 아니면 경고 후 기본값
+            os.environ[keys[1]] = "not-a-number"
+            self.assertEqual(WanderController(prims=[])._nm_turn_radius_frac,
+                             WanderController._NEAR_MISS_TURN_RADIUS_FRAC)
+        finally:
+            for k, v in saved.items():
+                if v is None:
+                    os.environ.pop(k, None)
+                else:
+                    os.environ[k] = v
 
     def test_gap_invariant_holds_through_full_cycles(self):
         # 4객체 20초, stop 모드: 접근 → 정지 → 이탈을 여러 사이클 돌아도 gap 아래로 붙지 않아야 한다.

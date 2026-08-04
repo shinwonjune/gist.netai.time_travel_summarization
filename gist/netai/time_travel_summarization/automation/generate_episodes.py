@@ -21,6 +21,9 @@ near-miss 모드(--near-miss): 짝끼리 접근하다 중심거리 --near-miss-g
 "swerve"(감속 없이 스침 — GUI 육안 검수에서 "보이지 않는 벽" 인상을 준 v1을 대체),
 "stop"은 v1(감속+정지+방향전환) — 감속 단서 vs 근접 단서를 분리해 보는 대조군으로
 옵션으로 남긴다. 생성 직후 trace로 자체 검증(어느 모드든 좌표 불변식은 동일).
+swerve의 회피 곡선이 얼마나 완만한지는 --near-miss-avoid-frac / --near-miss-turn-radius-frac
+/ --near-miss-aim-frac(전부 gap 배수)으로 조정한다 — 미지정 시 환경변수
+TTS_NEAR_MISS_AVOID_FRAC 등을 보고, 그것도 없으면 코드 기본값을 쓴다.
 
 Pure helpers are importable/testable without Kit:
     python automation/generate_episodes.py --self-test
@@ -174,6 +177,12 @@ def check_near_miss_trace(text: str, gap: float, tol: float = 2.0,
           (안 그러면 "그냥 멀리 떨어져 돌아다닌 영상" = 근접 오탐 시험에 무의미)
     tol은 30Hz 샘플링이 최근접 순간을 놓쳐 생기는 오차 여유, near_eps 기본값은 gap의 15%.
     거리는 rule_baseline·GT 라벨러와 같은 3D 중심거리.
+
+    swerve(v3)는 gap이 아니라 gap × aim_frac(기본 1.05배)을 노리고 비껴가므로 정상
+    통과의 최소거리는 gap보다 5% 정도 큰 값으로 나온다 — 기본 near_eps(15%) 안이라
+    (b)를 만족한다. 반대로 선회 반경(--near-miss-turn-radius-frac)을 크게 올려 너무
+    완만하게 만들면 미리 넓게 벌어져 (b)가 깨지는데, 그때의 FAIL(approached=0)은
+    "조향이 과하게 완만하다"는 신호로 읽으면 된다.
     """
     if near_eps is None:
         near_eps = 0.15 * gap
@@ -592,6 +601,11 @@ def run(args, core=None) -> None:
             core.set_near_miss_gap(args.near_miss_gap if getattr(args, "near_miss", False) else 0.0)
         if hasattr(core, "set_near_miss_mode"):
             core.set_near_miss_mode(getattr(args, "near_miss_mode", "swerve"))
+        if hasattr(core, "set_near_miss_steering"):
+            core.set_near_miss_steering(
+                avoid_frac=getattr(args, "near_miss_avoid_frac", None),
+                turn_radius_frac=getattr(args, "near_miss_turn_radius_frac", None),
+                aim_frac=getattr(args, "near_miss_aim_frac", None))
         core.set_physics_mode()
         trace_path = str((out_root / f"_trace_{cfg.idx:04d}.csv").resolve())
         video_path = str((out_root / f"_video_{cfg.idx:04d}.mp4").resolve())
@@ -794,6 +808,18 @@ def main() -> None:
                          "지나감(gap 불변식은 반경 성분 캡으로 동일 보증). stop(v1): "
                          "감속+정지+방향전환 — GUI 육안 검수에서 '충돌처럼 보인다'는 "
                          "이유로 기각됐으나 감속 단서 대조군으로 옵션 유지")
+    # swerve(v3) 회피 곡선의 모양 — 전부 gap 배수. 미지정 시 컨트롤러가 환경변수
+    # (TTS_NEAR_MISS_*) → 코드 기본값(3.0 / 1.0 / 1.05) 순으로 해결한다.
+    ap.add_argument("--near-miss-avoid-frac", type=float, default=None,
+                    help="swerve 회피 개시 반경 = --near-miss-gap × 이 값(기본 3.0). "
+                         "크게 하면 더 멀리서부터 완만히 휘기 시작한다")
+    ap.add_argument("--near-miss-turn-radius-frac", type=float, default=None,
+                    help="swerve 최소 선회 반경 = --near-miss-gap × 이 값(기본 1.0). "
+                         "완만함을 좌우하는 값 — 키우면 큰 원을 그리듯 부드러워지지만, "
+                         "너무 키우면 제때 못 피해 gap 불변식 안전망이 대신 급선회한다")
+    ap.add_argument("--near-miss-aim-frac", type=float, default=None,
+                    help="swerve 목표 통과 간격 = --near-miss-gap × 이 값(기본 1.05). "
+                         "1.0이면 여유가 없어 안전망 개입이 잦아진다")
     ap.add_argument("--check-trace", type=str, default=None,
                     help="오프라인 검증: trace CSV 경로를 --near-miss-gap 기준으로 판정하고 종료 "
                          "(Kit 불필요; 통과 시 종료코드 0)")

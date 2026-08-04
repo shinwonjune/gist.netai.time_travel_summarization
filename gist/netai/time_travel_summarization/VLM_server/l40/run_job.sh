@@ -4,7 +4,8 @@
 # 입력: JobSpec.to_env()가 렌더링한 env 변수들 (JOB_ID, EPISODES, DURATION, GPU,
 #       RENDER_FPS, SPEED_MIN/MAX, MIN/MAX/EXTRA_OBJECTS, CAMERA, STAGE, APP_KIT,
 #       UPLOAD_URI, SPAWN_PLAN, KEEP_POSITIONS) + NEAR_MISS/NEAR_MISS_GAP/NEAR_MISS_MODE
-#       (대조 데이터셋, 기본 모드 swerve)
+#       (대조 데이터셋, 기본 모드 swerve) + NEAR_MISS_AVOID/TURN_RADIUS/AIM_FRAC
+#       (swerve 회피 곡선의 완만함 — 미지정 시 생성기 기본값)
 # 상태: $EXT_ROOT/artifacts/jobs/$JOB_ID/status 에 KEY=VALUE로 주기 갱신
 #       (state=running|done|failed, episodes_done, total, updated) — 제어면이 폴링.
 #
@@ -35,6 +36,11 @@ KEEP_POSITIONS="${KEEP_POSITIONS:-}"
 NEAR_MISS="${NEAR_MISS:-}"
 NEAR_MISS_GAP="${NEAR_MISS_GAP:-95}"
 NEAR_MISS_MODE="${NEAR_MISS_MODE:-swerve}"
+# swerve 회피 곡선의 완만함(전부 gap 배수, 빈 값이면 생성기 기본값 3.0 / 1.0 / 1.05).
+# TURN_RADIUS_FRAC이 완만함을 좌우하는 값 — 키우면 큰 원을 그리듯 부드러워진다.
+NEAR_MISS_AVOID_FRAC="${NEAR_MISS_AVOID_FRAC:-}"
+NEAR_MISS_TURN_RADIUS_FRAC="${NEAR_MISS_TURN_RADIUS_FRAC:-}"
+NEAR_MISS_AIM_FRAC="${NEAR_MISS_AIM_FRAC:-}"
 SEED="${SEED:-42}"   # run마다 반드시 다르게 — 같으면 이전 run과 동일 에피소드 재생성
 
 # ---- 경로 해석 (run_smoke.sh와 동일 규칙) ---------------------------------- #
@@ -104,6 +110,9 @@ EXEC_ARGS="$GEN --episodes $EPISODES --duration $DURATION --render-fps $RENDER_F
 [ -n "$SPAWN_PLAN" ] && EXEC_ARGS="$EXEC_ARGS --spawn-plan $SPAWN_PLAN"
 [ -n "$KEEP_POSITIONS" ] && EXEC_ARGS="$EXEC_ARGS --keep-positions"
 [ -n "$NEAR_MISS" ] && EXEC_ARGS="$EXEC_ARGS --near-miss --near-miss-gap $NEAR_MISS_GAP --near-miss-mode $NEAR_MISS_MODE"
+[ -n "$NEAR_MISS_AVOID_FRAC" ] && EXEC_ARGS="$EXEC_ARGS --near-miss-avoid-frac $NEAR_MISS_AVOID_FRAC"
+[ -n "$NEAR_MISS_TURN_RADIUS_FRAC" ] && EXEC_ARGS="$EXEC_ARGS --near-miss-turn-radius-frac $NEAR_MISS_TURN_RADIUS_FRAC"
+[ -n "$NEAR_MISS_AIM_FRAC" ] && EXEC_ARGS="$EXEC_ARGS --near-miss-aim-frac $NEAR_MISS_AIM_FRAC"
 
 # 워치독 상한: (로드 180s + ep×(D×7.2+30)) ×1.2 — CLAUDE.md 공식(보수적, 60fps 기준)
 DUR_INT="${DURATION%.*}"

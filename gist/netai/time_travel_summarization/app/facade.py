@@ -7,6 +7,8 @@ core를 구성하고, extension.py가 shutdown 시 _wander를 직접 만지기 �
 공개 API는 분해 전과 동일하다.
 """
 import datetime
+import os
+import time
 from pathlib import Path
 from typing import Dict, List, Optional
 
@@ -62,11 +64,23 @@ class TimeTravelCore:
         # 감속+정지+방향전환)이 "보이지 않는 벽" 인상으로 기각돼 swerve가 기본이다.
         # stop은 감속 단서 vs 근접 단서를 분리해 보는 대조군으로 옵션으로 남겨둔다.
         self._near_miss_mode = "swerve"
+        # near-miss swerve(v3) 조향 파라미터 — None이면 WanderController가 env
+        # (TTS_NEAR_MISS_AVOID_FRAC 등) → 코드 기본값 순으로 해결한다. GUI는 env로,
+        # 헤드리스 배치는 generate_episodes의 CLI 인자로 조정한다.
+        self._near_miss_avoid_frac = None
+        self._near_miss_turn_radius_frac = None
+        self._near_miss_aim_frac = None
         # 캡처 완료 알림(성공 시 output URI 전달) — extension.py가 VLM 창을 배선.
         self._capture_complete_cb = None
         # 재생 공백 점프: 데이터 공백이 이 값(초)을 넘으면 시계를 다음 데이터로
         # 순간이동(시계가 주인인 재생 구조에서, 공백 23h를 실시간으로 기지 않게).
         self._gap_skip_s = 10.0
+        # GUI E2E 재생 계측(레이크성능_실험설계 §2-C) — env 미설정 시 None(무부하).
+        self._lake_probe = None
+        if os.environ.get("TTS_LAKE_PROBE", "0") == "1":
+            from .lake_probe import LakeProbe
+            self._lake_probe = LakeProbe()
+            carb.log_warn("[TimeTravel] lake probe enabled (TTS_LAKE_PROBE=1)")
 
     # ---- 데이터 소스 / config (data_service) --------------------------------
 
@@ -240,7 +254,18 @@ class TimeTravelCore:
         self.set_current_time(self._maybe_skip_gap(t))
 
     def update(self, dt: float):
-        self._playback.update(dt, self._parse_timestamp, self._on_playback_tick, self._on_event_requested)
+        probe = getattr(self, "_lake_probe", None)  # __new__ 주입 테스트 대비 getattr
+        if probe is None:
+            self._playback.update(dt, self._parse_timestamp, self._on_playback_tick, self._on_event_requested)
+        else:
+            t0 = time.perf_counter()
+            self._playback.update(dt, self._parse_timestamp, self._on_playback_tick, self._on_event_requested)
+            probe.record(
+                tick_ms=(time.perf_counter() - t0) * 1000,
+                twin_time=self._playback.get_current_time(),
+                stats=getattr(self._repository, "stats", None),
+                is_playing=self._playback.is_playing(),
+            )
         if self._trace and self._trace.active:
             try:
                 # 충돌 CSV·오버레이와 동일 시계 — headless 캡처 중엔 sim 클럭.
@@ -396,6 +421,25 @@ class TimeTravelCore:
             carb.log_warn(f"[TimeTravel] invalid near_miss_mode: {mode!r} -> swerve")
             mode = "swerve"
         self._near_miss_mode = mode
+
+    def set_near_miss_steering(self, avoid_frac=None, turn_radius_frac=None, aim_frac=None) -> None:
+        """near-miss swerve(v3)의 회피 곡선 모양을 정하는 세 값. 전부 gap 배수다.
+
+        - ``avoid_frac``: 회피 개시 반경 = gap × 이 값. 크게 하면 더 멀리서부터 휘기
+          시작한다(대신 너무 크면 미리 벌어져 근접 자체가 안 일어날 수 있다).
+        - ``turn_radius_frac``: 최소 선회 반경 = gap × 이 값. **완만함을 좌우하는 값** —
+          크게 할수록 큰 원을 그리듯 부드럽게 돌지만, 너무 크면 제때 못 피해 gap 불변식
+          안전망(하드 캡)이 대신 개입하면서 오히려 급선회가 남는다.
+        - ``aim_frac``: 목표 통과 간격 = gap × 이 값. gap과 같게 두면 여유가 없어 하드
+          캡이 자주 개입하므로 1보다 조금 크게 잡는다.
+
+        None으로 두면 WanderController가 환경변수(TTS_NEAR_MISS_AVOID_FRAC,
+        TTS_NEAR_MISS_TURN_RADIUS_FRAC, TTS_NEAR_MISS_AIM_FRAC) → 코드 기본값 순으로
+        해결한다. set_physics_mode 전에 호출해야 반영된다(그때 컨트롤러 생성).
+        """
+        self._near_miss_avoid_frac = avoid_frac
+        self._near_miss_turn_radius_frac = turn_radius_frac
+        self._near_miss_aim_frac = aim_frac
 
     def start_wander(self) -> bool:
         """Start PhysX wandering when Physics mode has created a controller."""
