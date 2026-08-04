@@ -1,4 +1,5 @@
 import datetime
+import os
 from typing import Callable, List, Optional
 
 
@@ -7,6 +8,14 @@ class PlaybackController:
         self._range_start_time: Optional[datetime.datetime] = None
         self._range_end_time: Optional[datetime.datetime] = None
         self._current_time: Optional[datetime.datetime] = None
+        # 데이터 갱신 게이트(초): 재생 시간이 이만큼 누적돼야 lookup 1회 발동 —
+        # 기본 0.1(=1x 재생 시 최대 10Hz 갱신). 레이크 성능 실험에서 GUI lookup 밀도를
+        # 올리려면 env TTS_TICK_MIN_S로 조정한다(0.033→30Hz, 0.016→60Hz, 0=매 프레임).
+        # 생성 시점에 1회 읽음 — 변경은 extension 재시작 후 반영(레이크성능_실험설계 §0-3).
+        try:
+            self._tick_min_s = max(0.0, float(os.environ.get("TTS_TICK_MIN_S", "0.1")))
+        except ValueError:
+            self._tick_min_s = 0.1
 
         self._is_playing = False
         self._playback_speed = 1.0
@@ -99,7 +108,7 @@ class PlaybackController:
             return
 
         self._accumulated_time += dt * self._playback_speed
-        if abs(self._accumulated_time) < 0.1:
+        if abs(self._accumulated_time) < self._tick_min_s:
             return
 
         seconds_to_add = self._accumulated_time
