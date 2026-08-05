@@ -1018,7 +1018,7 @@ def main() -> None:
     # v4 대칭 파괴 — 조우 지점이 방 중앙에서 같은 기하로 반복되던 문제. 미지정 시
     # 컨트롤러가 환경변수(TTS_NEAR_MISS_START_JITTER_S 등) → 코드 기본값 순으로 해결.
     ap.add_argument("--near-miss-start-jitter", type=float, default=None,
-                    help="접근 개시 지연을 객체마다 0~이 초에서 무작위 추출(기본 5.0). "
+                    help="접근 개시 지연을 객체마다 0~이 초에서 무작위 추출(기본 2.0). "
                          "늦게 도는 쪽으로 조우 지점이 끌려가 대칭이 깨진다. 0이면 끔")
     ap.add_argument("--near-miss-speed-min-frac", type=float, default=None,
                     help="사이클마다 뽑는 객체별 순항 속도의 하한 = --speed × 이 값(기본 0.7). "
