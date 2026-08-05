@@ -14,13 +14,13 @@ from typing import Optional, Sequence, Tuple
 #
 # MARKER_UP_OFFSET — 3D 앵커 상향 오프셋(스테이지 단위=cm). 발밑(객체 원점) 앵커는
 # BEV 투시와 상호작용해 몸통이 마커 밖으로 삐져나오는 문제(리포트 한계 11)의 해소책.
-# 어깨 높이 145는 GUI 뷰포트 육안으로 확정(150=어깨 살짝 위 → 145). 앵커는 3D 점이라
-# 라이브 코드라면 캡처 렌더에서도 같은 신체 높이(어깨)에 투영된다.
-MARKER_UP_OFFSET = 145.0
-# MARKER_RADIUS_PX — 캡처 마커 원 반지름(픽셀). v1은 12, "조금 축소" 요청 반영해 10.
-# 숫자(font_size=12)는 그대로 두고 원만 줄인다. v1 클립 분석(overlay_flags)의 12
-# 가정과 구분할 것. (구코드 렌더 기반이던 9·8은 폐기 — 라이브 렌더 확인 후 재조정)
-MARKER_RADIUS_PX = 10
+# 라이브 렌더 육안 이력: 145 = 목 높이로 관측(2026-08-05) → 135로 하향(어깨 목표).
+# GUI 라벨(components, 145)과 ±10 이내 차이는 시점별 지각 차이로 허용.
+MARKER_UP_OFFSET = 135.0
+# MARKER_RADIUS_PX — 캡처 마커 원 반지름(픽셀). v1은 12 → 라이브 렌더 육안으로 10 →
+# 9(2026-08-05 확정 조정). 숫자(font_size=12)는 그대로 두고 원만 줄인다. v1 클립
+# 분석(overlay_flags)의 12 가정과 구분할 것.
+MARKER_RADIUS_PX = 9
 
 
 @dataclass(frozen=True)
