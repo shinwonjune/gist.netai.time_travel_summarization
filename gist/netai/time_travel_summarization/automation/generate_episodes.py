@@ -25,6 +25,15 @@ swerve의 회피 곡선이 얼마나 완만한지는 --near-miss-avoid-frac / --
 / --near-miss-aim-frac(전부 gap 배수)으로 조정한다 — 미지정 시 환경변수
 TTS_NEAR_MISS_AVOID_FRAC 등을 보고, 그것도 없으면 코드 기본값을 쓴다.
 
+조우가 **어디서** 일어나는지의 다양성은 --near-miss-start-jitter(접근 개시 지연) /
+--near-miss-speed-min-frac·--near-miss-speed-max-frac(객체별 순항 속도) /
+--near-miss-depart-spread(이탈 방향 부채꼴)로 조정한다. 이 셋이 없던 시절에는 짝이
+동시에·같은 속도로·서로를 정면 조준해 접근했기 때문에 조우가 두 스폰 위치의 중점
+(스폰 구역이 방 중앙 대칭이라 결국 방 중앙)에서 거의 같은 기하로 반복됐고, 그 결과
+near-miss 클립들이 강하게 상관되어 유효 표본 수가 명목 개수보다 훨씬 작아졌다.
+전부 0(이탈 부채꼴은 0 이하)으로 주면 그 시절 안무로 되돌아간다. 생성된 trace의
+조우 분포는 near_miss_diversity(--check-trace 출력에도 같이 찍힌다)로 확인한다.
+
 Pure helpers are importable/testable without Kit:
     python automation/generate_episodes.py --self-test
     python automation/generate_episodes.py --check-trace <trace.csv> --near-miss-gap 95
@@ -167,6 +176,156 @@ def organize_outputs(out_root: Path, idx: int, video: Path,
     return ep_dir
 
 
+def parse_trace_frames(text: str) -> Dict[str, Dict[str, Tuple[float, float, float]]]:
+    """trace CSV(``timestamp,objid,x,y,z``) → ``{타임스탬프: {objid: (x,y,z)}}``.
+
+    dict는 삽입 순서를 지키므로 파일에 적힌 프레임 순서가 그대로 시간 순서가 된다 —
+    아래 조우 사건 검출(``near_miss_events``)이 그 순서에 기대어 국소 극소점을 찾는다.
+    """
+    frames: Dict[str, Dict[str, Tuple[float, float, float]]] = {}
+    for line in text.splitlines()[1:]:
+        if not line.strip():
+            continue
+        ts, objid, x, y, z = (c.strip() for c in line.split(","))
+        frames.setdefault(ts, {})[objid] = (float(x), float(y), float(z))
+    return frames
+
+
+def near_miss_events(frames: Dict[str, Dict[str, Tuple[float, float, float]]], gap: float,
+                     event_frac: float = 2.0, refractory: int = 30) -> List[dict]:
+    """trace에서 "조우 사건"을 뽑는다 — 쌍 거리의 국소 극소점 중 충분히 가까운 것.
+
+    한 사건의 정의는 이렇다. 어떤 쌍의 중심거리 시계열에서 앞뒤 프레임보다 작아지는
+    지점(국소 극소점)이 생기면 그 순간이 "가장 가까이 붙었다가 다시 멀어지기 시작한"
+    순간이고, 그 거리가 ``gap × event_frac`` 안이면 near-miss 안무가 의도한 조우로
+    본다. 문턱을 gap 자체가 아니라 그 몇 배로 두는 이유는, swerve가 노리는 통과 간격이
+    gap × aim_frac이라 정확히 gap까지 붙지는 않기 때문이고, 또 조우 지점의 **분포**를
+    보는 것이 목적이라 "얼마나 붙었나"보다 "어디서 만났나"가 중요하기 때문이다.
+
+    사건의 위치는 그 순간 두 객체의 중점으로 잡는다 — 두 객체 중 하나의 좌표를 쓰면
+    같은 조우를 어느 쪽에서 보느냐에 따라 gap의 절반만큼 어긋나므로, 조우 자체의
+    위치로는 중점이 자연스럽다.
+
+    양 끝 프레임은 사건 후보에서 제외한다(앞 또는 뒤가 없어 "다시 멀어졌다"를 관측할
+    수 없다 — 아직 진행 중인 접근을 조우로 세면 사건 수가 부풀려진다).
+
+    ``refractory``는 같은 쌍의 사건이 최소 이만큼(프레임) 떨어져 있어야 별개로 센다는
+    불응기다. 30Hz trace 기준 기본 30프레임 = 1초. 한 번의 스침에서 좌표 흔들림으로
+    극소점이 여러 개 잡히는 것을 하나로 합치는 장치이고, 겹치는 후보 중에서는 가장
+    깊은(가장 가까웠던) 것을 남긴다.
+    """
+    keys = list(frames)
+    series: Dict[Tuple[str, str], List[Tuple[int, float, Tuple[float, float, float]]]] = {}
+    for i, ts in enumerate(keys):
+        objs = frames[ts]
+        ids = sorted(objs)
+        for m in range(len(ids)):
+            for n in range(m + 1, len(ids)):
+                pa, pb = objs[ids[m]], objs[ids[n]]
+                d = sum((pa[k] - pb[k]) ** 2 for k in range(3)) ** 0.5
+                mid = tuple((pa[k] + pb[k]) / 2.0 for k in range(3))
+                series.setdefault((ids[m], ids[n]), []).append((i, d, mid))
+    thresh = gap * event_frac
+    cands: List[Tuple[float, Tuple[str, str], int, Tuple[float, float, float]]] = []
+    for pair, pts in series.items():
+        for j in range(1, len(pts) - 1):
+            idx, d, mid = pts[j]
+            if d > thresh:
+                continue
+            # 왼쪽은 <= 로 평평한 구간(같은 값이 이어지는 샘플링 아티팩트)을 흡수하고,
+            # 오른쪽은 < 로 두어 그 평평한 구간이 여러 사건으로 중복 검출되지 않게 한다.
+            if d <= pts[j - 1][1] and d < pts[j + 1][1]:
+                cands.append((d, pair, idx, mid))
+    kept: List[Tuple[float, Tuple[str, str], int, Tuple[float, float, float]]] = []
+    for d, pair, idx, mid in sorted(cands, key=lambda c: (c[0], c[2])):
+        if any(p == pair and abs(idx - i2) < refractory for _, p, i2, _ in kept):
+            continue
+        kept.append((d, pair, idx, mid))
+    kept.sort(key=lambda c: c[2])
+    return [{"frame": idx, "pair": pair, "dist": round(d, 3), "pos": mid}
+            for d, pair, idx, mid in kept]
+
+
+def near_miss_diversity(frames: Dict[str, Dict[str, Tuple[float, float, float]]], gap: float,
+                        bounds: Optional[Tuple[Tuple[float, float], Tuple[float, float]]] = None,
+                        grid: int = 4, axes: Tuple[int, int] = (0, 2),
+                        **event_kwargs) -> dict:
+    """조우 지점의 **공간적 다양성**을 수치화한다(near-miss 안무 대칭 파괴의 판정 지표).
+
+    배경: v3까지의 near-miss는 짝이 동시에·같은 속도로·서로를 정면 조준해 접근했기
+    때문에 조우가 두 스폰 위치의 중점(스폰 구역이 방 중앙 대칭이므로 결국 방 중앙)
+    부근에서 거의 같은 기하로 반복됐다. 이 함수는 그 반복을 사람 눈이 아니라 숫자로
+    잡기 위한 것이다 — 곡률(틱당 헤딩 변화) 지표가 "조우 한 번의 모양"만 보고 "조우들이
+    어디에 흩어져 있는가"는 전혀 못 봤다는 것이 v3의 교훈이었다.
+
+    돌려주는 값 셋(요청 지표 a·b·c에 대응):
+      - ``events``: 사건 수. 대칭 파괴가 조우 자체를 없애버리지 않았다는 확인 —
+        위치만 흩어지고 조우가 안 일어나면 대조 데이터로 쓸모가 없다.
+      - ``std``/``rms_radius``/``spread_frac``: 사건 위치의 흩어짐. ``rms_radius``는
+        중심에서의 RMS 거리(=두 축 표준편차의 제곱합 제곱근)이고, ``spread_frac``은
+        그것을 방의 짧은 변으로 나눈 무차원 값이다. ``coverage``는 방을
+        ``grid × grid`` 칸으로 나눴을 때 사건이 하나라도 들어간 칸의 비율 — 표준편차가
+        같아도 두 군데에만 몰려 있는 것과 고루 퍼진 것을 구분한다.
+      - ``min_sep``: 사건들 사이의 최소 이격. 서로 다른 조우가 사실상 같은 자리에서
+        일어났는지를 잡는다(표준편차는 큰데 min_sep이 0에 가까우면 "몇 군데에 겹쳐서
+        반복"이라는 뜻).
+
+    ``coverage``는 사건 수에 딸려 올라가는 값이라(사건이 3개뿐이면 16칸 중 최대 3칸
+    = 18.75%가 천장이다) 사건 수가 다른 두 설정을 그대로 비교하면 안 된다. 그래서
+    ``coverage_eff``를 같이 준다 — 점유 칸 수를 "그 사건 수로 도달 가능한 최대 칸 수"
+    ``min(events, grid²)``로 나눈 값이라, 사건 수와 무관하게 "사건들이 서로 다른 칸에
+    떨어졌는가"만 본다(1.0이면 모든 사건이 각자 다른 칸).
+
+    ``bounds``는 방 크기 ``((u0, v0), (u1, v1))``(수평 두 축). 주지 않으면 trace에
+    찍힌 모든 객체 좌표의 최소·최대에서 유도한다 — 객체가 방을 돌아다니므로 그 외접
+    사각형이 방 크기의 실용적 근사다. 다만 유도한 경계는 궤적에 따라 달라지므로,
+    서로 다른 설정을 비교할 때는 같은 ``bounds``를 명시로 넘겨야 ``coverage``와
+    ``spread_frac``이 같은 잣대가 된다.
+    """
+    events = near_miss_events(frames, gap, **event_kwargs)
+    au, av = axes
+    if bounds is None:
+        us = [p[au] for objs in frames.values() for p in objs.values()]
+        vs = [p[av] for objs in frames.values() for p in objs.values()]
+        bounds = ((min(us), min(vs)), (max(us), max(vs))) if us else ((0.0, 0.0), (1.0, 1.0))
+    (u0, v0), (u1, v1) = bounds
+    room_u, room_v = max(1e-9, u1 - u0), max(1e-9, v1 - v0)
+    pts = [(e["pos"][au], e["pos"][av]) for e in events]
+    out: dict = {
+        "events": len(pts),
+        "room": (round(room_u, 2), round(room_v, 2)),
+        "centroid": None, "std": None, "rms_radius": None, "spread_frac": None,
+        "span_frac": None, "coverage": None, "coverage_eff": None, "min_sep": None,
+    }
+    if not pts:
+        return out
+    cu = sum(p[0] for p in pts) / len(pts)
+    cv = sum(p[1] for p in pts) / len(pts)
+    su = (sum((p[0] - cu) ** 2 for p in pts) / len(pts)) ** 0.5
+    sv = (sum((p[1] - cv) ** 2 for p in pts) / len(pts)) ** 0.5
+    cells = {(min(grid - 1, max(0, int((p[0] - u0) / room_u * grid))),
+              min(grid - 1, max(0, int((p[1] - v0) / room_v * grid)))) for p in pts}
+    seps = [((pts[i][0] - pts[j][0]) ** 2 + (pts[i][1] - pts[j][1]) ** 2) ** 0.5
+            for i in range(len(pts)) for j in range(i + 1, len(pts))]
+    out.update({
+        "centroid": (round(cu, 2), round(cv, 2)),
+        "std": (round(su, 2), round(sv, 2)),
+        "rms_radius": round((su * su + sv * sv) ** 0.5, 2),
+        "spread_frac": round((su * su + sv * sv) ** 0.5 / min(room_u, room_v), 4),
+        "span_frac": (round((max(p[0] for p in pts) - min(p[0] for p in pts)) / room_u, 4),
+                      round((max(p[1] for p in pts) - min(p[1] for p in pts)) / room_v, 4)),
+        "coverage": round(len(cells) / float(grid * grid), 4),
+        "coverage_eff": round(len(cells) / float(min(len(pts), grid * grid)), 4),
+        "min_sep": round(min(seps), 2) if seps else None,
+    })
+    return out
+
+
+def check_near_miss_diversity(text: str, gap: float, **kwargs) -> dict:
+    """``near_miss_diversity``의 CSV 입력판 — trace 파일 하나를 그대로 받는다."""
+    return near_miss_diversity(parse_trace_frames(text), gap, **kwargs)
+
+
 def check_near_miss_trace(text: str, gap: float, tol: float = 2.0,
                           near_eps: Optional[float] = None) -> dict:
     """near-miss 에피소드의 trace 자체 검증(순수 — Kit·외부 패키지 불필요).
@@ -186,12 +345,7 @@ def check_near_miss_trace(text: str, gap: float, tol: float = 2.0,
     """
     if near_eps is None:
         near_eps = 0.15 * gap
-    frames: Dict[str, Dict[str, Tuple[float, float, float]]] = {}
-    for line in text.splitlines()[1:]:
-        if not line.strip():
-            continue
-        ts, objid, x, y, z = (c.strip() for c in line.split(","))
-        frames.setdefault(ts, {})[objid] = (float(x), float(y), float(z))
+    frames = parse_trace_frames(text)
     pair_min: Dict[Tuple[str, str], float] = {}
     for objs in frames.values():
         ids = sorted(objs)
@@ -606,6 +760,12 @@ def run(args, core=None) -> None:
                 avoid_frac=getattr(args, "near_miss_avoid_frac", None),
                 turn_radius_frac=getattr(args, "near_miss_turn_radius_frac", None),
                 aim_frac=getattr(args, "near_miss_aim_frac", None))
+        if hasattr(core, "set_near_miss_diversity"):
+            core.set_near_miss_diversity(
+                start_jitter_s=getattr(args, "near_miss_start_jitter", None),
+                speed_min_frac=getattr(args, "near_miss_speed_min_frac", None),
+                speed_max_frac=getattr(args, "near_miss_speed_max_frac", None),
+                depart_spread_deg=getattr(args, "near_miss_depart_spread", None))
         core.set_physics_mode()
         trace_path = str((out_root / f"_trace_{cfg.idx:04d}.csv").resolve())
         video_path = str((out_root / f"_video_{cfg.idx:04d}.mp4").resolve())
@@ -624,13 +784,20 @@ def run(args, core=None) -> None:
         if getattr(args, "near_miss", False):
             # 좌표로 즉시 자체 검증 — 접촉 없음(GT 0의 필요조건) + 접근이 실제로 일어남.
             try:
-                res = check_near_miss_trace(Path(trace_path).read_text(encoding="utf-8"),
-                                            args.near_miss_gap)
+                nm_text = Path(trace_path).read_text(encoding="utf-8")
+                res = check_near_miss_trace(nm_text, args.near_miss_gap)
                 print(f"[gen] near-miss check ep {cfg.idx} mode={getattr(args, 'near_miss_mode', 'swerve')}: "
                       f"{'OK' if res['ok'] else 'FAIL'} "
                       f"min_d={res['min_dist']} pair={res['min_pair']} "
                       f"approached={res['approached']}/{res['pairs']} frames={res['frames']} "
                       f"violations={res['violations']}")
+                # 조우 다양성(합격 기준 아님 — 배치 전체를 놓고 읽는 관찰 지표).
+                # 에피소드마다 events가 1~2에 머물거나 spread가 0에 가까우면 대칭
+                # 파괴가 안 먹은 것이므로, 배치 로그에서 바로 눈에 띄게 같이 찍는다.
+                div = check_near_miss_diversity(nm_text, args.near_miss_gap)
+                print(f"[gen] near-miss diversity ep {cfg.idx}: events={div['events']} "
+                      f"spread={div['rms_radius']} ({div['spread_frac']} of short side) "
+                      f"coverage={div['coverage']} min_sep={div['min_sep']}")
             except Exception as e:
                 print(f"[gen] near-miss check ep {cfg.idx}: FAILED to read trace: {e!r}")
         if not produced:
@@ -749,6 +916,34 @@ def _self_test() -> None:
     # tol 여유: gap - tol 이상이면 통과(30Hz 샘플링이 최근접 순간을 놓치는 경우)
     assert check_near_miss_trace(nm_trace([400, 94, 400]), gap=95.0, tol=2.0)["ok"]
     assert check_near_miss_trace("timestamp,objid,x,y,z\n", gap=95.0)["ok"] is False
+
+    # 조우 다양성: 쌍 거리의 국소 극소점을 사건으로 뽑아 흩어짐을 잰다(위 검증과
+    # 직교하는 축 — 같은 자리에서 같은 조우만 반복해도 gap 불변식은 지켜지므로,
+    # 그 반복은 통과/실패가 아니라 이 지표로만 드러난다).
+    def nm_trace_at(spots, sep_min=100.0, n=40) -> str:
+        out = ["timestamp,objid,x,y,z"]
+        f = 0
+        for (sx, sz) in spots:
+            for i in range(n):
+                d = sep_min + abs(i - n // 2) * 30.0
+                ts = f"2026-07-28 10:{f // 600:02d}:{(f // 10) % 60:02d}.{(f % 10) * 100:03d}"
+                out.append(f"{ts},obj001,{sx:.3f},90.000,{sz:.3f}")
+                out.append(f"{ts},obj002,{sx + d:.3f},90.000,{sz:.3f}")
+                f += 1
+        return "\n".join(out) + "\n"
+    room = ((0.0, 0.0), (900.0, 900.0))
+    one_spot = check_near_miss_diversity(nm_trace_at([(450.0, 450.0)] * 4), gap=95.0, bounds=room)
+    scattered = check_near_miss_diversity(
+        nm_trace_at([(150.0, 150.0), (700.0, 200.0), (200.0, 750.0), (750.0, 700.0)]),
+        gap=95.0, bounds=room)
+    assert one_spot["events"] == scattered["events"] == 4, (one_spot, scattered)
+    assert one_spot["rms_radius"] == 0.0 and one_spot["min_sep"] == 0.0, one_spot
+    assert scattered["rms_radius"] > 300.0 and scattered["min_sep"] > 300.0, scattered
+    assert one_spot["coverage_eff"] == 0.25 and scattered["coverage_eff"] == 1.0, (one_spot, scattered)
+    # 문턱(gap × event_frac) 밖에서만 오가면 조우로 세지 않는다
+    assert check_near_miss_diversity(nm_trace_at([(450.0, 450.0)], sep_min=400.0),
+                                     gap=95.0, bounds=room)["events"] == 0
+    assert check_near_miss_diversity("timestamp,objid,x,y,z\n", gap=95.0)["events"] == 0
     with tempfile.TemporaryDirectory() as d:
         root = Path(d)
         v = root / "_video_0003.mp4"
@@ -820,6 +1015,20 @@ def main() -> None:
     ap.add_argument("--near-miss-aim-frac", type=float, default=None,
                     help="swerve 목표 통과 간격 = --near-miss-gap × 이 값(기본 1.05). "
                          "1.0이면 여유가 없어 안전망 개입이 잦아진다")
+    # v4 대칭 파괴 — 조우 지점이 방 중앙에서 같은 기하로 반복되던 문제. 미지정 시
+    # 컨트롤러가 환경변수(TTS_NEAR_MISS_START_JITTER_S 등) → 코드 기본값 순으로 해결.
+    ap.add_argument("--near-miss-start-jitter", type=float, default=None,
+                    help="접근 개시 지연을 객체마다 0~이 초에서 무작위 추출(기본 5.0). "
+                         "늦게 도는 쪽으로 조우 지점이 끌려가 대칭이 깨진다. 0이면 끔")
+    ap.add_argument("--near-miss-speed-min-frac", type=float, default=None,
+                    help="사이클마다 뽑는 객체별 순항 속도의 하한 = --speed × 이 값(기본 0.7). "
+                         "상한과 같게 두면 속도 비대칭을 끄는 것과 같다")
+    ap.add_argument("--near-miss-speed-max-frac", type=float, default=None,
+                    help="같은 순항 속도의 상한 = --speed × 이 값(기본 1.0, 1.0 초과 불가 — "
+                         "지시 속도가 천장이라는 성질에 조향률 상한 계산이 기대고 있다)")
+    ap.add_argument("--near-miss-depart-spread", type=float, default=None,
+                    help="스침 뒤 이탈 방향을 '짝의 반대 방향 ±이 각도(deg)'에서 무작위 "
+                         "추출(기본 90). 다음 사이클 시작 배치를 비대칭화한다. 0 이하면 끔")
     ap.add_argument("--check-trace", type=str, default=None,
                     help="오프라인 검증: trace CSV 경로를 --near-miss-gap 기준으로 판정하고 종료 "
                          "(Kit 불필요; 통과 시 종료코드 0)")
@@ -834,13 +1043,20 @@ def main() -> None:
         _self_test()
         return
     if args.check_trace:
-        res = check_near_miss_trace(Path(args.check_trace).read_text(encoding="utf-8"),
-                                    args.near_miss_gap)
+        text = Path(args.check_trace).read_text(encoding="utf-8")
+        res = check_near_miss_trace(text, args.near_miss_gap)
         print(f"[check] {'OK' if res['ok'] else 'FAIL'} gap={args.near_miss_gap} "
               f"min_d={res['min_dist']} pair={res['min_pair']} "
               f"approached={res['approached']}/{res['pairs']} frames={res['frames']}")
         for v in res["violations"]:
             print(f"[check] violation: {v['pair']} min_d={v['min_dist']}")
+        # 조우 다양성은 통과/실패를 가르지 않는다(합격 기준이 아니라 관찰 지표) —
+        # 같은 자리에서 같은 조우만 반복하는 에피소드도 gap 불변식은 지키기 때문에
+        # ok 판정과 분리해 따로 출력한다. 경계는 이 trace의 좌표 범위에서 유도한다.
+        div = check_near_miss_diversity(text, args.near_miss_gap)
+        print(f"[check] diversity: events={div['events']} room={div['room']} "
+              f"spread={div['rms_radius']} ({div['spread_frac']} of short side) "
+              f"coverage={div['coverage']} min_sep={div['min_sep']}")
         raise SystemExit(0 if res["ok"] else 1)
     try:
         run(args)

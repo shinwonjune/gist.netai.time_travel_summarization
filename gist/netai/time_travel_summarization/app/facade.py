@@ -70,6 +70,12 @@ class TimeTravelCore:
         self._near_miss_avoid_frac = None
         self._near_miss_turn_radius_frac = None
         self._near_miss_aim_frac = None
+        # near-miss v4 대칭 파괴 파라미터(조우 지점이 방 중앙에서 반복되던 문제) —
+        # 위와 같은 None 규약(env → 코드 기본값). set_near_miss_diversity 참조.
+        self._near_miss_start_jitter_s = None
+        self._near_miss_speed_min_frac = None
+        self._near_miss_speed_max_frac = None
+        self._near_miss_depart_spread_deg = None
         # 캡처 완료 알림(성공 시 output URI 전달) — extension.py가 VLM 창을 배선.
         self._capture_complete_cb = None
         # 재생 공백 점프: 데이터 공백이 이 값(초)을 넘으면 시계를 다음 데이터로
@@ -440,6 +446,42 @@ class TimeTravelCore:
         self._near_miss_avoid_frac = avoid_frac
         self._near_miss_turn_radius_frac = turn_radius_frac
         self._near_miss_aim_frac = aim_frac
+
+    def set_near_miss_diversity(self, start_jitter_s=None, speed_min_frac=None,
+                                speed_max_frac=None, depart_spread_deg=None) -> None:
+        """near-miss 조우의 **다양성**을 정하는 네 값(v4 대칭 파괴).
+
+        v3까지는 짝이 동시에·같은 속도로·서로를 정면 조준해 접근했기 때문에 조우가
+        두 스폰 위치의 중점 부근에서 거의 같은 기하로 반복됐다(스폰 구역이 방 중앙
+        대칭이므로 결국 방 중앙). 조우 지점을 명시적으로 지정하는 대신 아래 세 축의
+        대칭을 깨서 조우 지점이 저절로 흩어지게 한다.
+
+        - ``start_jitter_s``: 접근 페이즈로 넘어간 뒤 객체마다 0~이 초 사이의 무작위
+          지연이 지나야 짝을 조준한다. 늦게 도는 쪽이 그 사이 이동한 만큼 조우 지점이
+          그쪽으로 끌려간다(기본 5.0초).
+        - ``speed_min_frac``/``speed_max_frac``: 사이클마다 객체별 순항 속도를
+          speed × [min, max]에서 독립 추출한다(기본 0.7~1.0). 빠른 쪽이 더 많이
+          이동하므로 만나는 지점이 느린 쪽으로 치우친다. 상한은 1.0을 넘길 수 없다 —
+          speed가 천장이라는 성질에 조향률 상한 계산이 기대고 있다.
+        - ``depart_spread_deg``: 스침 뒤 이탈 방향을 "짝의 반대 방향 ±이 각도"에서
+          무작위로 뽑는다(기본 90도). 다음 사이클의 시작 배치가 비대칭이 되어 앞의
+          두 효과가 사이클마다 누적된다. 0 이하로 주면 이탈 재조준을 끄고 v3처럼
+          스침 헤딩을 그대로 이어간다.
+
+        None으로 두면 WanderController가 환경변수(TTS_NEAR_MISS_START_JITTER_S,
+        TTS_NEAR_MISS_SPEED_MIN_FRAC, TTS_NEAR_MISS_SPEED_MAX_FRAC,
+        TTS_NEAR_MISS_DEPART_SPREAD_DEG) → 코드 기본값 순으로 해결한다.
+        set_physics_mode 전에 호출해야 반영된다(그때 컨트롤러 생성).
+
+        어느 값을 어떻게 흔들어도 gap 불변식(=접촉 없음 = GT 충돌 0건)은 영향을 받지
+        않는다. 그 보증은 "각 객체가 자기 반경 속도 성분을 (거리-gap)/(2·dt) 이하로
+        묶는다"는 형태라, 두 객체의 속도가 서로 달라도 어느 쪽이 언제 출발했어도
+        한 스텝의 접근량 합이 (거리-gap)을 넘지 못한다는 논증이 그대로 성립한다.
+        """
+        self._near_miss_start_jitter_s = start_jitter_s
+        self._near_miss_speed_min_frac = speed_min_frac
+        self._near_miss_speed_max_frac = speed_max_frac
+        self._near_miss_depart_spread_deg = depart_spread_deg
 
     def start_wander(self) -> bool:
         """Start PhysX wandering when Physics mode has created a controller."""

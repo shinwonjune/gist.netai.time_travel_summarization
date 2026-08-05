@@ -237,6 +237,10 @@ def set_physics_mode(core) -> None:
         near_miss_avoid_frac=getattr(core, "_near_miss_avoid_frac", None),
         near_miss_turn_radius_frac=getattr(core, "_near_miss_turn_radius_frac", None),
         near_miss_aim_frac=getattr(core, "_near_miss_aim_frac", None),
+        near_miss_start_jitter_s=getattr(core, "_near_miss_start_jitter_s", None),
+        near_miss_speed_min_frac=getattr(core, "_near_miss_speed_min_frac", None),
+        near_miss_speed_max_frac=getattr(core, "_near_miss_speed_max_frac", None),
+        near_miss_depart_spread_deg=getattr(core, "_near_miss_depart_spread_deg", None),
         seed=core._wander_seed,
     )
     if near_miss_gap > 0.0 and near_miss_mode == "swerve":
@@ -245,6 +249,12 @@ def set_physics_mode(core) -> None:
             f"[Physics] near-miss swerve steering: avoid={w._nm_avoid_frac:g}x gap "
             f"({near_miss_gap * w._nm_avoid_frac:.0f}), turn radius={w._nm_turn_radius_frac:g}x gap "
             f"({near_miss_gap * w._nm_turn_radius_frac:.0f}), aim={w._nm_aim_frac:g}x gap")
+        carb.log_warn(
+            f"[Physics] near-miss diversity: start jitter=0-{w._nm_start_jitter_s:g}s, "
+            f"speed={w._nm_speed_min_frac:g}-{w._nm_speed_max_frac:g}x "
+            f"({core._wander_speed * w._nm_speed_min_frac:.0f}-"
+            f"{core._wander_speed * w._nm_speed_max_frac:.0f} units/s), "
+            f"depart spread=+/-{w._nm_depart_spread_deg:g}deg")
 
     try:
         import omni.timeline

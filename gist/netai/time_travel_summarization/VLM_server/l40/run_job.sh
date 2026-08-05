@@ -5,7 +5,8 @@
 #       RENDER_FPS, SPEED_MIN/MAX, MIN/MAX/EXTRA_OBJECTS, CAMERA, STAGE, APP_KIT,
 #       UPLOAD_URI, SPAWN_PLAN, KEEP_POSITIONS) + NEAR_MISS/NEAR_MISS_GAP/NEAR_MISS_MODE
 #       (대조 데이터셋, 기본 모드 swerve) + NEAR_MISS_AVOID/TURN_RADIUS/AIM_FRAC
-#       (swerve 회피 곡선의 완만함 — 미지정 시 생성기 기본값)
+#       (swerve 회피 곡선의 완만함 — 미지정 시 생성기 기본값) + NEAR_MISS_START_JITTER/
+#       SPEED_MIN_FRAC/SPEED_MAX_FRAC/DEPART_SPREAD (조우 지점의 다양성)
 # 상태: $EXT_ROOT/artifacts/jobs/$JOB_ID/status 에 KEY=VALUE로 주기 갱신
 #       (state=running|done|failed, episodes_done, total, updated) — 제어면이 폴링.
 #
@@ -41,6 +42,13 @@ NEAR_MISS_MODE="${NEAR_MISS_MODE:-swerve}"
 NEAR_MISS_AVOID_FRAC="${NEAR_MISS_AVOID_FRAC:-}"
 NEAR_MISS_TURN_RADIUS_FRAC="${NEAR_MISS_TURN_RADIUS_FRAC:-}"
 NEAR_MISS_AIM_FRAC="${NEAR_MISS_AIM_FRAC:-}"
+# 조우 지점의 다양성(빈 값이면 생성기 기본값 2.0초 / 0.7~1.0배 / ±90도). 이 셋이
+# 짝의 대칭(동시 출발·같은 속도·대칭 이탈)을 깨서 조우가 방 중앙에서 같은 기하로
+# 반복되는 것을 막는다. 전부 0(부채꼴은 0 이하)으로 주면 대칭 안무로 되돌아간다.
+NEAR_MISS_START_JITTER="${NEAR_MISS_START_JITTER:-}"
+NEAR_MISS_SPEED_MIN_FRAC="${NEAR_MISS_SPEED_MIN_FRAC:-}"
+NEAR_MISS_SPEED_MAX_FRAC="${NEAR_MISS_SPEED_MAX_FRAC:-}"
+NEAR_MISS_DEPART_SPREAD="${NEAR_MISS_DEPART_SPREAD:-}"
 SEED="${SEED:-42}"   # run마다 반드시 다르게 — 같으면 이전 run과 동일 에피소드 재생성
 
 # ---- 경로 해석 (run_smoke.sh와 동일 규칙) ---------------------------------- #
@@ -113,6 +121,10 @@ EXEC_ARGS="$GEN --episodes $EPISODES --duration $DURATION --render-fps $RENDER_F
 [ -n "$NEAR_MISS_AVOID_FRAC" ] && EXEC_ARGS="$EXEC_ARGS --near-miss-avoid-frac $NEAR_MISS_AVOID_FRAC"
 [ -n "$NEAR_MISS_TURN_RADIUS_FRAC" ] && EXEC_ARGS="$EXEC_ARGS --near-miss-turn-radius-frac $NEAR_MISS_TURN_RADIUS_FRAC"
 [ -n "$NEAR_MISS_AIM_FRAC" ] && EXEC_ARGS="$EXEC_ARGS --near-miss-aim-frac $NEAR_MISS_AIM_FRAC"
+[ -n "$NEAR_MISS_START_JITTER" ] && EXEC_ARGS="$EXEC_ARGS --near-miss-start-jitter $NEAR_MISS_START_JITTER"
+[ -n "$NEAR_MISS_SPEED_MIN_FRAC" ] && EXEC_ARGS="$EXEC_ARGS --near-miss-speed-min-frac $NEAR_MISS_SPEED_MIN_FRAC"
+[ -n "$NEAR_MISS_SPEED_MAX_FRAC" ] && EXEC_ARGS="$EXEC_ARGS --near-miss-speed-max-frac $NEAR_MISS_SPEED_MAX_FRAC"
+[ -n "$NEAR_MISS_DEPART_SPREAD" ] && EXEC_ARGS="$EXEC_ARGS --near-miss-depart-spread $NEAR_MISS_DEPART_SPREAD"
 
 # 워치독 상한: (로드 180s + ep×(D×7.2+30)) ×1.2 — CLAUDE.md 공식(보수적, 60fps 기준)
 DUR_INT="${DURATION%.*}"

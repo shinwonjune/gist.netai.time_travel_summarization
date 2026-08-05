@@ -1,15 +1,22 @@
 """near-miss 안무(§7-2 충돌 단서 위상 분해) 검증 — GT 0건의 근거를 코드로 고정한다.
 
-두 층을 본다:
+세 층을 본다:
   1) WanderController._near_miss_step — 속도 제어만으로 "중심거리 gap 아래로 내려가지
      않는다"는 불변식이 실제로 지켜지는지(가짜 프림 + 수치적분 시뮬레이션).
   2) generate_episodes.check_near_miss_trace — 산출된 trace로 그 불변식과 "접근이
      실제로 일어났다"를 사후 판정하는 오프라인 체크.
+  3) generate_episodes.near_miss_events / near_miss_diversity — 조우가 **어디서**
+     일어났는지의 분포. 1·2는 조우 한 번의 안전성만 보고 "조우들이 방 중앙에서 같은
+     기하로 반복된다"는 문제는 전혀 잡지 못했다(사람 눈으로 발견됐다). 그 축을 숫자로
+     고정하는 층이다.
 """
 import math
+import random
 import unittest
 
-from gist.netai.time_travel_summarization.automation.generate_episodes import check_near_miss_trace
+from gist.netai.time_travel_summarization.automation.generate_episodes import (
+    check_near_miss_diversity, check_near_miss_trace, near_miss_diversity, near_miss_events,
+    parse_trace_frames as parse_frames)
 from gist.netai.time_travel_summarization.physics import WanderController
 
 
@@ -42,13 +49,13 @@ class _Sim:
     """가짜 프림 + 오일러 적분: 컨트롤러가 고른 (heading, speed)를 그대로 위치에 반영."""
 
     def __init__(self, positions: dict, gap: float, speed: float = 240.0, dt: float = 1.0 / 60.0,
-                 near_miss_mode: str = "swerve", **wc_kwargs):
+                 near_miss_mode: str = "swerve", seed: int = 3, **wc_kwargs):
         self.pos = {p: list(v) for p, v in positions.items()}
         self.dt = dt
         self.applied: dict = {}
         wc = WanderController(
             [_FakePrim(p) for p in self.pos], speed=speed, near_miss_gap=gap,
-            near_miss_mode=near_miss_mode, near_miss_hold_s=1.0, near_miss_depart_s=2.0, seed=3,
+            near_miss_mode=near_miss_mode, near_miss_hold_s=1.0, near_miss_depart_s=2.0, seed=seed,
             **wc_kwargs,
         )
         wc._world_position = lambda prim: _FixedVec(tuple(self.pos[str(prim.GetPath())]))
@@ -75,6 +82,9 @@ class _Sim:
         반환 튜플을 늘리면 기존 호출부가 전부 바뀌므로 속성으로 둔다."""
         dists, applied_log, phases = [], [], set()
         self.headings = []
+        # 30Hz trace와 같은 형태의 프레임도 남긴다(2스텝=1프레임) — 조우 지점 분포를
+        # 재는 near_miss_diversity가 실제 trace와 같은 입력을 받게 하려는 것이다.
+        self.frames: dict = {}
         for i in range(steps):
             now = i * self.dt
             self.applied.clear()
@@ -88,6 +98,8 @@ class _Sim:
             self.headings.append({p: math.atan2(d[2], d[0])
                                   for p in self.applied
                                   for d in [self.wc._direction.get(p) or (1.0, 0.0, 0.0)]})
+            if i % 2 == 0:
+                self.frames[f"t{i:06d}"] = {p: tuple(v) for p, v in self.pos.items()}
             dists.append(self.min_distance())
             applied_log.append(dict(self.applied))
         return dists, phases, applied_log
@@ -136,10 +148,18 @@ class NearMissChoreographyTest(unittest.TestCase):
         v3에서 조향률 상한이 생기면서 "한 틱 만에 짝 방향으로 스냅"은 더 이상 성립하지
         않는다(초기 랜덤 헤딩에서 목표까지 상한 각속도로 돌아간다). 그래서 검증을 둘로
         나눈다 — 상한을 끄면 예전과 똑같이 정확히 짝을 향하고(목표 자체는 그대로라는
-        확인), 상한이 켜진 기본값에서는 상한 안에서 짝 방향으로 수렴한다."""
+        확인), 상한이 켜진 기본값에서는 상한 안에서 짝 방향으로 수렴한다.
+
+        v4의 대칭 파괴 두 가지는 여기서 꺼둔다. 접근 개시 지터는 "언제 조준을
+        시작하는가"를, 비대칭 속도는 "얼마나 빨리 도는가(ω = v / R_min)"를 흔드는
+        값이라, 켜두면 이 테스트가 재려는 성질(조준 목표가 짝 방향이라는 것, 그리고
+        상한 안에서 거기로 수렴한다는 것)이 아니라 그 두 난수를 재게 된다. 지터와
+        속도 비대칭 자체는 아래 전용 테스트에서 따로 검증한다."""
         far = {"/W/a": [0.0, 90.0, 0.0], "/W/b": [1000.0, 90.0, 0.0]}
+        sym = dict(near_miss_start_jitter_s=0.0,
+                   near_miss_speed_min_frac=1.0, near_miss_speed_max_frac=1.0)
         # (1) 조향률 상한 없음(turn_radius_frac=0) — 목표 헤딩이 곧 적용 헤딩
-        sim = _Sim(dict(far), gap=95.0, near_miss_turn_radius_frac=0.0)
+        sim = _Sim(dict(far), gap=95.0, near_miss_turn_radius_frac=0.0, **sym)
         sim.wc._initialize_directions()
         sim.wc._near_miss_step(0.0)
         self.assertAlmostEqual(sim.wc._direction["/W/a"][0], 1.0, places=6)   # a는 +x(b쪽)
@@ -147,9 +167,9 @@ class NearMissChoreographyTest(unittest.TestCase):
         self.assertEqual(sim.wc._nm_phase, "approach")
 
         # (2) 기본값 — 한 틱에 스냅하지는 않지만, 회피 반경 밖에서 짝 방향으로 수렴한다.
-        sim2 = _Sim(dict(far), gap=95.0)
+        sim2 = _Sim(dict(far), gap=95.0, **sym)
         sim2.wc._initialize_directions()
-        for i in range(60):                    # 1초면 상한 각속도로 180도까지 돈다
+        for i in range(60):                    # 1초면 상한 각속도로 145도까지 돈다
             sim2.wc._near_miss_step(i * sim2.dt)
         self.assertGreater(sim2.wc._direction["/W/a"][0], 0.999)
         self.assertLess(sim2.wc._direction["/W/b"][0], -0.999)
@@ -284,13 +304,23 @@ class NearMissChoreographyTest(unittest.TestCase):
         self.assertLessEqual(min(dists), gap * 1.1, f"접근이 안 일어남: {min(dists)}")
         self.assertNotIn("hold", phases, "swerve에 정지 페이즈가 있으면 안 됨")
 
-        # (c) 근접 창(gap의 1.2배 이내) 동안 관측된 모든 적용 speed가 자유주행 속도의
+        # (c) 근접 창(gap의 1.2배 이내) 동안 관측된 적용 speed가 그 객체의 순항 속도의
         # 70% 이상 -- 감속 신호(=충돌 인상의 원인)가 없어야 한다는 것의 직접 증거.
-        near_speeds = [v for i, d in enumerate(dists) if d <= gap * 1.2 for v in applied_log[i].values()]
+        # v4에서 순항 속도가 객체마다 달라졌으므로 기준선을 "지시 속도"가 아니라
+        # "그 객체 자신의 순항 속도"(_speed_for)로 바꾼다. 재려는 성질은 그대로다 --
+        # 애초에 이 검사가 잡으려는 것은 "제 속도로 가던 놈이 근접에서 느려졌는가"이고,
+        # 지시 속도를 기준으로 두면 v4에서는 감속이 아니라 추첨된 순항 속도의 낮음을
+        # 잡아버린다(하한 0.7배와 문턱 0.7배가 정확히 겹쳐 우연에 기대는 검사가 된다).
+        near_speeds = [(v, sim.wc._speed_for(p))
+                       for i, d in enumerate(dists) if d <= gap * 1.2
+                       for p, v in applied_log[i].items()]
         self.assertTrue(near_speeds, "근접 구간이 관측되지 않음 -- 임계값 재조정 필요")
+        worst_ratio = min(v / cruise for v, cruise in near_speeds)
         self.assertGreaterEqual(
-            min(near_speeds), 0.7 * speed,
-            f"근접 중 감속 발생(min={min(near_speeds):.1f}, 기준={0.7 * speed:.1f}) -- invisible wall 신호")
+            worst_ratio, 0.7,
+            f"근접 중 감속 발생(순항 대비 {worst_ratio:.2f}배, 기준 0.70) -- invisible wall 신호")
+        # 그리고 순항 속도 자체는 지시 속도를 넘지 않는다(비율 상한 1.0 클램프의 확인).
+        self.assertLessEqual(max(cruise for _, cruise in near_speeds), speed + 1e-9)
 
         # (d) 최근접 이후 다시 벌어진다 -- 정지·반전 없이 실제로 스쳐 지나감.
         min_i = dists.index(min(dists))
@@ -336,6 +366,232 @@ class NearMissChoreographyTest(unittest.TestCase):
         self.assertGreaterEqual(sim.min_distance(), 95.0)
 
 
+class NearMissDiversityTest(unittest.TestCase):
+    """v4 대칭 파괴 — 조우가 방 중앙에서 같은 기하로 반복되던 문제의 회귀 방어.
+
+    v3까지는 짝이 동시에·같은 속도로·서로를 정면 조준해 접근했기 때문에 두 궤적이
+    거울상이 되고 최근접점이 두 스폰 위치의 중점에 고정됐다(스폰 구역이 방 중앙
+    대칭이라 결국 방 중앙). 여기서는 대칭을 깨는 세 장치가 각각 의도대로 동작하는지,
+    그리고 그 결과로 조우 지점 분포가 실제로 넓어지는지를 고정한다. 세 장치를 전부
+    끈 설정이 v3의 안무이므로, 그 설정이 이 테스트들의 기준선 역할을 한다.
+    """
+
+    SYMMETRIC = dict(near_miss_start_jitter_s=0.0, near_miss_speed_min_frac=1.0,
+                     near_miss_speed_max_frac=1.0, near_miss_depart_spread_deg=-1.0)
+
+    def test_v4_tunables_resolve_from_env_and_clamp(self):
+        import os
+
+        keys = ("TTS_NEAR_MISS_START_JITTER_S", "TTS_NEAR_MISS_SPEED_MIN_FRAC",
+                "TTS_NEAR_MISS_SPEED_MAX_FRAC", "TTS_NEAR_MISS_DEPART_SPREAD_DEG")
+        saved = {k: os.environ.get(k) for k in keys}
+        try:
+            os.environ.update({keys[0]: "3.5", keys[1]: "0.4", keys[2]: "0.9", keys[3]: "45"})
+            wc = WanderController(prims=[], near_miss_gap=95.0)
+            self.assertEqual((wc._nm_start_jitter_s, wc._nm_speed_min_frac,
+                              wc._nm_speed_max_frac, wc._nm_depart_spread_deg),
+                             (3.5, 0.4, 0.9, 45.0))
+            # 명시 인자가 env를 이긴다(기존 조향 파라미터와 같은 우선순위 규약).
+            self.assertEqual(WanderController(prims=[], near_miss_start_jitter_s=0.0)
+                             ._nm_start_jitter_s, 0.0)
+            # 속도 비율 상한은 1.0을 넘길 수 없다 -- self._speed가 천장이라는 성질에
+            # 조향률 상한(ω = v / R_min)과 하위 캡 계산들이 기대고 있기 때문이다.
+            hot = WanderController(prims=[], near_miss_speed_min_frac=2.0, near_miss_speed_max_frac=3.0)
+            self.assertEqual((hot._nm_speed_min_frac, hot._nm_speed_max_frac), (1.0, 1.0))
+            # min > max로 주면 max가 min으로 끌어올려져 범위가 뒤집히지 않는다.
+            inv = WanderController(prims=[], near_miss_speed_min_frac=0.8, near_miss_speed_max_frac=0.2)
+            self.assertEqual((inv._nm_speed_min_frac, inv._nm_speed_max_frac), (0.8, 0.8))
+        finally:
+            for k, v in saved.items():
+                if v is None:
+                    os.environ.pop(k, None)
+                else:
+                    os.environ[k] = v
+
+    def test_start_jitter_staggers_when_each_object_aims_at_its_mate(self):
+        """A(접근 개시 지터): 접근 페이즈여도 객체마다 자기 차례가 와야 짝을 조준한다.
+
+        조향률 상한을 꺼서(turn_radius_frac=0) "목표 헤딩 = 적용 헤딩"으로 만들면 조준
+        시점이 헤딩에 그대로 드러난다. 두 객체를 멀리(1000) 떨어뜨려 회피 로직이 끼어
+        들지 않게 하고, 먼저 도는 쪽의 차례와 나중 쪽의 차례 사이 시각에서 정확히 한
+        쪽만 짝을 향하고 있는지를 본다."""
+        far = {"/W/a": [0.0, 90.0, 0.0], "/W/b": [1000.0, 90.0, 0.0]}
+        sim = _Sim(far, gap=95.0, seed=7, near_miss_turn_radius_frac=0.0,
+                   near_miss_start_jitter_s=2.0, near_miss_depart_spread_deg=-1.0)
+        sim.wc._initialize_directions()
+        initial = dict(sim.wc._direction)
+        sim.wc._near_miss_step(0.0)
+        delays = dict(sim.wc._nm_approach_at)
+        self.assertEqual(len(delays), 2)
+        self.assertTrue(all(0.0 <= v <= 2.0 for v in delays.values()), delays)
+        early, late = sorted(delays, key=lambda p: delays[p])
+        self.assertGreater(delays[late] - delays[early], 0.1,
+                           f"두 객체의 접근 개시 시각이 사실상 같다: {delays}")
+
+        # 먼저 도는 쪽의 차례는 지났고 나중 쪽은 아직인 시각
+        sim.wc._near_miss_step(0.5 * (delays[early] + delays[late]))
+        toward_mate = 1.0 if early == "/W/a" else -1.0
+        self.assertAlmostEqual(sim.wc._direction[early][0], toward_mate, places=6)
+        self.assertEqual(sim.wc._direction[late], initial[late],
+                         "차례가 오기 전인데 이미 짝을 조준했다(지터가 안 먹음)")
+        # 나중 쪽의 차례가 지나면 그쪽도 짝을 향한다.
+        sim.wc._near_miss_step(delays[late] + 0.01)
+        self.assertAlmostEqual(sim.wc._direction[late][0], -toward_mate, places=6)
+
+    def test_pair_cruise_speeds_are_drawn_independently_within_range(self):
+        """B(비대칭 속도): 짝의 두 객체가 서로 다른 순항 속도를 갖고, 둘 다 범위 안이다."""
+        sim = _Sim({"/W/a": [0.0, 90.0, 0.0], "/W/b": [900.0, 90.0, 0.0]}, gap=95.0, speed=240.0,
+                   seed=5, near_miss_speed_min_frac=0.6, near_miss_speed_max_frac=1.0)
+        sim.wc._near_miss_step(0.0)
+        va, vb = sim.wc._speed_for("/W/a"), sim.wc._speed_for("/W/b")
+        for v in (va, vb):
+            self.assertGreaterEqual(v, 240.0 * 0.6 - 1e-9)
+            self.assertLessEqual(v, 240.0 + 1e-9)
+        self.assertNotAlmostEqual(va, vb, places=3, msg="두 객체 속도가 같다(독립 추출이 아님)")
+        # 범위를 한 점으로 좁히면 비대칭이 꺼지고 둘 다 지시 속도가 된다.
+        sym = _Sim({"/W/a": [0.0, 90.0, 0.0], "/W/b": [900.0, 90.0, 0.0]}, gap=95.0, speed=240.0,
+                   **self.SYMMETRIC)
+        sym.wc._near_miss_step(0.0)
+        self.assertEqual(sym.wc._speed_for("/W/a"), 240.0)
+        self.assertEqual(sym.wc._speed_for("/W/b"), 240.0)
+
+    def test_depart_heading_is_random_within_cone_away_from_mate(self):
+        """C(이탈 방향 무작위화): 이탈 목표는 짝의 반대 방향 ±spread 안에서 뽑힌다.
+
+        부채꼴의 중심을 반대 방향으로 두는 이유는 완전 무작위면 방금 스친 상대 쪽으로
+        되돌아가는 방향이 섞여 조우가 끝나지 않고 늘어지기 때문이다. 여기서는 목표가
+        그 부채꼴 안이라는 것과, 두 객체가 서로 다른 방향을 뽑았다는 것(대칭 반대
+        방향으로 갈라지는 v3와 달라졌다는 것)을 본다."""
+        spread = 60.0
+        sim = _Sim({"/W/a": [0.0, 90.0, 0.0], "/W/b": [900.0, 90.0, 0.0]}, gap=95.0, seed=9,
+                   near_miss_depart_spread_deg=spread)
+        for i in range(900):                       # 도착 후 depart로 넘어갈 때까지
+            sim.applied.clear()
+            sim.wc._initialize_directions()
+            sim.wc._near_miss_step(i * sim.dt)
+            for path, v in sim.applied.items():
+                d = sim.wc._direction.get(path) or (0.0, 0.0, 0.0)
+                for k in range(3):
+                    sim.pos[path][k] += d[k] * v * sim.dt
+            if sim.wc._nm_phase == "depart":
+                break
+        self.assertEqual(sim.wc._nm_phase, "depart", "이탈 페이즈에 도달하지 못함")
+        self.assertEqual(len(sim.wc._nm_depart_dir), 2)
+        angles = {}
+        for path in ("/W/a", "/W/b"):
+            other = "/W/b" if path == "/W/a" else "/W/a"
+            away = sim.wc._away_heading(sim.pos[path], sim.pos[other], 0, 2, jitter_deg=0.0)
+            off = math.degrees(abs(sim.wc._wrap_pi(
+                sim.wc._horizontal_angle(sim.wc._nm_depart_dir[path], 0, 2)
+                - sim.wc._horizontal_angle(away, 0, 2))))
+            self.assertLessEqual(off, spread + 1e-6, f"{path} 이탈 목표가 부채꼴 밖: {off:.1f}deg")
+            angles[path] = off
+        self.assertNotAlmostEqual(angles["/W/a"], angles["/W/b"], places=3,
+                                  msg="두 객체가 같은 각도로 이탈(대칭이 안 깨짐)")
+        # spread를 끄면 이탈 재조준 자체를 하지 않는다(v3 동작 그대로).
+        off_sim = _Sim({"/W/a": [0.0, 90.0, 0.0], "/W/b": [900.0, 90.0, 0.0]}, gap=95.0,
+                       near_miss_depart_spread_deg=-1.0)
+        off_sim.run_tracked(900)
+        self.assertEqual(off_sim.wc._nm_depart_dir, {})
+
+    def test_v4_keeps_gap_invariant_and_curvature_cap(self):
+        """대칭 파괴가 GT 무오염(gap 불변식)도 곡률 상한도 건드리지 않는다.
+
+        이것이 v4에서 가장 중요한 회귀 방어다. 불변식의 보증은 "각 객체가 자기 반경
+        속도 성분을 (거리-gap)/(2·dt) 이하로 묶는다"는 형태라 두 객체의 속도가 달라도,
+        어느 쪽이 언제 출발했어도 한 스텝의 접근량 합이 (거리-gap)을 넘지 못한다.
+        곡률 쪽은 이탈 목표를 아무리 크게 꺾어도 실제 회전이 _rate_limit_heading을
+        거치므로 틱당 헤딩 변화가 상한 아래에 머문다는 것이 요지다(v3의 GUI 승인
+        근거였던 성질). 조향률 상한은 객체 속도에 비례하므로 가장 빠를 수 있는
+        지시 속도 기준의 상한으로 검사하면 모든 객체를 덮는다.
+
+        곡률 검사의 강도를 객체 수에 따라 다르게 두는 데는 이유가 있다. 회피 목표는
+        반경 안 이웃 중 **하나**를 골라 접선을 잡으므로, 3객체 이상이 몰리면 고른
+        이웃은 피하면서 다른 이웃과 가까워질 수 있고 그때는 gap 불변식을 지키는
+        하드 캡(``_swerve_direction``)이 마지막에 개입해 상한을 넘는 회전을 한다.
+        이것은 v4가 만든 문제가 아니라 v3부터 있던 한계이고(일지 #13 "남은 한계 ①"),
+        near-miss 대조 데이터가 2객체 구성으로 생성되는 것도 그 때문이다. 그래서
+        2객체(실제 생성 구성)에서는 상한을 엄격히 걸고, 4객체에서는 "대칭 기준선인
+        v3보다 나빠지지 않았다"를 건다 — 실측으로는 오히려 개선됐다(같은 배치·시드에서
+        상한 초과 틱 13/7196 → 3/7196, 최대 회전 93.7도 → 18.9도). 대칭이 깨지면서
+        네 객체가 동시에 같은 지점으로 몰리는 상황 자체가 줄어든 효과로 보인다."""
+        two = {"/W/a": [120.0, 90.0, 700.0], "/W/b": [800.0, 90.0, 160.0]}
+        four = {"/W/a": [100.0, 90.0, 100.0], "/W/b": [800.0, 90.0, 120.0],
+                "/W/c": [140.0, 90.0, 780.0], "/W/d": [820.0, 90.0, 800.0]}
+
+        def run(positions, **kwargs):
+            sim = _Sim({k: list(v) for k, v in positions.items()}, gap=95.0, seed=4, **kwargs)
+            dists, _, _ = sim.run_tracked(1800)
+            cap_deg = math.degrees(sim.wc._near_miss_turn_rate() * sim.dt)
+            turns = sim.turn_rates_deg()
+            return min(dists), max(turns), sum(1 for t in turns if t > cap_deg * 1.01), cap_deg
+
+        min_d, worst_turn, _, cap = run(two)
+        self.assertGreaterEqual(min_d, 95.0 - 1e-6, f"2객체 gap 침범: {min_d}")
+        self.assertLessEqual(worst_turn, cap * 1.01,
+                             f"2객체 급선회 잔존: {worst_turn:.2f}deg/tick > 상한 {cap:.2f}")
+
+        v4_min_d, v4_worst, v4_over, _ = run(four)
+        v3_min_d, v3_worst, v3_over, _ = run(four, **self.SYMMETRIC)
+        self.assertGreaterEqual(v4_min_d, 95.0 - 1e-6, f"4객체 gap 침범: {v4_min_d}")
+        self.assertGreaterEqual(v3_min_d, 95.0 - 1e-6, f"4객체(v3) gap 침범: {v3_min_d}")
+        self.assertLessEqual(v4_over, v3_over,
+                             f"4객체 상한 초과 틱이 v3보다 늘었다: {v4_over} > {v3_over}")
+        self.assertLessEqual(v4_worst, v3_worst,
+                             f"4객체 최대 회전이 v3보다 커졌다: {v4_worst:.1f} > {v3_worst:.1f}")
+
+    def test_v4_is_seed_deterministic(self):
+        """같은 시드 = 같은 에피소드. 대칭 파괴에 쓰는 난수가 전부 컨트롤러의 시드
+        RNG에서 나오므로 재현성이 깨지지 않아야 한다(에피소드 재생성·디버깅의 전제)."""
+        pos = {"/W/a": [150.0, 90.0, 640.0], "/W/b": [760.0, 90.0, 220.0]}
+        a1 = _Sim(dict(pos), gap=95.0, seed=21)
+        a2 = _Sim(dict(pos), gap=95.0, seed=21)
+        b = _Sim(dict(pos), gap=95.0, seed=22)
+        for s in (a1, a2, b):
+            s.run_tracked(900)
+        self.assertEqual(a1.pos, a2.pos, "같은 시드인데 결과가 다르다")
+        self.assertNotEqual(a1.pos, b.pos, "시드를 바꿔도 결과가 같다(난수가 안 쓰임)")
+
+    def test_encounters_scatter_more_than_symmetric_baseline(self):
+        """핵심 지표: 조우 지점의 분포가 대칭 기준선(v3)보다 넓어진다.
+
+        여러 시드의 에피소드를 돌려 조우 지점을 뽑고(near_miss_events), 흩어짐을
+        near_miss_diversity로 잰다. 기준선은 세 장치를 전부 끈 설정 — 그 설정에서는
+        짝이 동시에 같은 속도로 서로를 조준하므로 조우가 매 사이클 거의 같은 자리에서
+        반복되어 RMS 반경이 0에 가깝게 나온다.
+
+        여기(``_Sim``)는 벽이 없는 환경이라 대칭이 순수하게 드러나고 개선폭도 크게
+        나온다. 실제 생성 조건(2객체·약 1400cm 방·속도 130·40초·벽 있음, 20시드
+        스윕)에서는 벽에 닿아 중앙으로 redirect되는 것 자체가 약한 무작위화로 작용해
+        기준선이 완전한 한 점은 아니고, 그 조건의 실측 개선폭은 흩어짐 42 → 232
+        (5.5배), 조우 간 최소 이격 0.1 → 87, 사건 수 정규화 커버리지 26.7% → 62.0%다.
+        문턱은 그 실측보다 한참 낮게 잡아 시드 조합에 따른 흔들림으로 깨지지 않게
+        하되, "거의 한 점"과 "흩어짐"을 가르기에는 충분하다."""
+        box = 900.0
+        base_r, v4_r = [], []
+        for seed in range(6):
+            rng = random.Random(seed * 7919 + 13)
+            pos = {f"/W/o{i}": [rng.uniform(90.0, 810.0), 90.0, rng.uniform(90.0, 810.0)]
+                   for i in range(2)}
+            for kwargs, sink in ((self.SYMMETRIC, base_r), ({}, v4_r)):
+                sim = _Sim({k: list(v) for k, v in pos.items()}, gap=95.0, seed=seed, **kwargs)
+                sim.run_tracked(1800)          # 30초
+                sink.append(near_miss_diversity(sim.frames, 95.0,
+                                                bounds=((0.0, 0.0), (box, box)), grid=4))
+
+        def mean(rows, key):
+            vals = [r[key] for r in rows if r[key] is not None]
+            return sum(vals) / len(vals) if vals else 0.0
+
+        base_spread, v4_spread = mean(base_r, "rms_radius"), mean(v4_r, "rms_radius")
+        self.assertGreater(v4_spread, 3.0 * base_spread + 50.0,
+                           f"조우 지점이 여전히 몰려 있다: v3={base_spread:.0f} v4={v4_spread:.0f}")
+        # 사건 수로 정규화한 커버리지(사건이 서로 다른 칸에 떨어졌는가)도 올라간다.
+        self.assertGreater(mean(v4_r, "coverage_eff"), mean(base_r, "coverage_eff"))
+        # 그리고 조우 자체가 사라지지는 않는다 -- 흩어지기만 하고 안 만나면 무의미하다.
+        self.assertGreater(mean(v4_r, "events"), 2.0)
+
+
 class NearMissTraceCheckTest(unittest.TestCase):
     @staticmethod
     def _trace(dists) -> str:
@@ -372,6 +628,88 @@ class NearMissTraceCheckTest(unittest.TestCase):
         res = check_near_miss_trace("timestamp,objid,x,y,z\n", gap=95.0)
         self.assertFalse(res["ok"])
         self.assertIsNone(res["min_pair"])
+
+
+class NearMissEventStatsTest(unittest.TestCase):
+    """조우 사건 추출·다양성 지표의 순수 함수 검증(trace 텍스트만으로 판정)."""
+
+    @staticmethod
+    def _trace(points) -> str:
+        """``points``는 프레임별 ``{objid: (x, y, z)}`` 목록."""
+        out = ["timestamp,objid,x,y,z"]
+        for i, objs in enumerate(points):
+            ts = f"2026-07-28 10:{i // 600:02d}:{(i // 10) % 60:02d}.{(i % 10) * 100:03d}"
+            for objid in sorted(objs):
+                x, y, z = objs[objid]
+                out.append(f"{ts},{objid},{x:.3f},{y:.3f},{z:.3f}")
+        return "\n".join(out) + "\n"
+
+    def _pass_by(self, at, sep_min, n=40):
+        """한 객체는 ``at``에 고정, 다른 객체가 다가왔다 멀어지는 프레임 목록."""
+        pts = []
+        for i in range(n):
+            d = sep_min + abs(i - n // 2) * 30.0
+            pts.append({"obj001": (at[0], 90.0, at[1]),
+                        "obj002": (at[0] + d, 90.0, at[1])})
+        return pts
+
+    def test_event_is_the_local_minimum_at_the_pair_midpoint(self):
+        text = self._trace(self._pass_by((300.0, 400.0), 100.0))
+        events = near_miss_events(parse_frames(text), gap=95.0)
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0]["pair"], ("obj001", "obj002"))
+        self.assertAlmostEqual(events[0]["dist"], 100.0, places=3)
+        # 위치는 두 객체의 중점 — 어느 쪽에서 보느냐에 따라 어긋나지 않게.
+        self.assertAlmostEqual(events[0]["pos"][0], 350.0, places=3)
+        self.assertAlmostEqual(events[0]["pos"][2], 400.0, places=3)
+
+    def test_far_approach_is_not_an_event(self):
+        # 문턱(gap × event_frac = 190) 밖에서만 오가면 조우로 세지 않는다.
+        text = self._trace(self._pass_by((300.0, 400.0), 400.0))
+        self.assertEqual(near_miss_events(parse_frames(text), gap=95.0), [])
+
+    def test_refractory_merges_one_encounter_sampled_as_several_dips(self):
+        # 한 번의 스침이 좌표 흔들림으로 극소점 두 개로 잡히는 상황 — 불응기가 합친다.
+        pts = []
+        for d in (200.0, 150.0, 100.0, 101.0, 100.5, 150.0, 200.0):
+            pts.append({"obj001": (0.0, 90.0, 0.0), "obj002": (d, 90.0, 0.0)})
+        frames = parse_frames(self._trace(pts))
+        self.assertEqual(len(near_miss_events(frames, gap=95.0, refractory=30)), 1)
+        # 불응기를 없애면 둘 다 별개 사건으로 잡힌다(장치가 실제로 일하고 있다는 확인).
+        self.assertEqual(len(near_miss_events(frames, gap=95.0, refractory=1)), 2)
+
+    def test_repeated_encounters_at_one_spot_score_far_lower_than_scattered(self):
+        """지표의 본질 검증 — 같은 자리 반복과 흩어진 조우를 실제로 가른다.
+
+        v3의 실패 양상(방 중앙에서 같은 조우 반복)과 v4가 노리는 양상(방 곳곳)을
+        합성 trace로 만들어 두 지표가 반대 방향을 가리키는지 본다."""
+        room = ((0.0, 0.0), (900.0, 900.0))
+        same = [f for _ in range(4) for f in self._pass_by((450.0, 450.0), 100.0)]
+        spread = [f for spot in ((150.0, 150.0), (700.0, 200.0), (200.0, 750.0), (750.0, 700.0))
+                  for f in self._pass_by(spot, 100.0)]
+        a = check_near_miss_diversity(self._trace(same), gap=95.0, bounds=room)
+        b = check_near_miss_diversity(self._trace(spread), gap=95.0, bounds=room)
+        self.assertEqual((a["events"], b["events"]), (4, 4))
+        self.assertEqual(a["rms_radius"], 0.0)          # 네 조우가 완전히 같은 자리
+        self.assertEqual(a["min_sep"], 0.0)
+        self.assertGreater(b["rms_radius"], 300.0)
+        self.assertGreater(b["min_sep"], 300.0)
+        # 사건 수가 같으므로 커버리지도 그대로 비교 가능하다(1칸 vs 4칸 / 16칸).
+        self.assertEqual((a["coverage"], b["coverage"]), (0.0625, 0.25))
+        self.assertEqual((a["coverage_eff"], b["coverage_eff"]), (0.25, 1.0))
+
+    def test_bounds_default_to_the_traced_extent(self):
+        text = self._trace(self._pass_by((300.0, 400.0), 100.0))
+        stats = check_near_miss_diversity(text, gap=95.0)
+        self.assertEqual(stats["events"], 1)
+        # 경계를 안 주면 궤적의 외접 사각형에서 유도 — 방 크기가 0이 되지 않는다.
+        self.assertGreater(stats["room"][0], 0.0)
+        self.assertIsNone(stats["min_sep"])             # 사건이 하나면 이격이 정의 안 됨
+
+    def test_empty_trace_yields_zero_events(self):
+        stats = check_near_miss_diversity("timestamp,objid,x,y,z\n", gap=95.0)
+        self.assertEqual(stats["events"], 0)
+        self.assertIsNone(stats["rms_radius"])
 
 
 if __name__ == "__main__":

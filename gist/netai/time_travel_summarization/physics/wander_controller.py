@@ -46,6 +46,32 @@ class WanderController:
     인상의 지배 신호는 속력이 아니라 곡률(방향 변화율)이라는 것이 그때의 교훈이고,
     v3의 1·2는 그 곡률을 직접 제한하는 장치다.
 
+    v4는 여기에 **대칭 파괴** 층을 얹는다. v3까지의 안무는 조우 한 번의 모양은
+    좋았지만 조우가 일어나는 **장소와 기하가 매번 거의 같았다** — 짝이 동시에,
+    같은 속도로, 서로를 정면 조준해 접근하므로 두 궤적이 거울상이 되고 최근접점이
+    두 스폰 위치의 중점(스폰 구역까지 방 중앙 대칭이라 결국 방 중앙)에 고정된다.
+    이탈까지 대칭이라 다음 사이클이 같은 배치에서 다시 시작해 같은 기하를 재현했다.
+    측정 쪽으로 옮기면 near-miss 클립들이 강하게 상관되어 유효 표본 수가 명목
+    개수보다 훨씬 작아진다는 뜻이다. v4는 조우 지점을 명시적으로 지정하는 대신
+    이 대칭 자체를 세 군데에서 깬다(전부 결정적 — 같은 시드면 같은 에피소드):
+
+      A. **접근 개시 지터**(``near_miss_start_jitter_s``): 접근 페이즈로 넘어가도
+         객체마다 0~지터초의 무작위 지연 뒤에야 짝을 조준한다. 늦게 도는 쪽은 그
+         동안 이전 헤딩으로 계속 흘러가므로 조우 지점이 그 쪽으로 끌려간다.
+      B. **비대칭 순항 속도**(``near_miss_speed_min_frac``/``..._max_frac``):
+         사이클마다 객체별 순항 속도를 ``speed`` × [min_frac, max_frac]에서 독립
+         추출한다. 빠른 쪽이 더 많이 이동하므로 만나는 지점이 느린 쪽으로 치우친다.
+         상한을 1.0으로 묶어 ``speed``가 여전히 천장이다 — 조향률 상한(= v/R_min)과
+         모든 하위 속도 인자가 지시 속도를 넘지 않는다는 성질이 그대로 유지된다.
+      C. **이탈 방향 무작위화**(``near_miss_depart_spread_deg``): 스침 뒤 대칭
+         반대 방향으로 흩어지는 대신, 짝의 반대 방향을 중심으로 ±spread 안에서
+         무작위 방향을 뽑아 그쪽으로 **조향률 상한 안에서** 서서히 돈다. 다음
+         사이클의 시작 배치가 비대칭이 되어 A·B의 효과가 사이클마다 누적된다.
+
+    셋 다 gap 불변식과 무관하다 — 불변식의 보증은 여전히 3번 반경 캡이 지고, 그
+    캡은 "각 객체가 자기 반경 성분을 (d-gap)/(2dt) 이하로 묶는다"는 형태라 두
+    객체의 속도가 서로 달라도, 어느 쪽이 언제 출발했어도 그대로 성립한다.
+
     자세한 보증 방식은 ``_near_miss_step`` 참조.
     """
 
@@ -71,6 +97,31 @@ class WanderController:
     _ENV_AVOID_FRAC = "TTS_NEAR_MISS_AVOID_FRAC"
     _ENV_TURN_RADIUS_FRAC = "TTS_NEAR_MISS_TURN_RADIUS_FRAC"
     _ENV_AIM_FRAC = "TTS_NEAR_MISS_AIM_FRAC"
+    # v4 대칭 파괴 파라미터(클래스 독스트링 A·B·C). 전부 0(또는 음수)로 두면 v3와
+    # 완전히 같은 안무로 되돌아가므로, 다양성 개선폭을 A/B로 재는 기준선이 된다.
+    #
+    # 접근 개시 지터의 기본값 2.0초는 스윕 실측으로 골랐다(가짜 프림 + 오일러 적분,
+    # 2·4객체 × 900/1800 박스 × 20시드, 각 60초). 지터를 키울수록 조우 지점은 더
+    # 흩어지지만 사이클마다 지연이 쌓여 **에피소드당 조우 횟수가 줄어든다** — 2객체
+    # 900 박스 기준으로 조우 수/위치 RMS 반경이 지터 1s에서 10.6회/508, 2s에서
+    # 9.7회/581, 3s에서 8.7회/647, 5s에서 7.1회/757, 8s에서 5.5회/883으로 움직인다
+    # (v3 기준선은 9.8회/48). 2.0초가 "조우 횟수는 기준선과 같은데(9.7 vs 9.8) 흩어짐만
+    # 12배"인 지점이라 기본값으로 삼았다. near-miss 클립은 수가 곧 표본이라 조우
+    # 횟수를 깎지 않는 것이 우선이고, 더 넓게 흩고 싶으면 그 대가(조우 감소)를 알고
+    # env로 올리면 된다.
+    #
+    # 실제 생성 조건(2객체·약 1400cm 방·속도 130·40초·벽 있음, 20시드)에서는 이
+    # 지터 하나만 켰을 때 조우가 5.0 → 4.2회로 줄지만, 이탈 방향 무작위화(C)가 다음
+    # 접근을 짧게 만들어 셋을 함께 켜면 5.5회로 오히려 기준선을 넘는다 — 세 장치를
+    # 따로 튜닝하지 말고 묶어서 쓰는 것을 전제한 기본값이라는 뜻이다.
+    _NEAR_MISS_START_JITTER_S = 2.0        # A: 접근 개시 지연 = U(0, 이 값) 초
+    _NEAR_MISS_SPEED_MIN_FRAC = 0.7        # B: 순항 속도 하한 = speed × 이 값
+    _NEAR_MISS_SPEED_MAX_FRAC = 1.0        # B: 순항 속도 상한(1.0 고정 천장)
+    _NEAR_MISS_DEPART_SPREAD_DEG = 90.0    # C: 이탈 방향 부채꼴 반각(0 이하면 끔)
+    _ENV_START_JITTER_S = "TTS_NEAR_MISS_START_JITTER_S"
+    _ENV_SPEED_MIN_FRAC = "TTS_NEAR_MISS_SPEED_MIN_FRAC"
+    _ENV_SPEED_MAX_FRAC = "TTS_NEAR_MISS_SPEED_MAX_FRAC"
+    _ENV_DEPART_SPREAD_DEG = "TTS_NEAR_MISS_DEPART_SPREAD_DEG"
 
     def __init__(
         self,
@@ -96,6 +147,10 @@ class WanderController:
         near_miss_avoid_frac=None,
         near_miss_turn_radius_frac=None,
         near_miss_aim_frac=None,
+        near_miss_start_jitter_s=None,
+        near_miss_speed_min_frac=None,
+        near_miss_speed_max_frac=None,
+        near_miss_depart_spread_deg=None,
         seed=None,
     ):
         self._prims = list(prims)
@@ -143,11 +198,33 @@ class WanderController:
             near_miss_turn_radius_frac, self._ENV_TURN_RADIUS_FRAC, self._NEAR_MISS_TURN_RADIUS_FRAC))
         self._nm_aim_frac = max(0.0, self._resolve_tunable(
             near_miss_aim_frac, self._ENV_AIM_FRAC, self._NEAR_MISS_AIM_FRAC))
+        # v4 대칭 파괴 파라미터(클래스 독스트링 A·B·C).
+        self._nm_start_jitter_s = max(0.0, self._resolve_tunable(
+            near_miss_start_jitter_s, self._ENV_START_JITTER_S, self._NEAR_MISS_START_JITTER_S))
+        # 속도 비율은 [0.05, 1.0]으로 클램프하고 min ≤ max를 강제한다. 상한을 1.0
+        # 위로 못 올리게 막는 이유는 self._speed가 "지시 속도이자 천장"이라는 성질에
+        # 조향률 상한(ω = v / R_min)과 여러 캡 계산이 기대고 있기 때문이다 — 더 빠르게
+        # 돌리고 싶으면 speed 자체를 올리고 하한을 내리는 것이 맞다.
+        _lo = min(max(self._resolve_tunable(
+            near_miss_speed_min_frac, self._ENV_SPEED_MIN_FRAC, self._NEAR_MISS_SPEED_MIN_FRAC), 0.05), 1.0)
+        _hi = min(max(self._resolve_tunable(
+            near_miss_speed_max_frac, self._ENV_SPEED_MAX_FRAC, self._NEAR_MISS_SPEED_MAX_FRAC), _lo), 1.0)
+        self._nm_speed_min_frac, self._nm_speed_max_frac = _lo, _hi
+        # 이탈 부채꼴 반각(deg). 0 이하면 이탈 재조준 자체를 끄고 v3처럼 스침 헤딩을
+        # 그대로 이어간다. 180이면 완전 무작위(짝 쪽으로 되돌아가는 방향도 포함).
+        self._nm_depart_spread_deg = min(180.0, self._resolve_tunable(
+            near_miss_depart_spread_deg, self._ENV_DEPART_SPREAD_DEG, self._NEAR_MISS_DEPART_SPREAD_DEG))
         # 회피 선회 방향(좌/우) 기억: 한 번의 조우 동안 같은 쪽으로만 굽어야 한다.
         # {path: (상대 path, ±1.0)} — 상대가 바뀌거나 회피 반경 밖으로 나가면 버린다.
         self._nm_side: dict = {}
         # 이번 접근 페이즈에서 이미 gap 근처까지 와 본 객체(도착 래치) — 아래 참조.
         self._nm_arrived: set = set()
+        # v4 사이클 단위 추첨 결과: {path: 순항 속도}, {path: 접근 개시 sim 시각},
+        # {path: 이탈 목표 헤딩}. _nm_rolled_cycle은 "어느 사이클까지 추첨했는가".
+        self._nm_speed: dict = {}
+        self._nm_approach_at: dict = {}
+        self._nm_depart_dir: dict = {}
+        self._nm_rolled_cycle = None
         self._nm_phase = "approach"
         # 첫 페이즈 마감은 0이 아니라 접근 상한 — 0이면 sim 클럭 0초에 곧바로 정지로 넘어간다.
         self._nm_phase_until = self._NEAR_MISS_APPROACH_TIMEOUT_S
@@ -253,6 +330,10 @@ class WanderController:
         self._nm_cycle = 0
         self._nm_side.clear()
         self._nm_arrived.clear()
+        self._nm_speed.clear()
+        self._nm_approach_at.clear()
+        self._nm_depart_dir.clear()
+        self._nm_rolled_cycle = None
         # 1순위: PhysX 물리 스텝 이벤트. 물리가 1스텝 돌 때마다 정확히 1회 발화하므로
         # 러너의 펌프 패턴(60fps/렌더 데시메이션/GUI)과 무관하게 제어 주기 = 물리 주기.
         # update 스트림은 "물리 스텝 ≠ update 틱" 구조(렌더 대기 펌프, 데시메이션의
@@ -461,9 +542,22 @@ class WanderController:
 
         페이즈는 "approach"(짝 방향으로 접근) → "hold"(stop 전용: 완전 정지) →
         "depart"(멀어짐) → 반복. swerve는 hold가 없다 — approach에서 도착 조건이
-        차면 곧장 depart로 넘어가되, 이 때 방향을 되돌리지 않는다(이미 스침 과정에서
-        접선 쪽으로 굽어 있는 헤딩을 그대로 이어간다) — stop처럼 away_heading으로
-        홱 꺾으면 그 자체가 반전 신호가 되어 "감속 없는 스침"이라는 목적이 깨진다.
+        차면 곧장 depart로 넘어간다. 이때 stop처럼 away_heading으로 홱 꺾으면 그
+        자체가 반전 신호가 되어 "감속 없는 스침"이라는 목적이 깨지므로, v3까지는
+        헤딩을 아예 건드리지 않고 스침 중에 굽어 있던 방향을 그대로 이어갔다.
+        v4는 여기에 이탈 방향 무작위화(클래스 독스트링 C)를 넣되 "목표만 바꾸고
+        전이는 조향률 상한에 맡기는" 방식으로 넣는다 — 이탈 목표 헤딩을 짝의 반대
+        방향 ±spread 안에서 뽑아 ``self._nm_depart_dir``에 넣어두고, 실제 헤딩은
+        아래 속도 적용 루프에서 ``_rate_limit_heading``을 거쳐 매 틱 상한 각속도
+        만큼만 그쪽으로 돈다. 그래서 목표가 아무리 크게 꺾여도 경로의 곡률은 v3와
+        같은 상한 아래에 머물고, "반전으로 보이지 않는다"는 성질이 보존된다.
+
+        v4의 접근 개시 지터(A)도 이 루프에 들어간다: 접근 페이즈여도 자기 차례
+        (``self._nm_approach_at[path]``)가 오기 전에는 짝을 조준하지 않고 직전
+        헤딩으로 계속 흘러간다. 비대칭 속도(B)는 아래 모든 속도 계산에서
+        ``self._speed`` 대신 ``self._speed_for(path)``를 쓰는 것으로 반영되는데,
+        반경 캡이 "각자 자기 몫 (d-gap)/(2dt)"이라는 대칭적 형태라 두 객체의 속도가
+        달라도 합이 (d-gap)을 못 넘는다는 논증은 그대로다.
 
         "이미 gap 안" 응급 이탈(아래 속도 적용 루프 맨 앞)도 같은 안전핀을 쓴다 —
         원래는 near_path 하나로부터 무조건 전속 이탈했는데, 그 이탈 방향이 "제3의"
@@ -531,9 +625,11 @@ class WanderController:
             arrived = bool(partner) and all(p in self._nm_arrived for p in partner)
             if arrived or now >= self._nm_phase_until:
                 if swerve:
-                    # hold 없이 곧장 이탈 — 헤딩은 건드리지 않는다(이미 굽어 있음).
+                    # hold 없이 곧장 이탈 — 실제 헤딩은 건드리지 않고(이미 굽어 있음)
+                    # "이탈 목표"만 무작위로 정해 조향률 상한을 통해 서서히 향한다.
                     self._nm_phase = "depart"
                     self._nm_phase_until = now + self._near_miss_depart_s
+                    self._nm_roll_depart(entries, pos_by, partner, nearest, a, b)
                     self._log_warn(
                         f"[Wander] near-miss SWERVE pass (min pair d={min(pair_d or [0.0]):.1f}, gap={gap:.1f})")
                 else:
@@ -556,10 +652,20 @@ class WanderController:
             self._nm_phase_until = now + self._NEAR_MISS_APPROACH_TIMEOUT_S
             self._nm_cycle += 1
             self._nm_arrived.clear()   # 새 접근 페이즈 — 도착 래치를 새로 쌓는다
+            self._nm_depart_dir.clear()  # 이탈 목표는 이 사이클로 끝 — 다음 조우에 안 끌고 간다
+
+        # v4 사이클 추첨(접근 개시 지연·순항 속도)은 페이즈 전이 "뒤"에 둔다 — 그래야
+        # 사이클이 올라간 바로 그 틱에 새 값이 적용되어, 지연 시계의 기준점이 실제
+        # 접근 페이즈 시작 시각과 어긋나지 않는다.
+        if self._nm_rolled_cycle != self._nm_cycle:
+            self._nm_roll_cycle([p for p, _, _ in entries], now)
 
         # ---- 속도 적용 ---------------------------------------------------
         for path, prim, pos in entries:
             d_near, near_path = nearest[path]
+            # 이 객체의 순항 속도(v4 비대칭 속도 B). 사이클마다 추첨된 값이고, 추첨이
+            # 아직 없으면(파라미터를 껐거나 첫 틱 이전) 지시 속도 self._speed 그대로다.
+            v_self = self._speed_for(path)
             # 조향률 상한의 기준점 — 페이즈 블록이 self._direction을 "목표 헤딩"으로
             # 덮어쓰기 전에 직전 틱의 실제 헤딩을 붙잡아 둔다.
             prev_heading = self._direction.get(path)
@@ -581,7 +687,7 @@ class WanderController:
                     if other_path == near_path:
                         continue  # 이 상대로부터는 무조건 전속 이탈 -- 캡 대상 아님
                     r_hat_k = self._toward_heading(pos, pos_by[other_path], a, b)
-                    r_dot_k = self._speed * (
+                    r_dot_k = v_self * (
                         direction[0] * r_hat_k[0] + direction[1] * r_hat_k[1] + direction[2] * r_hat_k[2])
                     if r_dot_k <= 0.0:
                         continue
@@ -589,19 +695,26 @@ class WanderController:
                     if r_dot_k > allowed_k:
                         scale = min(scale, allowed_k / r_dot_k)
                 self._direction[path] = direction
-                self._apply_horizontal_velocity(prim, path, speed=self._speed * scale)
+                self._apply_horizontal_velocity(prim, path, speed=v_self * scale)
                 continue
             if self._nm_phase == "hold":
                 self._set_all_motion_zero(prim)
                 continue
             if self._nm_phase == "approach":
                 mate = partner.get(path)
-                if mate is not None:
+                # v4 접근 개시 지터(A): 자기 차례가 오기 전에는 짝을 조준하지 않고
+                # 직전 헤딩(=이탈 방향으로 흘러가던 궤적)을 유지한다. 늦게 도는 쪽이
+                # 그 사이 이동한 만큼 조우 지점이 그 쪽으로 끌려가 대칭이 깨진다.
+                if mate is not None and now >= self._nm_approach_at.get(path, float("-inf")):
                     self._direction[path] = self._toward_heading(pos, pos_by[mate], a, b)
                 elif self._is_near_wall(prim):
                     self._direction[path] = self._heading_to_center(prim)
             elif self._is_near_wall(prim):
                 self._direction[path] = self._heading_to_center(prim)
+            elif path in self._nm_depart_dir:
+                # v4 이탈 방향 무작위화(C): 목표만 갈아끼우고, 실제 회전은 아래
+                # _rate_limit_heading이 상한 각속도로 나눠 수행한다(급선회 없음).
+                self._direction[path] = self._nm_depart_dir[path]
 
             if swerve:
                 # 최근접 이웃 하나만 기준으로 굽힌다 — 접선 방향을 하나만 고르므로
@@ -616,11 +729,14 @@ class WanderController:
                                                         neighbors.get(path, []), a, b)
                     # 2) 그 목표로 한 틱에 꺾지 않는다 — 조향률 상한 안에서만 회전시켜
                     #    곡선 반경을 키운다(급선회 = "투명 벽 반사" 인상의 직접 원인).
-                    direction = self._rate_limit_heading(prev_heading, direction, dt, a, b)
+                    #    상한은 자기 순항 속도 기준(ω = v_self / R_min)이라, 느린 객체는
+                    #    각속도도 함께 느려져 선회 반경이 R_min으로 똑같이 유지된다.
+                    direction = self._rate_limit_heading(prev_heading, direction, dt, a, b, speed=v_self)
                     # 3) 안전망: 반경 성분 하드 캡. 1·2가 미리 충분히 피했으면 여기서는
                     #    아무 것도 걸리지 않는다(걸리더라도 gap 불변식은 이 층이 보증).
                     allowed_near = (d_near - gap) / (2.0 * dt)
-                    direction = self._swerve_direction(direction, r_hat_near, allowed_near, a, b)
+                    direction = self._swerve_direction(direction, r_hat_near, allowed_near, a, b,
+                                                       speed=v_self)
                 self._direction[path] = direction
                 # 2) 안전핀(전체 이웃 검증): 위 커브가 "최근접이 아닌" 제3의 이웃 쪽으로
                 #    우연히 접선을 돌린 경우를 잡는다 — 그 이웃에 대한 반경 성분이 자기
@@ -632,19 +748,71 @@ class WanderController:
                 scale = 1.0
                 for d_k, other_path in neighbors.get(path, []):
                     r_hat_k = self._toward_heading(pos, pos_by[other_path], a, b)
-                    r_dot_k = self._speed * (
+                    r_dot_k = v_self * (
                         direction[0] * r_hat_k[0] + direction[1] * r_hat_k[1] + direction[2] * r_hat_k[2])
                     if r_dot_k <= 0.0:
                         continue
                     allowed_k = max(0.0, (d_k - gap) / (2.0 * dt))
                     if r_dot_k > allowed_k:
                         scale = min(scale, allowed_k / r_dot_k)
-                self._apply_horizontal_velocity(prim, path, speed=self._speed * scale)
+                self._apply_horizontal_velocity(prim, path, speed=v_self * scale)
             else:
                 allowed = (d_near - gap) / (2.0 * dt)
-                self._apply_horizontal_velocity(prim, path, speed=min(self._speed, max(0.0, allowed)))
+                self._apply_horizontal_velocity(prim, path, speed=min(v_self, max(0.0, allowed)))
 
-    def _near_miss_turn_rate(self) -> float:
+    def _speed_for(self, path: str) -> float:
+        """이 객체의 순항 속도 — v4 비대칭 속도(B)의 조회 지점.
+
+        사이클 추첨(``_nm_roll_cycle``)이 값을 넣어두면 그 값, 아니면 지시 속도
+        ``self._speed``. 추첨값은 항상 ``self._speed`` 이하라(비율 상한 1.0 클램프)
+        "지시 속도가 천장"이라는 성질에 기대는 계산들(조향률 상한 등)이 안전하다.
+        """
+        return self._nm_speed.get(path, self._speed)
+
+    def _nm_roll_cycle(self, paths: list, now: float) -> None:
+        """사이클 단위 비대칭 추첨(v4 A·B) — 접근 개시 시각과 순항 속도.
+
+        난수는 항상 객체당 정확히 2개(``random()`` 2회)를 정렬된 경로 순서로 뽑는다.
+        지터나 속도 범위를 꺼도 소비량이 같도록 일부러 이렇게 짰다 — 그래야 같은
+        시드에서 "v4 켬/끔"만 바꾼 A/B 비교가 스폰·초기 헤딩 등 다른 난수까지 어긋나
+        오염되는 일 없이 성립한다(다양성 개선폭을 재는 실험의 전제).
+        """
+        self._nm_rolled_cycle = self._nm_cycle
+        lo, hi = self._nm_speed_min_frac, self._nm_speed_max_frac
+        for p in sorted(paths):
+            u_delay = self._rng.random()
+            u_speed = self._rng.random()
+            self._nm_approach_at[p] = now + u_delay * self._nm_start_jitter_s
+            self._nm_speed[p] = self._speed * (lo + u_speed * (hi - lo))
+
+    def _nm_roll_depart(self, entries: list, pos_by: dict, partner: dict,
+                        nearest: dict, a: int, b: int) -> None:
+        """이탈 목표 헤딩 추첨(v4 C) — 짝의 반대 방향 ±``spread`` 안에서 무작위.
+
+        부채꼴의 중심을 "짝의 반대 방향"으로 두는 이유는, 완전 무작위로 뽑으면 방금
+        스친 상대 쪽으로 되돌아가는 방향이 섞여 조우가 끝나지 않고 늘어지기 때문이다
+        (gap 불변식은 반경 캡이 여전히 지키지만, 안무가 "스치고 흩어진다"에서
+        "붙어서 맴돈다"로 바뀐다). 반각 90도면 반대 방향 반평면 전체가 후보라 이탈
+        방향의 분산은 충분히 크면서 되돌아가지는 않는다.
+
+        ``spread <= 0``이면 추첨 자체를 하지 않는다 — 목표를 비워두면 아래 속도
+        루프가 헤딩을 건드리지 않아 v3와 완전히 같은 이탈(스침 헤딩 유지)이 된다.
+        """
+        if self._nm_depart_spread_deg <= 0.0:
+            self._nm_depart_dir.clear()
+            return
+        spread = math.radians(self._nm_depart_spread_deg)
+        for path, _prim, pos in sorted(entries, key=lambda e: e[0]):
+            other = partner.get(path) or nearest[path][1]
+            u = self._rng.random()
+            if other is None:
+                angle = u * 2.0 * math.pi
+            else:
+                away = self._away_heading(pos, pos_by[other], a, b, jitter_deg=0.0)
+                angle = self._horizontal_angle(away, a, b) + (2.0 * u - 1.0) * spread
+            self._nm_depart_dir[path] = self._direction_from_angle(angle, a, b)
+
+    def _near_miss_turn_rate(self, speed=None) -> float:
         """조향률(헤딩 회전 각속도) 상한, rad/s.
 
         각속도 ω로 돌면서 속력 v로 달리면 경로의 곡률 반경은 v/ω다. 여기서는 거꾸로
@@ -652,11 +820,16 @@ class WanderController:
         ω = speed / R_min으로 환산한다 — gap이나 speed를 바꿔도 눈에 보이는 곡선의
         완만함(반경이 객체 간격의 몇 배인가)이 그대로 유지되기 때문이다.
         0을 반환하면(=frac 0) 상한 없음으로 취급된다.
+
+        ``speed``를 주면 그 객체의 순항 속도로 환산한다(v4 비대칭 속도). 느린 객체는
+        각속도 상한도 같은 비율로 낮아지므로 선회 반경은 R_min 그대로 유지된다 —
+        속도를 흔들어도 곡선의 완만함은 안 흔들린다는 뜻이다.
         """
         r_min = self._near_miss_gap * self._nm_turn_radius_frac
-        if r_min <= 1e-9 or self._speed <= 0.0:
+        v = self._speed if speed is None else float(speed)
+        if r_min <= 1e-9 or v <= 0.0:
             return 0.0
-        return self._speed / r_min
+        return v / r_min
 
     def _miss_angle_target(self, path: str, base: tuple, pos, pos_by: dict,
                            neighbor_list: list, a: int, b: int) -> tuple:
@@ -721,7 +894,7 @@ class WanderController:
             self._nm_side[path] = (other, side)
         return self._direction_from_angle(ang_r + side * theta_req, a, b)
 
-    def _rate_limit_heading(self, prev, target: tuple, dt: float, a: int, b: int) -> tuple:
+    def _rate_limit_heading(self, prev, target: tuple, dt: float, a: int, b: int, speed=None) -> tuple:
         """조향률 상한(v3의 2층): 직전 헤딩에서 ``target``으로 한 틱에 꺾지 않는다.
 
         회전량을 ``_near_miss_turn_rate() × dt``로 잘라 경로의 곡률 반경이 최소
@@ -731,8 +904,9 @@ class WanderController:
         값이 여기 쓰이는 ``near_miss_turn_radius_frac``이다.
 
         ``prev``가 없으면(첫 틱) 제한할 기준이 없으므로 목표를 그대로 쓴다.
+        ``speed``는 이 객체의 순항 속도(v4 비대칭 속도) — 상한 각속도 환산에 쓴다.
         """
-        rate = self._near_miss_turn_rate()
+        rate = self._near_miss_turn_rate(speed)
         if prev is None or rate <= 0.0 or dt <= 0.0:
             return target
         ang_p = self._horizontal_angle(prev, a, b)
@@ -758,7 +932,8 @@ class WanderController:
         """각도 차를 (-π, π]로 감는다 — 359도 차이를 -1도로 읽어야 최단 회전이 된다."""
         return (angle + math.pi) % (2.0 * math.pi) - math.pi
 
-    def _swerve_direction(self, direction: tuple, r_hat: tuple, allowed: float, a: int, b: int) -> tuple:
+    def _swerve_direction(self, direction: tuple, r_hat: tuple, allowed: float, a: int, b: int,
+                          speed=None) -> tuple:
         """반경 성분(r̂ 방향)만 ``allowed``로 캡하고, 줄어든 만큼 접선 성분을 키워
         전체 속력(self._speed)을 보존한다 — swerve 근접 회피의 핵심 연산.
 
@@ -771,8 +946,12 @@ class WanderController:
         접선 방향은 r̂에 수직인 두 후보(``_perp_horizontal`` 및 그 반대) 중 기존
         ``direction``과 내적이 더 큰(더 정렬된) 쪽을 골라 매 틱 같은 쪽으로만
         굽도록 한다 — 그렇지 않으면 좌/우가 틱마다 뒤집혀 진동하는 경로가 된다.
+
+        ``speed``는 이 객체의 순항 속도(v4 비대칭 속도). 분해·재합성이 전부 같은
+        speed 하나로 이뤄지므로 결과는 여전히 단위벡터이고, 캡이 걸리는 문턱
+        ``allowed``는 속도와 무관한 거리 예산 (d-gap)/(2dt)이라 불변식 논증도 그대로다.
         """
-        speed = self._speed
+        speed = self._speed if speed is None else float(speed)
         if speed <= 1e-9:
             return direction
         r_dot = direction[0] * r_hat[0] + direction[1] * r_hat[1] + direction[2] * r_hat[2]

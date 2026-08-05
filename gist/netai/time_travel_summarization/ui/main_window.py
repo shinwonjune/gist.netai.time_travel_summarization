@@ -394,7 +394,15 @@ class TimeTravelWindow:
         없이 스침) 그대로 쓰인다. GUI로 stop(v1, 감속+정지+방향전환 대조군)을 보고
         싶으면 코드에서 ``core.set_near_miss_mode("stop")``을 gap 설정 전에 호출하거나,
         headless 배치는 ``NEAR_MISS_MODE=stop`` 환경변수(run_job.sh)를 쓴다 — GUI
-        토글은 간단하지 않아(콤보 하나 추가+상태 배선) 스코프에서 제외했다."""
+        토글은 간단하지 않아(콤보 하나 추가+상태 배선) 스코프에서 제외했다.
+
+        회피 곡선의 완만함(``TTS_NEAR_MISS_AVOID_FRAC``·``..._TURN_RADIUS_FRAC``·
+        ``..._AIM_FRAC``)과 조우 지점의 다양성(``TTS_NEAR_MISS_START_JITTER_S``·
+        ``..._SPEED_MIN_FRAC``·``..._SPEED_MAX_FRAC``·``..._DEPART_SPREAD_DEG``)은
+        전부 환경변수로 조정한다 — Kit을 그 환경변수와 함께 띄우고 Physics를 다시
+        누르면 반영되므로, GUI에서 눈으로 보며 되풀이 튜닝할 때 코드 수정·재빌드가
+        필요 없다. 각 값의 의미는 facade의 set_near_miss_steering /
+        set_near_miss_diversity 독스트링에 있다."""
         self._core.set_near_miss_gap(model.get_value_as_float())
 
     def _on_event_checkbox_changed(self, model):
