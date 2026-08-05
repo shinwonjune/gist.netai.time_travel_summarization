@@ -1,4 +1,4 @@
-"""위상 분해 조건 세트 추출기 v3.1 — 접촉 구간 실측 기준 + 조건 의미 검증 게이트.
+"""위상 분해 조건 세트 추출기 v3.3 — 플라토 기준 국면 분리 + 조건 의미·순도 검증 게이트.
 
 설계: docs/위상분해_실험설계.md §5. 단일 도구가 조건 전부를 한 번에 뽑는다:
   충돌 에피소드    -> full / no_approach / no_contact(스플라이스) / no_aftermath /
@@ -82,6 +82,57 @@ full·near_miss·control의 창은 v3.1에서 바뀌지 않았다. 조건 검증
 프레임이 접촉 중인지를 추가로 확인한다.
 
 --------------------------------------------------------------------------
+v3.1 -> v3.2 플라토 기준 앵커 (사용자 육안 관찰)
+--------------------------------------------------------------------------
+관찰된 증상: 같은 조건 안에서 의도대로 잘린 샘플과 잔재가 남은 샘플이 섞여 있었다.
+no_approach인데 두 물체가 아직 다가오는 프레임으로 시작하거나, no_aftermath인데
+떨어지기 시작하는 프레임으로 끝나는 클립이 일부 있었다.
+
+원인: v3.1까지의 기준점 t_touch·t_release는 **지면 거리가 90cm 문턱을 통과하는
+시각**이다. 그런데 실제로 "붙어 보이는" 상태는 거리가 그 사건의 최솟값 부근에
+눌러앉은 구간이고, 그 최솟값은 사건마다 71~88cm로 흩어져 있다(직육면체가 어떤
+각도로 부딪히느냐에 따라 중심 간 거리가 달라진다). 그래서 문턱 통과와 실제 밀착
+사이에는 아직 움직이는 구간이 남는다 — 실측하면 문턱 통과부터 밀착까지(lead_in)
+중앙값 0.050초·최대 0.500초, 밀착이 끝나고 문턱 회복까지(lead_out) 중앙값
+0.083초이고 긴 접촉만 보면 중앙값 1.083초·최대 1.184초다. 이 구간이 조건에
+새어 들었다. 접촉 거리가 사건마다 다르므로 **고정 시간 가드로는 막을 수 없고**,
+경계 자체를 사건별 기하에서 다시 잡아야 한다.
+
+해결 — 플라토(완전 밀착 구간) 실측:
+  t_hold_start = 접촉 구간 안에서 거리가 d_min + 3cm 이하가 되는 첫 시각
+  t_hold_end   = 같은 조건을 만족하는 마지막 시각
+이 둘을 manifest에 기록하고, 두 조건의 기준점을 문턱 통과에서 플라토 경계로 옮긴다:
+  no_approach  [t_hold_start+0.05, +2.05]   (시작이 플라토 안 = 완전히 붙은 프레임)
+  no_aftermath [t_hold_end−2.05, t_hold_end−0.05] (끝이 플라토 안 = 아직 붙은 프레임)
+
+바뀌지 않는 조건과 그 이유:
+  full          — 접촉을 가운데 두는 대조 조건이라 경계 정밀도가 쟁점이 아니다.
+  approach_only — 창이 문턱 통과 전에 이미 끝나므로 플라토 경계와 무관하다.
+  no_contact    — 문턱 기준의 넓은 절제가 오히려 안전하다. 플라토 기준으로 좁히면
+                  문턱↔플라토 사이의 접근·분리 프레임이 남아 "접촉을 뺐다"는 조건의
+                  의미가 약해진다. 튕겨 나가는 장면은 t_release부터 담는 게 맞다.
+  near_miss·control — 접촉 사건이 없으므로 해당 없음.
+
+**알려진 대가(실측)**: 플라토는 짧다. 짧은 접촉 71건의 플라토 길이 중앙값이 0.033초,
+긴 접촉 39건은 0.183초다. 가드 0.05초를 플라토 안쪽으로 물리려면 플라토가 그보다
+길어야 하므로, 110개 사건 중 70건만 두 조건을 만들 수 있다(짧은 접촉 32/71,
+긴 접촉 38/39). 즉 이 두 조건의 표본이 **긴 접촉 쪽으로 치우친다** — contact_class로
+계급을 기록해 두었으니 채점 분석에서 반드시 그 편향을 감안해 읽어야 한다.
+가드는 ``--hold-guard``로 조정 가능하다(참고 실측: 가드 0.033초면 81/110,
+0.017초면 100/110, 0초면 110/110이 통과한다).
+
+--------------------------------------------------------------------------
+overlay_overlap — 화면 겹침 플래그 (절단과 분리된 후처리)
+--------------------------------------------------------------------------
+near_miss·control 클립에 대해 "두 물체가 화면에서 겹쳐 보이는가"를 표시한다.
+겹침 판정 거리는 카메라 기하·투영에 달려 있어 나중에 별도 보정으로 정해지므로,
+비싼 측정(창 안 최소 쌍거리 ``d_min_in_window``)만 추출 시점에 manifest에 박아 두고
+플래그 부여는 ``assign_overlay_flags()``가 그 값을 문턱과 비교해 수행한다. 덕분에
+문턱이 바뀌어도 **클립을 다시 자르지 않고** manifest만 갱신하면 된다
+(CLI: ``--reflag-manifest <manifest.json> --overlay-touch-cm <값>``).
+충돌 조건은 접촉 자체가 곧 겹침이라 플래그가 정보를 주지 않으므로 대상이 아니다.
+
+--------------------------------------------------------------------------
 사건 속성 기록 — 폐기하지 않고 분석에서 분리할 수 있게 (진단 리포트 §4·§5)
 --------------------------------------------------------------------------
 클립마다 두 속성을 manifest에 남긴다. 둘 다 **폐기 기준이 아니라 분석 분리용 표식**이다.
@@ -93,6 +144,29 @@ full·near_miss·control의 창은 v3.1에서 바뀌지 않았다. 조건 검증
 - ``chained`` (bool): 같은 객체가 끼는 다른 객체-객체 접촉이 ±1.5초 안에 또 있는 사건.
   순도 검사는 창이 실제로 겹칠 때만 폐기하는데, 겹치지 않아도 세 물체가 짧은 시간에
   몰리면 "이 클립이 보여 주는 사건이 무엇인가"가 기하적으로 모호해진다.
+
+--------------------------------------------------------------------------
+v3.2 -> v3.3 제3객체 근접 게이트 (사용자 육안 관찰)
+--------------------------------------------------------------------------
+관찰된 증상: A-B 충돌 클립인데 **제3객체 C가 두 물체 사이를 밀고 지나가는** 장면이
+섞여 있었다(no_approach_ep_0001__video_0001_0003,
+no_approach_ep_0026__video_0026_0057). 그 클립의 사건이 무엇인지가 화면상 모호해진다.
+
+왜 기존 순도 검사가 못 잡았나: 순도 검사는 **collisions CSV에 기록된 접촉**만 본다.
+그런데 C는 충돌 반응 없이 지나갔고, 반응이 없으면 PhysX contact report가 발화하지
+않아 CSV에 행 자체가 남지 않는다. 즉 "기록된 사건이 하나뿐"이라는 검사는 통과하는데
+화면에는 셋이 얽혀 있는, 기록과 영상이 어긋나는 구멍이다.
+
+v3.3의 대응 — 기록이 아니라 기하를 본다: 창 동안 기준 쌍이 아닌 모든 객체에 대해
+기준 쌍 **두 객체 각각**과의 지면 거리를 trace에서 계산하고, 어느 하나라도
+``--third-object-cm``(기본 90cm) 미만으로 들어오면 창을 폐기한다(사유
+``third_object_intrusion``). 두 객체 각각에 대해 재는 이유는, 중점만 보면 비스듬히
+스쳐 지나가는 개입을 놓치기 때문이다.
+
+적용 범위는 모든 조건이다. 기준 쌍이 없는 control은 "전 쌍의 최소 거리"로 같은
+검사를 한다 — 무관 구간이라면서 두 물체가 붙어 있으면 대조군 자격이 없다.
+통과한 창에도 ``third_object_min_cm``을 manifest에 남겨, 문턱을 나중에 조이고 싶을 때
+재절단 없이 판단할 수 있게 했다.
 
 --------------------------------------------------------------------------
 순도 검사에서 벽 접촉을 무시하는 결정
@@ -173,8 +247,30 @@ CLIP_S = 2.0                # 모든 창의 총장(2초/20프레임 학습 계�
 EDGE_GUARD_S = 0.05
 EXCISE_PAD_S = 0.1          # no_contact 앞 구간을 접촉 시작에서 떼어 두는 여유
 NO_CONTACT_SEG_S = 1.0      # no_contact 스플라이스 각 구간 길이
+
+# --- 플라토(완전 밀착 구간) 실측 — v3.2 -----------------------------------
+# 접촉 구간 안에서 거리가 최솟값 근처로 눌러앉아 있는 구간을 "플라토"로 본다.
+# 문턱(90cm) 통과 시각은 아직 두 물체가 다가오는/멀어지는 중이고, 실제로 붙어 보이는
+# 것은 거리가 71~88cm의 최솟값 부근에 도달한 뒤다. 접촉 거리가 사건마다 다르므로
+# (직육면체가 어떤 각도로 부딪히느냐에 따라 중심 거리가 달라진다) 고정 거리 가드로는
+# 이 경계를 잡을 수 없고, 사건별 d_min에 상대적인 여유로 잡아야 한다.
+PLATEAU_MARGIN_CM = 3.0
+# 플라토 경계에서 안쪽으로 물리는 여유. 캡처 영상이 30fps라 한 프레임이 0.033초이고,
+# 0.05초는 그보다 크므로 잘라낸 영상의 첫/끝 프레임이 확실히 플라토 안에 든다.
+# 주의(실측): 플라토 자체가 짧다 — 짧은 접촉 71건의 플라토 길이 중앙값이 0.033초라
+# 이 가드를 0.05초로 두면 플라토가 가드보다 짧은 사건에서 no_approach·no_aftermath가
+# 폐기된다(실측 110건 중 70건만 통과, 짧은 접촉은 32/71 · 긴 접촉은 38/39).
+# 그래서 코드 상수가 아니라 CLI 인자(--hold-guard)로 노출한다.
+DEFAULT_HOLD_GUARD_S = 0.05
 CONTROL_BUFFER_S = 3.0      # 무관 창이 모든 이벤트와 유지해야 하는 최소 간격
 PURITY_MARGIN_S = 0.25      # 순도 검사 시 창 가장자리 여유
+
+# --- 제3객체 근접 게이트 — v3.3 ---------------------------------------------
+# 창 동안 기준 쌍이 아닌 객체가 기준 쌍에 이 거리 미만으로 접근하면 창을 폐기한다.
+# 기본값을 접촉 문턱과 같은 90cm로 두는 이유: 그보다 가까이 온 제3객체는 화면에서
+# 이미 두 물체 사이에 끼어 있거나 겹쳐 보이므로, "이 클립의 사건은 A-B 충돌 하나"라는
+# 전제가 깨진다. 0이면 게이트 비활성.
+DEFAULT_THIRD_OBJECT_CM = 90.0
 
 # --- near-miss -------------------------------------------------------------
 NEARMISS_ENTER_FRAC = 2.0        # 극소점 탐지 진입 문턱 = gap × 이 값
@@ -187,26 +283,41 @@ APPROACH_DECREASE_FRAC = 0.8     # approach_only에서 요구하는 "거리 비�
 # 창 규격 — (기준점 이름, [(시작 오프셋, 끝 오프셋)...]). 전부 총장 2.0s.
 ANCHOR_TOUCH = "t_touch"
 ANCHOR_RELEASE = "t_release"
-WINDOW_SPECS: Dict[str, Tuple[str, List[Tuple[float, float]]]] = {
-    # full: 접촉을 가운데 두고 접근·접촉·사후를 모두 포함(대조 조건). v3.1에서 불변.
-    "full": (ANCHOR_TOUCH, [(-1.0, +1.0)]),
-    # no_approach: 접촉이 이미 시작된 뒤에서 창을 열어 접근 동역학을 배제.
-    # v3.1: 시작을 t_touch−0.1에서 t_touch+0.05로 옮겨 접근 프레임이 한 장도 남지
-    # 않게 했다(v3는 접촉 직전 프레임을 최대 0.1초 남겨 접근 잔재가 섞였다).
-    "no_approach": (ANCHOR_TOUCH, [(+EDGE_GUARD_S, +EDGE_GUARD_S + CLIP_S)]),
-    # no_aftermath: 아직 붙어 있는 프레임에서 창을 닫아 사후 상호작용을 배제.
-    # v3.1: 끝을 t_release+0.1에서 t_release−0.05로 옮겼다. v3는 회복 시각을 지나
-    # 0.1초를 더 담아 두 물체가 떨어지기 시작하는 분리 장면이 들어갔는데, 그것이
-    # 바로 이 조건이 배제하려는 사후 신호다.
-    "no_aftermath": (ANCHOR_RELEASE, [(-EDGE_GUARD_S - CLIP_S, -EDGE_GUARD_S)]),
-    # approach_only: 접촉 직전에 창을 닫아 접촉 프레임을 원천 배제.
-    # v3.1: 끝을 t_touch−0.2에서 t_touch−0.05로 옮겨 접촉에 0.15초 더 붙였다.
-    # 0.2초 가드는 기준 시각 불확실성(0.016초 + 1프레임)에 비해 과하게 보수적이라
-    # 접근의 마지막 국면(가장 정보량이 큰 구간)을 불필요하게 잘라내고 있었다.
-    "approach_only": (ANCHOR_TOUCH, [(-EDGE_GUARD_S - CLIP_S, -EDGE_GUARD_S)]),
-    # no_contact는 t_touch·t_release 양쪽에 걸쳐 있어 고정 오프셋으로 표현할 수
-    # 없다 — no_contact_segments()가 실측 구간에서 직접 만든다.
-}
+ANCHOR_HOLD_START = "t_hold_start"   # v3.2: 플라토(완전 밀착) 시작
+ANCHOR_HOLD_END = "t_hold_end"       # v3.2: 플라토 끝
+
+
+def window_specs(hold_guard_s: float = DEFAULT_HOLD_GUARD_S,
+                 ) -> Dict[str, Tuple[str, List[Tuple[float, float]]]]:
+    """조건별 (기준점, 오프셋 구간) 규격. 전부 총장 2.0s.
+
+    v3.2에서 no_approach·no_aftermath만 기준점이 문턱 통과 시각에서 **플라토 경계**로
+    바뀌었다(이유는 모듈 독스트링의 v3.2 절). 나머지 조건은 v3.1 그대로다.
+    """
+    return {
+        # full: 접촉을 가운데 두고 접근·접촉·사후를 모두 포함(대조 조건). v3.2에서 불변.
+        "full": (ANCHOR_TOUCH, [(-1.0, +1.0)]),
+        # no_approach: 완전히 붙은 프레임에서 창을 열어 접근 동역학을 배제.
+        # v3.2: 기준점을 t_touch(문턱 통과)에서 t_hold_start(플라토 시작)로 옮겼다.
+        # 문턱과 플라토 사이에는 아직 다가오는 움직임이 남아 있다(실측 lead_in
+        # 중앙값 0.050초, 최대 0.500초) — 그게 v3.1까지 새어 들던 접근 잔재다.
+        "no_approach": (ANCHOR_HOLD_START, [(+hold_guard_s, +hold_guard_s + CLIP_S)]),
+        # no_aftermath: 아직 완전히 붙어 있는 프레임에서 창을 닫아 사후 신호를 배제.
+        # v3.2: 기준점을 t_release(문턱 회복)에서 t_hold_end(플라토 끝)로 옮겼다.
+        # 플라토가 끝난 뒤에도 문턱 회복까지는 서로 떨어져 나가는 움직임이 이어진다
+        # (실측 lead_out 중앙값 0.083초, 긴 접촉은 중앙값 1.083초·최대 1.184초).
+        "no_aftermath": (ANCHOR_HOLD_END, [(-hold_guard_s - CLIP_S, -hold_guard_s)]),
+        # approach_only: 접촉 직전에 창을 닫아 접촉 프레임을 원천 배제.
+        # v3.2에서 불변 — 창이 문턱 통과 전에 이미 끝나므로 플라토 경계와 무관하다.
+        "approach_only": (ANCHOR_TOUCH, [(-EDGE_GUARD_S - CLIP_S, -EDGE_GUARD_S)]),
+        # no_contact는 t_touch·t_release 양쪽에 걸쳐 있어 고정 오프셋으로 표현할 수
+        # 없다 — no_contact_segments()가 실측 구간에서 직접 만든다. v3.2에서 불변이며
+        # 문턱 기준의 넓은 절제를 그대로 쓴다(플라토 기준으로 좁히면 문턱↔플라토 사이의
+        # 접근·분리 프레임이 남아 "접촉을 뺐다"는 조건의 의미가 약해진다).
+    }
+
+
+WINDOW_SPECS: Dict[str, Tuple[str, List[Tuple[float, float]]]] = window_specs()
 NEARMISS_SPEC: List[Tuple[float, float]] = [(-1.0, +1.0)]
 
 
@@ -314,6 +425,7 @@ def measure_contact(
     search_back_s: float = DEFAULT_SEARCH_BACK_S,
     search_fwd_s: float = DEFAULT_SEARCH_FWD_S,
     max_contact_s: float = DEFAULT_MAX_CONTACT_S,
+    plateau_margin_cm: float = PLATEAU_MARGIN_CM,
 ) -> Tuple[Optional[dict], Optional[str]]:
     """접촉 쌍의 거리 시계열에서 접촉 구간 [t_touch, t_release]를 실측한다.
 
@@ -323,7 +435,12 @@ def measure_contact(
     시각 +2.0s를 넘는 사례가 있었기 때문이다. 대신 max_contact_s로 상한을 둬,
     회복이 없는(=붙어버린) 경우는 사건으로 인정하지 않는다.
 
-    반환: ({"t_touch", "t_release", "contact_len_s", "d_min"}, None) 또는 (None, 사유).
+    함께 플라토(완전 밀착) 경계 [t_hold_start, t_hold_end]도 잰다 — 접촉 구간 안에서
+    거리가 d_min + plateau_margin_cm 이하인 첫/마지막 시각이다.
+
+    반환: ({"t_touch", "t_release", "contact_len_s", "contact_class", "d_min",
+            "t_hold_start", "t_hold_end", "hold_len_s", "hold_thr"}, None)
+          또는 (None, 사유).
     """
     lo = t_csv - datetime.timedelta(seconds=search_back_s)
     hi = t_csv + datetime.timedelta(seconds=search_fwd_s)
@@ -352,14 +469,27 @@ def measure_contact(
     if t_release is None:
         return None, "no_release_within_cap"
 
-    inside = [d for t, d in series if t_touch <= t <= t_release]
+    inside = [(t, d) for t, d in series if t_touch <= t <= t_release]
     contact_len_s = round((t_release - t_touch).total_seconds(), 3)
+    if not inside:
+        return None, "no_samples_in_contact"
+    # 플라토(완전 밀착 구간) 실측 — v3.2. 문턱 통과 시각이 아니라 여기가 "붙어 보이는"
+    # 구간의 경계다. 문턱은 90cm 고정이지만 실제 접촉 거리는 사건마다 71~88cm로
+    # 다르므로, 경계는 그 사건의 d_min에 상대적인 여유(plateau_margin_cm)로 잡는다.
+    d_min_raw = min(d for _, d in inside)
+    hold_thr = d_min_raw + plateau_margin_cm
+    hold_times = [t for t, d in inside if d <= hold_thr]
+    t_hold_start, t_hold_end = hold_times[0], hold_times[-1]
     return {
         "t_touch": t_touch,
         "t_release": t_release,
         "contact_len_s": contact_len_s,
         "contact_class": contact_class(contact_len_s),
-        "d_min": round(min(inside), 1) if inside else None,
+        "d_min": round(d_min_raw, 1),
+        "t_hold_start": t_hold_start,
+        "t_hold_end": t_hold_end,
+        "hold_len_s": round((t_hold_end - t_hold_start).total_seconds(), 3),
+        "hold_thr": round(hold_thr, 2),
     }, None
 
 
@@ -401,6 +531,7 @@ def contact_events(
     search_back_s: float = DEFAULT_SEARCH_BACK_S,
     search_fwd_s: float = DEFAULT_SEARCH_FWD_S,
     max_contact_s: float = DEFAULT_MAX_CONTACT_S,
+    plateau_margin_cm: float = PLATEAU_MARGIN_CM,
 ) -> Tuple[List[dict], Dict[str, object]]:
     """CSV의 객체-객체 접촉 후보를 trace 기하로 실측해 확정 사건 목록을 만든다.
 
@@ -419,7 +550,8 @@ def contact_events(
             reasons["pair_missing_in_trace"] += 1
             continue
         measured, why = measure_contact(
-            series, cand["t_csv"], threshold, search_back_s, search_fwd_s, max_contact_s)
+            series, cand["t_csv"], threshold, search_back_s, search_fwd_s, max_contact_s,
+            plateau_margin_cm)
         if measured is None:
             reasons[why or "measure_failed"] += 1
             continue
@@ -511,6 +643,87 @@ def no_contact_segments(
     return [(left_end - seg, left_end), (right_start, right_start + seg)]
 
 
+def min_pair_distance(frames: Frames, segs: Segments) -> Optional[float]:
+    """창 안 모든 프레임에서 **모든 쌍**의 지면 거리 최솟값. 쌍이 없으면 None.
+
+    control 창에는 기준 쌍이 없으므로(무관 구간이라 사건 자체가 없다) 화면 겹침 여부를
+    판단하려면 전 쌍을 봐야 한다. near_miss는 기준 쌍의 d_min이 이미 그 값이다.
+    """
+    best: Optional[float] = None
+    for t, objs in frames:
+        if not any(s <= t <= e for s, e in segs):
+            continue
+        ids = sorted(objs)
+        for i, a in enumerate(ids):
+            for b in ids[i + 1:]:
+                d = math.hypot(objs[a][0] - objs[b][0], objs[a][1] - objs[b][1])
+                if best is None or d < best:
+                    best = d
+    return best
+
+
+def third_object_min_distance(
+    frames: Frames, segs: Segments, pair: Sequence[str],
+) -> Optional[float]:
+    """창 동안 **기준 쌍이 아닌** 객체가 기준 쌍의 두 객체 중 어느 쪽에든 접근한
+    최소 지면 거리. 창 안에 제3객체가 하나도 없으면 None.
+
+    왜 필요한가(v3.3): 순도 검사는 collisions CSV에 기록된 접촉만 본다. 그런데 실제
+    산출물에서 **충돌 반응 없이** 두 물체 사이를 밀고 지나가는 제3객체가 관찰됐다.
+    반응이 없으면 contact report가 발화하지 않아 CSV에 행이 남지 않고, 그래서 순도
+    검사에 잡히지 않는다. 기록이 아니라 trace 기하를 직접 보는 이 검사가 그 구멍을 막는다.
+
+    기준 쌍의 두 객체 각각에 대해 재는 이유: 제3객체가 "사이를 지나간다"는 것은 두
+    객체 중 적어도 한쪽에 가까워진다는 뜻이고, 둘 사이 중점만 보면 비스듬히 스쳐
+    지나가는 경우를 놓친다.
+    """
+    a, b = pair[0], pair[1]
+    best: Optional[float] = None
+    for t, objs in frames:
+        if not any(s <= t <= e for s, e in segs):
+            continue
+        refs = [objs.get(a), objs.get(b)]
+        for oid, p in objs.items():
+            if oid == a or oid == b:
+                continue
+            for ref in refs:
+                if ref is None:
+                    continue
+                d = math.hypot(p[0] - ref[0], p[1] - ref[1])
+                if best is None or d < best:
+                    best = d
+    return best
+
+
+def assign_overlay_flags(manifest: dict, overlay_touch_cm: float) -> int:
+    """manifest에 ``overlay_overlap``을 (재)부여한다 — **재절단 없이** 돌릴 수 있다.
+
+    화면상 두 물체가 겹쳐 보이기 시작하는 거리는 카메라 기하·투영에 달려 있어 나중에
+    별도 보정으로 정해진다. 그때 클립을 다시 자르지 않고 플래그만 갱신할 수 있도록,
+    비싼 측정(창 안 최소 쌍거리 ``d_min_in_window``)은 추출 시점에 manifest에 박아 두고
+    이 함수는 그 값을 새 문턱과 비교하기만 한다.
+
+    대상은 ``d_min_in_window``가 기록된 클립, 즉 near_miss와 control이다. 충돌 조건은
+    접촉 자체가 곧 겹침이라 플래그가 정보를 주지 않으므로 대상이 아니다.
+    ``overlay_touch_cm`` <= 0이면 플래그를 제거한다(미부여 상태로 되돌림).
+
+    반환: overlay_overlap=True로 표시된 클립 수.
+    """
+    flagged = 0
+    for clip in manifest.get("clips", []):
+        d = clip.get("d_min_in_window")
+        if d is None:
+            clip.pop("overlay_overlap", None)
+            continue
+        if overlay_touch_cm <= 0.0:
+            clip.pop("overlay_overlap", None)
+            continue
+        clip["overlay_overlap"] = bool(d <= overlay_touch_cm)
+        flagged += int(clip["overlay_overlap"])
+    manifest["overlay_touch_cm"] = overlay_touch_cm
+    return flagged
+
+
 def _in_bounds(segs: Segments, start: datetime.datetime, end: datetime.datetime) -> bool:
     return all(start <= s and e <= end for s, e in segs)
 
@@ -550,6 +763,7 @@ def gate_window(
     threshold: float,
     gap: float = 0.0,
     d_min: Optional[float] = None,
+    hold_thr: Optional[float] = None,
 ) -> Optional[str]:
     """창이 조건의 의미를 실제로 만족하는지 검사한다. 통과면 None, 아니면 폐기 사유.
 
@@ -557,10 +771,16 @@ def gate_window(
     관여하지 않는다(그들이 만드는 오염은 순도 검사가 따로 본다). 검사 내용:
 
       full          : 접촉 프레임(거리 < 문턱)이 창에 실제로 들어있다.
-      no_approach   : 접촉 프레임이 있고, **창의 첫 프레임이 이미 접촉 중**이다
-                      (v3.1: 접근 프레임이 한 장도 남지 않았다는 기계적 확인).
-      no_aftermath  : 접촉 프레임이 있고, **창의 마지막 프레임이 아직 접촉 중**이다
-                      (v3.1: 분리 장면이 들어오지 않았다는 기계적 확인).
+      no_approach   : 접촉 프레임이 있고, **창의 첫 프레임이 플라토 안**이다
+                      (v3.2: 완전히 붙은 상태에서 시작한다는 기계적 확인. v3.1은
+                       "문턱 아래"까지만 봤는데, 문턱과 플라토 사이에는 아직 다가오는
+                       움직임이 남아 있어 접근 잔재를 걸러내지 못했다).
+      no_aftermath  : 접촉 프레임이 있고, **창의 마지막 프레임이 플라토 안**이다
+                      (v3.2: 아직 완전히 붙어 있는 상태로 끝난다는 확인. 같은 이유로
+                       v3.1의 "문턱 아래" 검사로는 분리 움직임이 통과했다).
+
+    ``hold_thr``(= 그 사건의 d_min + 플라토 여유)를 주지 않으면 두 조건은 v3.1처럼
+    문턱 기준으로 검사한다 — 플라토 정보를 모르는 호출자를 위한 폴백이다.
       approach_only : 창 전 구간이 문턱 밖이고, 종점 거리가 시점 거리보다 작으며,
                       거리가 줄어드는 프레임이 APPROACH_DECREASE_FRAC 이상이다
                       (= "접촉 없이 접근만"이라는 주장의 기계적 확인).
@@ -582,13 +802,14 @@ def gate_window(
     if condition in ("full", "no_approach", "no_aftermath"):
         if not any(d < threshold for _, d in samples):
             return "no_contact_frames_in_window"
-        # v3.1: 창 경계가 접촉 구간 안에 있어야 한다는 것까지 확인한다.
+        # v3.2: 창 경계가 **플라토 안**에 있어야 한다는 것까지 확인한다.
         # 접촉 프레임이 "들어있다"만으로는 no_approach 시작부에 접근 프레임이,
         # no_aftermath 종료부에 분리 프레임이 남아도 통과해 버린다.
-        if condition == "no_approach" and samples[0][1] >= threshold:
-            return "approach_frames_at_window_start"
-        if condition == "no_aftermath" and samples[-1][1] >= threshold:
-            return "separation_frames_at_window_end"
+        limit = hold_thr if hold_thr is not None else threshold
+        if condition == "no_approach" and samples[0][1] > limit:
+            return "window_start_outside_plateau"
+        if condition == "no_aftermath" and samples[-1][1] > limit:
+            return "window_end_outside_plateau"
         return None
 
     if condition == "approach_only":
@@ -652,22 +873,28 @@ def plan_episode(
     search_back_s: float = DEFAULT_SEARCH_BACK_S,
     search_fwd_s: float = DEFAULT_SEARCH_FWD_S,
     max_contact_s: float = DEFAULT_MAX_CONTACT_S,
+    plateau_margin_cm: float = PLATEAU_MARGIN_CM,
+    hold_guard_s: float = DEFAULT_HOLD_GUARD_S,
+    third_object_cm: float = DEFAULT_THIRD_OBJECT_CM,
     n_control: int = 1,
     seed: int = 42,
 ) -> Tuple[List[dict], Dict[str, dict]]:
     """에피소드 1개 -> (클립 계획 목록, 조건별 게이트 통계).
 
-    kind="collision": 실측 접촉 구간마다 5조건(WINDOW_SPECS + no_contact) + control.
+    kind="collision": 실측 접촉 구간마다 5조건(window_specs() + no_contact) + control.
     kind="nearmiss" : 거리 극소점마다 near_miss 1조건 + control.
 
     계획 항목: {"condition", "t_ref", "anchor", "segments", "pair",
-                "t_touch"/"t_release"/"contact_len_s" (충돌 조건), "d_min" (near_miss)}
+                "t_touch"/"t_release"/"t_hold_start"/"t_hold_end"/"contact_len_s"/
+                "hold_len_s" (충돌 조건), "d_min"·"d_min_in_window" (near_miss/control)}
     통계 항목: {조건: {"planned", "passed", "dropped": Counter(사유)}}
     """
     end = capture_start + datetime.timedelta(seconds=duration_s)
     frames = trace_frames(trace_rows)
     events, event_stats = contact_events(
-        frames, collision_rows, capture_start, threshold, search_back_s, search_fwd_s, max_contact_s)
+        frames, collision_rows, capture_start, threshold, search_back_s, search_fwd_s,
+        max_contact_s, plateau_margin_cm)
+    specs = window_specs(hold_guard_s)
     stats: Dict[str, dict] = {EVENT_STAT_KEY: event_stats}
     minima = near_miss_events(frames, gap)
     # 순도 검사 기준: 이 에피소드에서 실측된 모든 객체-객체 접촉 구간
@@ -675,7 +902,8 @@ def plan_episode(
     plans: List[dict] = []
 
     def _consider(cond: str, segs: Segments, base: dict,
-                  allow: Optional[dict] = None, d_min: Optional[float] = None) -> None:
+                  allow: Optional[dict] = None, d_min: Optional[float] = None,
+                  hold_thr: Optional[float] = None) -> None:
         _bump(stats, cond, "planned")
         if not _in_bounds(segs, capture_start, end):
             _bump(stats, cond, "dropped", "out_of_episode_bounds")
@@ -685,25 +913,42 @@ def plan_episode(
         if purity_violation(segs, contact_intervals, allow_pair, allow_touch):
             _bump(stats, cond, "dropped", "purity_other_object_contact")
             return
-        why = gate_window(cond, segs, base.get("series", []), threshold, gap, d_min)
+        # v3.3: 기록에 안 남는 제3객체 개입을 trace 기하로 직접 잡는다.
+        ref_pair = base.get("pair")
+        d_third = (third_object_min_distance(frames, segs, ref_pair) if ref_pair
+                   else min_pair_distance(frames, segs))
+        if d_third is not None and third_object_cm > 0.0 and d_third < third_object_cm:
+            _bump(stats, cond, "dropped", "third_object_intrusion")
+            return
+        why = gate_window(cond, segs, base.get("series", []), threshold, gap, d_min, hold_thr)
         if why:
             _bump(stats, cond, "dropped", why)
             return
         _bump(stats, cond, "passed")
         entry = {"condition": cond, "segments": segs, **{k: v for k, v in base.items() if k != "series"}}
+        if d_third is not None:
+            # 통과한 창에도 남겨 둔다 — 문턱을 나중에 조이려 할 때 재절단 없이 판단할 수 있다.
+            entry["third_object_min_cm"] = round(d_third, 1)
         if d_min is not None:
             entry["d_min"] = round(d_min, 1)
+            # overlay 플래그의 원재료 — 창 안 최소 쌍거리. near_miss는 기준 쌍의 d_min이
+            # 곧 그 값이다. 문턱이 나중에 정해져도 재절단 없이 플래그만 갱신할 수 있게
+            # 추출 시점에 박아 둔다(assign_overlay_flags 참조).
+            entry["d_min_in_window"] = round(d_min, 1)
         plans.append(entry)
 
     if kind == "collision":
         for ev in events:
             base = {"pair": list(ev["pair"]), "t_touch": ev["t_touch"], "t_release": ev["t_release"],
-                    "contact_len_s": ev["contact_len_s"], "contact_class": ev["contact_class"],
+                    "t_hold_start": ev["t_hold_start"], "t_hold_end": ev["t_hold_end"],
+                    "contact_len_s": ev["contact_len_s"], "hold_len_s": ev["hold_len_s"],
+                    "contact_class": ev["contact_class"],
                     "chained": ev["chained"], "series": ev["series"]}
-            for cond, (anchor, spec) in WINDOW_SPECS.items():
+            for cond, (anchor, spec) in specs.items():
                 t_ref = ev[anchor]
                 _consider(cond, _window_abs(t_ref, spec),
-                          {**base, "t_ref": t_ref, "anchor": anchor}, allow=ev)
+                          {**base, "t_ref": t_ref, "anchor": anchor}, allow=ev,
+                          hold_thr=ev["hold_thr"])
             _consider("no_contact", no_contact_segments(ev["t_touch"], ev["t_release"]),
                       {**base, "t_ref": ev["t_touch"], "anchor": ANCHOR_TOUCH}, allow=ev)
     elif kind == "nearmiss":
@@ -730,9 +975,20 @@ def plan_episode(
         if all(abs((t - s).total_seconds()) > CONTROL_BUFFER_S and
                abs((t - e).total_seconds()) > CONTROL_BUFFER_S for t in event_times):
             _bump(stats, "control", "planned")
+            entry = {"condition": "control", "t_ref": s, "anchor": "window_start",
+                     "segments": [(s, e)]}
+            # control 창에는 기준 쌍이 없으므로(사건이 없는 구간이다) overlay 판정과
+            # 제3객체 검사의 원재료는 둘 다 전 쌍에 대한 최소 거리다.
+            d_win = min_pair_distance(frames, entry["segments"])
+            if d_win is not None and third_object_cm > 0.0 and d_win < third_object_cm:
+                # v3.3: 무관 구간이라면서 두 물체가 붙어 있으면 대조군이 아니다.
+                _bump(stats, "control", "dropped", "third_object_intrusion")
+                continue
+            if d_win is not None:
+                entry["d_min_in_window"] = round(d_win, 1)
+                entry["third_object_min_cm"] = round(d_win, 1)
             _bump(stats, "control", "passed")
-            plans.append({"condition": "control", "t_ref": s, "anchor": "window_start",
-                          "segments": [(s, e)]})
+            plans.append(entry)
             made += 1
     return plans, stats
 
@@ -838,7 +1094,7 @@ def main(argv=None):
                     help="충돌 에피소드 run 디렉터리(반복 가능)")
     ap.add_argument("--nearmiss-run", action="append", default=[],
                     help="near-miss 에피소드 run 디렉터리(반복 가능)")
-    ap.add_argument("--out", required=True, help="클립 세트 출력 디렉터리")
+    ap.add_argument("--out", help="클립 세트 출력 디렉터리(--reflag-manifest 모드에서는 불필요)")
     ap.add_argument("--gap", type=float, default=95.0, help="near-miss gap(cm)")
     ap.add_argument("--touch-threshold", type=float, default=DEFAULT_TOUCH_THRESHOLD,
                     help="접촉 판정 지면 거리 문턱(cm). 물리 접촉 정의는 2r≈72cm")
@@ -848,11 +1104,38 @@ def main(argv=None):
                     help="CSV 시각 기준 앞쪽 접촉 탐색 여유(초)")
     ap.add_argument("--max-contact", type=float, default=DEFAULT_MAX_CONTACT_S,
                     help="접촉 구간 길이 상한(초). 넘으면 사건 폐기")
+    ap.add_argument("--plateau-margin", type=float, default=PLATEAU_MARGIN_CM,
+                    help="플라토(완전 밀착) 판정 여유(cm). d <= d_min + 이 값")
+    ap.add_argument("--hold-guard", type=float, default=DEFAULT_HOLD_GUARD_S,
+                    help="no_approach/no_aftermath 창을 플라토 안쪽으로 물리는 여유(초). "
+                         "플라토가 이보다 짧은 사건은 두 조건이 폐기된다")
+    ap.add_argument("--third-object-cm", type=float, default=DEFAULT_THIRD_OBJECT_CM,
+                    help="제3객체 근접 폐기 문턱(cm). 창 동안 기준 쌍이 아닌 객체가 "
+                         "이보다 가까이 오면 창 폐기. 0이면 비활성")
+    ap.add_argument("--overlay-touch-cm", type=float, default=0.0,
+                    help="화면 겹침 판정 거리(cm). 0이면 overlay_overlap 미부여. "
+                         "near_miss·control 클립에만 적용")
+    ap.add_argument("--reflag-manifest",
+                    help="기존 clips_manifest.json에 overlay_overlap만 재부여(재절단 없음)")
     ap.add_argument("--controls-per-episode", type=int, default=1)
     ap.add_argument("--seed", type=int, default=42)
     ap.add_argument("--dry-run", action="store_true", help="ffmpeg 없이 계획만 출력")
     args = ap.parse_args(argv)
 
+    # 후처리 모드: 절단은 건드리지 않고 manifest의 overlay 플래그만 갱신한다.
+    if args.reflag_manifest:
+        path = Path(args.reflag_manifest)
+        data = json.loads(path.read_text(encoding="utf-8"))
+        n = assign_overlay_flags(data, args.overlay_touch_cm)
+        eligible = sum(1 for c in data.get("clips", []) if c.get("d_min_in_window") is not None)
+        path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+        print(f"[phase_clips] overlay_touch_cm={args.overlay_touch_cm} -> "
+              f"overlap {n}/{eligible} (대상: d_min_in_window 기록된 클립)")
+        print(f"[phase_clips] manifest 갱신 -> {path}")
+        return
+
+    if not args.out:
+        raise SystemExit("--out 필요(또는 --reflag-manifest 모드 사용)")
     out_root = Path(args.out)
     manifest: List[dict] = []
     counts: Dict[str, int] = defaultdict(int)
@@ -876,6 +1159,8 @@ def main(argv=None):
                 kind, trace_rows, col_rows, cap0, dur, gap=args.gap,
                 threshold=args.touch_threshold, search_back_s=args.search_back,
                 search_fwd_s=args.search_fwd, max_contact_s=args.max_contact,
+                plateau_margin_cm=args.plateau_margin, hold_guard_s=args.hold_guard,
+                third_object_cm=args.third_object_cm,
                 n_control=args.controls_per_episode, seed=args.seed)
             merge_stats(total_stats, stats)
             for p in plans:
@@ -893,10 +1178,11 @@ def main(argv=None):
                                   round((e - cap0).total_seconds(), 3)]
                                  for s, e in p["segments"]],
                 }
-                for key in ("pair", "contact_len_s", "contact_class", "chained", "d_min"):
+                for key in ("pair", "contact_len_s", "hold_len_s", "contact_class",
+                            "chained", "d_min", "d_min_in_window", "third_object_min_cm"):
                     if key in p:
                         entry[key] = p[key]
-                for key in ("t_touch", "t_release"):
+                for key in ("t_touch", "t_release", "t_hold_start", "t_hold_end"):
                     if key in p:
                         entry[key] = _fmt(p[key])
                 manifest.append(entry)
@@ -920,6 +1206,9 @@ def main(argv=None):
         "max_contact_s": args.max_contact,
         "excise_pad_s": EXCISE_PAD_S,
         "edge_guard_s": EDGE_GUARD_S,
+        "plateau_margin_cm": args.plateau_margin,
+        "hold_guard_s": args.hold_guard,
+        "third_object_cm": args.third_object_cm,
         "contact_class_boundary_s": CONTACT_CLASS_BOUNDARY_S,
         "chain_window_s": CHAIN_WINDOW_S,
         "gap": args.gap,
@@ -928,11 +1217,21 @@ def main(argv=None):
     gate_stats = {c: {**{k: v for k, v in s.items() if k != "dropped"},
                       "dropped": dict(s["dropped"])}
                   for c, s in total_stats.items()}
+    doc = {**params, "extractor_version": "v3.3", "gate_stats": gate_stats,
+           "clips": manifest}
+    n_overlap = assign_overlay_flags(doc, args.overlay_touch_cm)
+    eligible = sum(1 for c in manifest if c.get("d_min_in_window") is not None)
+    if args.overlay_touch_cm > 0:
+        print(f"[phase_clips] overlay_touch_cm={args.overlay_touch_cm} -> "
+              f"overlap {n_overlap}/{eligible} (near_miss·control)")
+    else:
+        print(f"[phase_clips] overlay_overlap 미부여 (--overlay-touch-cm 0). "
+              f"d_min_in_window는 {eligible}개 클립에 기록됨 — 나중에 "
+              f"--reflag-manifest로 재절단 없이 부여 가능")
     if not args.dry_run:
         out_root.mkdir(parents=True, exist_ok=True)
         (out_root / "clips_manifest.json").write_text(
-            json.dumps({**params, "extractor_version": "v3.1", "gate_stats": gate_stats,
-                        "clips": manifest}, ensure_ascii=False, indent=2), encoding="utf-8")
+            json.dumps(doc, ensure_ascii=False, indent=2), encoding="utf-8")
         print(f"[phase_clips] manifest -> {out_root / 'clips_manifest.json'}")
     else:
         for e in manifest[:10]:

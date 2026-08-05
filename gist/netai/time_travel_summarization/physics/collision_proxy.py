@@ -1,6 +1,15 @@
 _PROXY_NAME = "__phys_proxy__"
 _MATERIAL_NAME = "__phys_material__"
 
+# 콜라이더-메시 정합화 (v2 데이터 규약, 2026-08-05 — 위상분해_리포트 한계 10):
+# bbox 유도 캡슐/실린더 반지름이 시각적 몸통보다 두꺼워(우주인 실측: r=35.86, 접촉거리
+# 71.7) 물리 접촉이 시각 접촉보다 먼저 성립 → 접촉 순간에도 화면엔 미세한 틈이 보였다.
+# 콜라이더 "너비"를 이 값(스테이지 단위, cm)만큼 줄여(반지름은 절반씩) 메시에 밀착시킨다
+# — 우주인 기준 r 35.86→33.36, 접촉거리 71.7→66.7. 주의: 이 값은 생성 데이터의 접촉
+# 규약을 바꾸므로(train ≠ infer 금지) **v2 데이터 재생성 + 재학습과 묶어서만** 적용
+# 의미가 있다(리포트 한계 10의 기각 논리 — 테스트 클립만 바꾸면 규약 효과가 섞인다).
+_PROXY_WIDTH_SHRINK = 5.0
+
 
 def _ensure_api(schema_api, prim):
     if not schema_api(prim):
@@ -123,7 +132,9 @@ def wrap_with_collision_proxy(
         height_scale = 0.45 if shape == "cylinder" else 0.9
         proxy_height = max(sizes[world_up_idx] * height_scale, 0.1 * m_to_units)
         other_dims = [sizes[i] for i in range(3) if i != world_up_idx]
-        proxy_radius = max(min(other_dims) * 0.45, 0.05 * m_to_units)
+        # 너비 축소(_PROXY_WIDTH_SHRINK)는 지름 기준 → 반지름에서 절반을 뺀다.
+        proxy_radius = max(min(other_dims) * 0.45 - _PROXY_WIDTH_SHRINK / 2.0,
+                           0.05 * m_to_units)
 
         if shape == "cylinder":
             world_target = [bb_center[0], bb_center[1], bb_center[2]]
@@ -138,7 +149,8 @@ def wrap_with_collision_proxy(
         f"bbox_size={tuple(bb_size)} bbox_center={tuple(bb_center)} "
         f"local_translate(in-prim-local)={tuple(local_translate)} "
         f"world_up_in_prim_local={tuple(local_up)} "
-        f"shape={shape} axis={axis_name} height={proxy_height:.2f} radius={proxy_radius:.2f} (stage units)"
+        f"shape={shape} axis={axis_name} height={proxy_height:.2f} radius={proxy_radius:.2f} "
+        f"(stage units, width_shrink={_PROXY_WIDTH_SHRINK})"
     )
 
     if shape not in ("sphere", "capsule", "cylinder"):

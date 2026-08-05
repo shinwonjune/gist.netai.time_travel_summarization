@@ -4,8 +4,11 @@ from pxr import UsdGeom
 
 
 class ObjectIdManipulator(sc.Manipulator):
-    # 라벨을 객체 좌표에 정확히 배치 (PIL 합성 마커와 동일 3D 점). 0이 아니면 Y로 띄움.
-    _LABEL_Y_OFFSET = 0.0
+    # 라벨 앵커 = 객체 좌표 + 어깨 높이 오프셋(Y-up 가정). GUI 육안으로 확정:
+    # 200=머리 위, 150=어깨 살짝 위 → 145. 캡처(overlay_composer.MARKER_UP_OFFSET)와
+    # 같은 값이어야 정상 — 앵커는 3D 점이라 시점과 무관하게 같은 신체 높이에 투영된다.
+    # (한때 "캡처에선 엉덩이로 보인다"로 분리했으나 그 관측은 구코드 렌더로 판정돼 회귀.)
+    _LABEL_Y_OFFSET = 145.0
 
     def __init__(self, prim_path: str, label_text: str, **kwargs):
         super().__init__(**kwargs)
@@ -51,7 +54,9 @@ class ObjectIdManipulator(sc.Manipulator):
 
         with self._transform:
             with sc.Transform(look_at=sc.Transform.LookAt.CAMERA):
-                sc.Arc(radius=30, color=0xFFFFFFFF, thickness=40)
+                # GUI 원 크기 — 22는 숫자(size=30)가 원 밖으로 삐져나옴(육안 확인)
+                # → 26으로 재확대. 캡처 픽셀 반지름과는 단위가 달라 비례 강제하지 않는다.
+                sc.Arc(radius=26, color=0xFFFFFFFF, thickness=40)
                 sc.Label(
                     self._label_text,
                     color=0xFF000000,

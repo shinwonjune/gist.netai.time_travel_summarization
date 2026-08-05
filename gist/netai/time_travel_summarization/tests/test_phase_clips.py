@@ -1,4 +1,4 @@
-"""위상 분해 추출기 v3.1(automation/phase_clips.py) 순수 로직 테스트 — ffmpeg 불필요.
+"""위상 분해 추출기 v3.2(automation/phase_clips.py) 순수 로직 테스트 — ffmpeg 불필요.
 
 합성 trace(두 객체가 서로 접근 -> 붙어 있다가 -> 이탈)로 설계 약속을 검증한다:
   - kind 필터: collisions CSV에서 ``kind == "object"`` 행만 사건이 된다(벽·stuck 배제)
@@ -8,9 +8,13 @@
   - 조건 게이트: 조건이 주장하는 내용을 만족하지 못하는 창은 폐기되고 사유가 집계된다
   - 순도: 창에 다른 쌍의 객체-객체 접촉이 겹치면 폐기, 벽 접촉은 무관
   - 사건 속성: contact_class(short/long)·chained 플래그가 클립까지 전달된다
-  - **v3.1 창 경계**: no_approach는 접촉 시작 뒤에서 열리고, no_aftermath는 아직
-    붙어 있는 프레임에서 닫히며, approach_only는 접촉 0.05초 전까지 붙고,
-    no_contact 뒤 구간은 t_release에서 바로 열린다 (WindowBoundaryV31Test)
+  - **v3.2 플라토 기준 경계**: no_approach는 완전히 붙은 프레임(플라토 안)에서 열리고
+    no_aftermath는 아직 붙어 있는 프레임에서 닫힌다. 문턱 통과 시각만 보던 v3.1이
+    이 사건에서 잔재를 남겼을 것임을 함께 고정한다 (WindowBoundaryTest)
+  - **플라토가 가드보다 짧으면** 두 조건이 폐기되고 나머지는 영향받지 않는다 (HoldGuardTest)
+  - **overlay_overlap**: 절단과 분리된 후처리로 재부여 가능 (OverlayFlagTest)
+  - **제3객체 근접 게이트**: 충돌 반응이 없어 collisions CSV에 안 남는 개입도 trace
+    기하로 잡는다 — 기준 쌍 두 객체 각각에 대해 잰다 (ThirdObjectGateTest)
   - ffmpeg 명령 구조(단일 구간 = concat n=1, 스플라이스 = n=2)
 """
 import datetime
@@ -20,19 +24,24 @@ from pathlib import Path
 
 from gist.netai.time_travel_summarization.automation.phase_clips import (
     CONTACT_CLASS_BOUNDARY_S,
+    DEFAULT_HOLD_GUARD_S,
     DEFAULT_TOUCH_THRESHOLD,
+    PLATEAU_MARGIN_CM,
+    assign_overlay_flags,
     contact_class,
     contact_events,
     ffmpeg_cmd,
     gate_window,
     mark_chained,
     measure_contact,
+    min_pair_distance,
     near_miss_events,
     no_contact_segments,
     object_contact_clusters,
     pair_series,
     plan_episode,
     trace_frames,
+    window_specs,
 )
 
 _FMT = "%Y-%m-%d %H:%M:%S.%f"
@@ -57,11 +66,56 @@ def _col_row(sec: float, objid: str, kind: str = "object") -> dict:
 
 def _profile(t: float, t_touch: float, t_release: float, far: float = 400.0,
              close: float = 72.0, approach_s: float = 4.0) -> float:
-    """시각 t에서의 쌍 거리 — 접촉 구간에서 close, 그 밖에서는 approach_s에 걸쳐 far까지."""
+    """시각 t에서의 쌍 거리 — 접촉 구간에서 close, 그 밖에서는 approach_s에 걸쳐 far까지.
+
+    접촉 구간 전체가 close로 평평하므로 이 픽스처에서는 플라토 = 접촉 구간이다.
+    문턱↔플라토 사이의 진입/이탈 구간을 재현하려면 _plateau_trace를 쓴다.
+    """
     if t_touch <= t < t_release:
         return close
     away = (t_touch - t) if t < t_touch else (t - t_release)
     return min(far, THR + (far - THR) * min(1.0, away / approach_s))
+
+
+def _plateau_trace(t_touch: float, t_hold_start: float, t_hold_end: float, t_release: float,
+                   close: float = 72.0, far: float = 400.0, span_s: float = 30.0,
+                   pair=("obj001", "obj002"), offset_z: float = 0.0) -> list:
+    """문턱 통과 -> 밀착(플라토) -> 이탈이 **구분되는** trace.
+
+    실물의 구조를 재현한다: 90cm 문턱을 지난 뒤에도 한동안 더 다가와야(lead_in) 완전히
+    붙고, 플라토가 끝난 뒤에도 한동안 멀어져야(lead_out) 문턱을 회복한다. 이 사이
+    구간이 v3.1까지 no_approach/no_aftermath에 새어 들던 접근·분리 움직임이다.
+
+    문턱과 플라토 사이의 "어깨" 구간은 **플라토 판정 띠(d_min+3cm)보다 확실히 위**인
+    값으로 둔다 — 그래야 인자로 준 t_hold_start/t_hold_end가 곧 측정될 플라토 경계가
+    되어 테스트가 의도를 그대로 표현한다. (선형으로 훑어 내리면 띠를 가로지르는
+    지점이 인자값보다 앞서 실측 경계가 인자와 어긋난다.)
+    """
+    a, b = pair
+    shoulder = (close + PLATEAU_MARGIN_CM + THR) / 2.0   # 띠 위 · 문턱 아래
+    entry = THR - 0.1                                    # 문턱을 막 지난 값
+    rows = []
+    for i in range(int(span_s * HZ) + 1):
+        t = i / HZ
+        if t < t_touch:                       # 문턱 밖 접근
+            away = t_touch - t
+            d = min(far, THR + (far - THR) * min(1.0, away / 4.0))
+        elif t < t_hold_start:                # 문턱 통과 후에도 계속 다가오는 중(어깨)
+            frac = (t - t_touch) / max(t_hold_start - t_touch, 1e-9)
+            d = entry - (entry - shoulder) * frac
+        elif t <= t_hold_end:                 # 완전 밀착(플라토)
+            d = close
+        elif t < t_release:                   # 아직 문턱 안이지만 떨어지는 중(어깨)
+            frac = (t - t_hold_end) / max(t_release - t_hold_end, 1e-9)
+            d = shoulder + (entry - shoulder) * frac
+        else:                                 # 문턱 회복 후 이탈
+            away = t - t_release
+            d = min(far, THR + (far - THR) * min(1.0, away / 4.0))
+        half = d / 2.0
+        for objid, sign in ((a, -1.0), (b, +1.0)):
+            rows.append({"timestamp": _ts(t), "objid": objid,
+                         "x": f"{sign * half}", "y": "90", "z": f"{offset_z}"})
+    return rows
 
 
 def _chained_trace(first=(15.0, 15.2), second=(16.4, 16.6), span_s: float = 30.0) -> list:
@@ -385,7 +439,7 @@ class GateTest(unittest.TestCase):
         """v3식 [t_touch-0.1, ...]은 접근 잔재를 남긴다 — 게이트가 잡아낸다."""
         self.assertEqual(
             gate_window("no_approach", self._segs((14.9, 16.9)), self.series, THR),
-            "approach_frames_at_window_start")
+            "window_start_outside_plateau")
 
     def test_no_aftermath_requires_contact_at_window_end(self):
         """v3.1 — 아직 붙어 있는 프레임에서 창이 닫혀야 한다(분리 장면 0)."""
@@ -396,7 +450,33 @@ class GateTest(unittest.TestCase):
         """v3식 [..., t_release+0.1]은 떨어지기 시작하는 장면을 담는다 — 게이트가 잡아낸다."""
         self.assertEqual(
             gate_window("no_aftermath", self._segs((13.7, 15.7)), self.series, THR),
-            "separation_frames_at_window_end")
+            "window_end_outside_plateau")
+
+    def test_plateau_gate_is_stricter_than_threshold_gate(self):
+        """v3.2 핵심 — 문턱은 통과하지만 플라토 밖인 창을 hold_thr가 잡아낸다.
+
+        문턱 통과(15.0) 뒤 0.3초에 걸쳐 더 다가와 15.3에 완전히 붙는 사건에서,
+        창을 15.1에 열면 아직 다가오는 중이다. 문턱 기준(v3.1)으로는 이미 접촉이라
+        통과하지만, 플라토 기준(v3.2)으로는 폐기된다.
+        """
+        series = pair_series(
+            trace_frames(_plateau_trace(t_touch=15.0, t_hold_start=15.3,
+                                        t_hold_end=15.6, t_release=15.9)),
+            "obj001", "obj002")
+        segs = self._segs((15.1, 17.1))
+        self.assertIsNone(gate_window("no_approach", segs, series, THR))          # 문턱 기준
+        self.assertEqual(gate_window("no_approach", segs, series, THR, hold_thr=75.0),
+                         "window_start_outside_plateau")                          # 플라토 기준
+
+    def test_plateau_gate_accepts_window_opening_inside_plateau(self):
+        series = pair_series(
+            trace_frames(_plateau_trace(t_touch=15.0, t_hold_start=15.3,
+                                        t_hold_end=15.6, t_release=15.9)),
+            "obj001", "obj002")
+        self.assertIsNone(gate_window("no_approach", self._segs((15.35, 17.35)),
+                                      series, THR, hold_thr=75.0))
+        self.assertIsNone(gate_window("no_aftermath", self._segs((13.55, 15.55)),
+                                      series, THR, hold_thr=75.0))
 
     def test_approach_only_passes_on_closing_window(self):
         self.assertIsNone(gate_window("approach_only", self._segs((12.8, 14.8)), self.series, THR))
@@ -496,10 +576,14 @@ class PlanEpisodeTest(unittest.TestCase):
         # no_approach: [t_touch+0.05, t_touch+2.05] — 접촉이 이미 시작된 뒤에서 연다
         self.assertAlmostEqual(off(by["no_approach"]["segments"][0][0]), 15.45, delta=tol)
         self.assertAlmostEqual(off(by["no_approach"]["segments"][0][1]), 17.45, delta=tol)
-        # no_aftermath: [t_release-2.05, t_release-0.05] — 아직 붙어 있는 프레임에서 닫는다.
-        # 기준은 CSV 시각(15.0)이 아니라 실측 t_release(16.0)다.
-        self.assertAlmostEqual(off(by["no_aftermath"]["segments"][0][1]), 15.95, delta=tol)
-        self.assertEqual(by["no_aftermath"]["anchor"], "t_release")
+        # no_aftermath: [t_hold_end-2.05, t_hold_end-0.05]. 이 픽스처는 접촉 구간이
+        # 통째로 평평해 플라토 끝 = t_release 직전 프레임이다(기준은 CSV 시각 15.0이
+        # 아니라 실측값이라는 점이 요지).
+        self.assertEqual(by["no_aftermath"]["anchor"], "t_hold_end")
+        hold_end = off(by["no_aftermath"]["t_hold_end"])
+        self.assertAlmostEqual(off(by["no_aftermath"]["segments"][0][1]), hold_end - 0.05,
+                               delta=1e-6)
+        self.assertAlmostEqual(hold_end, 16.0, delta=2.0 / HZ)
         # approach_only: [t_touch-2.05, t_touch-0.05]
         self.assertAlmostEqual(off(by["approach_only"]["segments"][0][1]), 15.35, delta=tol)
         self.assertAlmostEqual(off(by["approach_only"]["segments"][0][0]), 13.35, delta=tol)
@@ -578,50 +662,362 @@ class PlanEpisodeTest(unittest.TestCase):
         self.assertEqual(stats["near_miss"]["dropped"]["d_min_below_gap"], 1)
 
 
-class WindowBoundaryV31Test(unittest.TestCase):
-    """v3.1 창 경계가 실제 계획 산출물에서 국면을 정확히 가르는지 확인한다.
+class PlateauMeasurementTest(unittest.TestCase):
+    """v3.2-1 — 플라토 경계 실측. 문턱 통과 시각과 구별되는가."""
+
+    def setUp(self):
+        self.frames = trace_frames(_plateau_trace(
+            t_touch=15.0, t_hold_start=15.3, t_hold_end=15.8, t_release=16.2))
+        self.series = pair_series(self.frames, "obj001", "obj002")
+
+    def test_plateau_bounds_differ_from_threshold_bounds(self):
+        measured, why = measure_contact(self.series, _at(15.0), THR)
+        self.assertIsNone(why)
+        off = lambda t: (t - BASE).total_seconds()   # noqa: E731
+        self.assertAlmostEqual(off(measured["t_touch"]), 15.0, delta=1.5 / HZ)
+        self.assertAlmostEqual(off(measured["t_release"]), 16.2, delta=1.5 / HZ)
+        # 플라토는 문턱 구간보다 안쪽이다 — 이 차이가 v3.2가 잡아내려는 잔재다
+        self.assertAlmostEqual(off(measured["t_hold_start"]), 15.3, delta=1.5 / HZ)
+        self.assertAlmostEqual(off(measured["t_hold_end"]), 15.8, delta=1.5 / HZ)
+        self.assertAlmostEqual(measured["hold_len_s"], 0.5, delta=2.0 / HZ)
+        self.assertAlmostEqual(measured["contact_len_s"], 1.2, delta=2.0 / HZ)
+
+    def test_hold_thr_is_relative_to_event_dmin(self):
+        """접촉 거리가 사건마다 다르므로 플라토 문턱은 d_min 상대값이어야 한다."""
+        for close in (72.0, 78.0, 84.0):
+            frames = trace_frames(_plateau_trace(
+                t_touch=15.0, t_hold_start=15.3, t_hold_end=15.8, t_release=16.2,
+                close=close))
+            measured, _ = measure_contact(pair_series(frames, "obj001", "obj002"),
+                                          _at(15.0), THR)
+            self.assertAlmostEqual(measured["d_min"], close, delta=0.5)
+            self.assertAlmostEqual(measured["hold_thr"], close + PLATEAU_MARGIN_CM, delta=0.5)
+            self.assertAlmostEqual(measured["hold_len_s"], 0.5, delta=2.0 / HZ)
+
+    def test_flat_contact_makes_plateau_equal_contact(self):
+        """접촉 구간이 통째로 평평하면 플라토 = 접촉 구간(한 프레임 오차 안)."""
+        series = pair_series(trace_frames(_contact_trace(15.0, 15.6)), "obj001", "obj002")
+        measured, _ = measure_contact(series, _at(15.0), THR)
+        self.assertAlmostEqual(measured["hold_len_s"], measured["contact_len_s"],
+                               delta=2.0 / HZ)
+
+
+class WindowBoundaryTest(unittest.TestCase):
+    """v3.2 창 경계가 실제 계획 산출물에서 국면을 정확히 가르는지 확인한다.
 
     게이트가 같은 성질을 검사하지만, 여기서는 계획된 창의 프레임을 직접 들여다봐
-    "경계가 의도한 국면에 놓였다"를 규격 수준에서 고정한다.
+    "경계가 의도한 국면에 놓였다"를 규격 수준에서 고정한다. 픽스처는 문턱 통과와
+    완전 밀착이 **구분되는** trace라, v3.1 규격이었다면 no_approach 첫 프레임이
+    아직 접근 중이고 no_aftermath 마지막 프레임이 이미 분리 중이었을 사건이다.
     """
 
     def setUp(self):
-        self.t_touch, self.t_release = 15.4, 16.6      # 1.2초 접촉
-        trace = _contact_trace(t_touch=self.t_touch, t_release=self.t_release)
+        self.t_touch, self.t_hold_start = 15.0, 15.3
+        self.t_hold_end, self.t_release = 16.5, 16.9
+        trace = _plateau_trace(t_touch=self.t_touch, t_hold_start=self.t_hold_start,
+                               t_hold_end=self.t_hold_end, t_release=self.t_release)
         col = [_col_row(15.0, "obj001"), _col_row(15.0, "obj002")]
-        plans, _ = plan_episode("collision", trace, col, BASE, 30.0, n_control=0)
+        plans, self.stats = plan_episode("collision", trace, col, BASE, 30.0, n_control=0)
         self.by = {p["condition"]: p for p in plans}
         self.series = pair_series(trace_frames(trace), "obj001", "obj002")
+        self.hold_thr = 72.0 + PLATEAU_MARGIN_CM
 
     def _samples(self, cond):
         segs = self.by[cond]["segments"]
         return [(t, d) for t, d in self.series if any(s <= t <= e for s, e in segs)]
 
-    def test_no_approach_starts_already_in_contact(self):
+    def test_no_approach_starts_inside_plateau(self):
         first_t, first_d = self._samples("no_approach")[0]
-        self.assertLess(first_d, THR)
-        self.assertGreaterEqual((first_t - BASE).total_seconds(), self.t_touch)
+        self.assertLessEqual(first_d, self.hold_thr)
+        self.assertGreaterEqual((first_t - BASE).total_seconds(), self.t_hold_start)
+        self.assertEqual(self.by["no_approach"]["anchor"], "t_hold_start")
 
-    def test_no_aftermath_ends_still_in_contact(self):
+    def test_no_aftermath_ends_inside_plateau(self):
         last_t, last_d = self._samples("no_aftermath")[-1]
-        self.assertLess(last_d, THR)
-        self.assertLess((last_t - BASE).total_seconds(), self.t_release)
+        self.assertLessEqual(last_d, self.hold_thr)
+        self.assertLessEqual((last_t - BASE).total_seconds(), self.t_hold_end)
+        self.assertEqual(self.by["no_aftermath"]["anchor"], "t_hold_end")
 
-    def test_approach_only_has_no_contact_frame_and_ends_close_to_touch(self):
+    def test_v31_boundaries_would_have_leaked(self):
+        """이 사건에서 v3.1 규격이었다면 잔재가 남았음을 명시적으로 보인다."""
+        # v3.1 no_approach 시작 = t_touch + 0.05 = 15.05 → 아직 다가오는 중
+        d_at_v31_start = next(d for t, d in self.series
+                              if (t - BASE).total_seconds() >= self.t_touch + 0.05)
+        self.assertGreater(d_at_v31_start, self.hold_thr)
+        # v3.1 no_aftermath 끝 = t_release − 0.05 = 16.85 → 이미 떨어지는 중
+        d_at_v31_end = [d for t, d in self.series
+                        if (t - BASE).total_seconds() <= self.t_release - 0.05][-1]
+        self.assertGreater(d_at_v31_end, self.hold_thr)
+
+    def test_approach_only_unchanged_and_anchored_on_touch(self):
         samples = self._samples("approach_only")
         self.assertTrue(all(d >= THR for _, d in samples))
+        self.assertEqual(self.by["approach_only"]["anchor"], "t_touch")
         end_off = (self.by["approach_only"]["segments"][0][1] - BASE).total_seconds()
         self.assertAlmostEqual(self.t_touch - end_off, 0.05, delta=1.5 / HZ)
 
-    def test_no_contact_back_segment_opens_at_release(self):
+    def test_no_contact_unchanged_and_opens_at_release(self):
         back_start = (self.by["no_contact"]["segments"][1][0] - BASE).total_seconds()
         self.assertAlmostEqual(back_start, self.t_release, delta=1.5 / HZ)
-        # 그래도 접촉 프레임은 한 장도 들어오지 않는다(t_release는 문턱 회복 시각)
         self.assertTrue(all(d >= THR for _, d in self._samples("no_contact")))
 
-    def test_full_window_unchanged_in_v31(self):
+    def test_full_window_unchanged(self):
         start_off = (self.by["full"]["segments"][0][0] - BASE).total_seconds()
         self.assertAlmostEqual(start_off, self.t_touch - 1.0, delta=1.5 / HZ)
+        self.assertEqual(self.by["full"]["anchor"], "t_touch")
+
+
+class HoldGuardTest(unittest.TestCase):
+    """플라토가 가드보다 짧으면 두 조건이 폐기된다 — 실측에서 확인된 대가."""
+
+    def _plan(self, hold_len: float, hold_guard_s: float = DEFAULT_HOLD_GUARD_S):
+        trace = _plateau_trace(t_touch=15.0, t_hold_start=15.3,
+                               t_hold_end=15.3 + hold_len, t_release=15.3 + hold_len + 0.3)
+        col = [_col_row(15.0, "obj001"), _col_row(15.0, "obj002")]
+        return plan_episode("collision", trace, col, BASE, 30.0, n_control=0,
+                            hold_guard_s=hold_guard_s)
+
+    def test_plateau_shorter_than_guard_drops_both_conditions(self):
+        plans, stats = self._plan(hold_len=0.02)      # 가드 0.05보다 짧다
+        conds = {p["condition"] for p in plans}
+        self.assertNotIn("no_approach", conds)
+        self.assertNotIn("no_aftermath", conds)
+        self.assertEqual(stats["no_approach"]["dropped"]["window_start_outside_plateau"], 1)
+        self.assertEqual(stats["no_aftermath"]["dropped"]["window_end_outside_plateau"], 1)
+        # 나머지 조건은 영향받지 않는다
+        self.assertIn("full", conds)
+        self.assertIn("approach_only", conds)
+
+    def test_smaller_guard_recovers_them(self):
+        """--hold-guard를 낮추면 같은 사건이 살아난다(수율/엄밀성 트레이드오프)."""
+        plans, _ = self._plan(hold_len=0.02, hold_guard_s=0.0)
+        conds = {p["condition"] for p in plans}
+        self.assertIn("no_approach", conds)
+        self.assertIn("no_aftermath", conds)
+
+    def test_long_plateau_passes(self):
+        plans, _ = self._plan(hold_len=0.5)
+        conds = {p["condition"] for p in plans}
+        self.assertIn("no_approach", conds)
+        self.assertIn("no_aftermath", conds)
+
+
+def _third_object_rows(pos_at, objid: str = "obj003", span_s: float = 30.0) -> list:
+    """제3객체 하나를 시간 -> (x, z) 위치 함수로 만들어 trace에 덧붙일 행 목록.
+
+    기준 쌍은 접촉 구간에서만 ±36cm에 있고 그 밖에서는 훨씬 벌어져 있으므로,
+    "C가 얼마나 가까운가"를 창 전체에서 예측 가능하게 하려면 개입 구간을 접촉 구간
+    **안쪽**으로 잡거나 z축으로 떨어뜨려야 한다. 아래 테스트들이 그렇게 쓴다.
+    """
+    rows = []
+    for i in range(int(span_s * HZ) + 1):
+        t = i / HZ
+        x, z = pos_at(t)
+        rows.append({"timestamp": _ts(t), "objid": objid,
+                     "x": f"{x}", "y": "90", "z": f"{z}"})
+    return rows
+
+
+FAR = (3000.0, 0.0)     # 어떤 창에서도 문턱 밖인 대기 위치
+
+
+class ThirdObjectGateTest(unittest.TestCase):
+    """v3.3 — 충돌 반응 없이 사이를 지나가는 제3객체를 trace 기하로 잡는다.
+
+    실물 증상: A-B 충돌 클립인데 C가 두 물체 사이를 밀고 지나갔다. C에 충돌 반응이
+    없어 collisions CSV에 행이 남지 않았고, 기록 기반인 순도 검사는 통과해 버렸다.
+    """
+
+    # 기준 쌍은 접촉 구간 [15.0, 15.6] 동안 x=±36(거리 72cm)에 있고, 그 밖에서는
+    # 시간에 비례해 벌어진다. 그래서 개입은 접촉 구간 안쪽 [15.1, 15.4]에 둔다.
+    INTRUDE = (15.1, 15.4)
+
+    def _episode(self, pos_at, n_control: int = 0, **kw):
+        trace = _contact_trace(t_touch=15.0, t_release=15.6)
+        trace += _third_object_rows(pos_at)
+        col = [_col_row(15.0, "obj001"), _col_row(15.0, "obj002")]
+        return plan_episode("collision", trace, col, BASE, 30.0,
+                            n_control=n_control, **kw)
+
+    def _during(self, pos):
+        """개입 구간에만 pos, 그 밖에는 멀리."""
+        lo, hi = self.INTRUDE
+        return lambda t: pos if lo <= t <= hi else FAR
+
+    # 개입 구간 [15.1, 15.4]를 창 안에 담는 조건들. approach_only([12.95, 14.95])와
+    # no_contact(접촉 구간을 도려내 [13.9,14.9]+[15.6,16.6])는 개입 시간을 포함하지
+    # 않으므로 폐기 대상이 아니다 — 게이트가 사건 단위가 아니라 **창 단위**로 판정한다.
+    AFFECTED = ("full", "no_approach", "no_aftermath")
+
+    def test_intruder_inside_window_drops_it(self):
+        """창 동안 C가 두 물체 사이(x=0)로 들어오면 그 창이 폐기된다."""
+        plans, stats = self._episode(self._during((0.0, 0.0)))
+        conds = {p["condition"] for p in plans}
+        for cond in self.AFFECTED:
+            self.assertNotIn(cond, conds)
+            self.assertGreaterEqual(stats[cond]["dropped"]["third_object_intrusion"], 1)
+
+    def test_gate_is_window_scoped_not_event_scoped(self):
+        """같은 사건이라도 개입 시간을 담지 않는 창은 살아남는다."""
+        plans, _ = self._episode(self._during((0.0, 0.0)))
+        conds = {p["condition"] for p in plans}
+        self.assertIn("approach_only", conds)   # [12.95, 14.95] — 개입 전에 끝난다
+        self.assertIn("no_contact", conds)      # 개입 구간이 절제된 사이에 들어간다
+
+    def test_distant_third_object_is_fine(self):
+        """멀리 있는 제3객체는 아무 영향이 없다."""
+        plans, stats = self._episode(lambda t: FAR)
+        self.assertTrue(any(p["condition"] == "full" for p in plans))
+        self.assertEqual(stats["full"]["passed"], 1)
+        self.assertEqual(sum(stats["full"]["dropped"].values()), 0)
+
+    def test_intrusion_outside_window_does_not_drop(self):
+        """창 밖에서만 접근하면 그 창은 무관하다 — full[14.0,16.0] 밖인 t>=17에서 접근."""
+        plans, _ = self._episode(lambda t: (0.0, 0.0) if t >= 17.0 else FAR)
+        self.assertTrue(any(p["condition"] == "full" for p in plans))
+
+    def test_measured_against_both_pair_members(self):
+        """한쪽에만 가까운 비스듬한 개입도 잡는다 — 중점만 봤다면 놓쳤을 경우.
+
+        x=110이면 obj002(+36)와 74cm로 문턱 안이지만, 두 물체의 중점(0)과는 110cm로
+        문턱 밖이다. 중점 기준 검사였다면 이 개입을 통과시켰을 것이다.
+        """
+        plans, stats = self._episode(self._during((110.0, 0.0)))
+        conds = {p["condition"] for p in plans}
+        for cond in self.AFFECTED:
+            self.assertNotIn(cond, conds)
+            self.assertGreaterEqual(stats[cond]["dropped"]["third_object_intrusion"], 1)
+
+    def test_threshold_zero_disables_gate(self):
+        plans, _ = self._episode(self._during((0.0, 0.0)), third_object_cm=0.0)
+        self.assertTrue(any(p["condition"] == "full" for p in plans))
+
+    def test_threshold_is_configurable(self):
+        """C가 obj002와 100cm까지만 접근 — 기본 90cm는 통과, 문턱 120이면 폐기."""
+        pos_at = self._during((136.0, 0.0))       # obj002(+36)와 100cm
+        plans, _ = self._episode(pos_at)
+        self.assertTrue(any(p["condition"] == "full" for p in plans))
+        plans, stats = self._episode(pos_at, third_object_cm=120.0)
+        conds = {p["condition"] for p in plans}
+        for cond in self.AFFECTED:
+            self.assertNotIn(cond, conds)
+            self.assertGreaterEqual(stats[cond]["dropped"]["third_object_intrusion"], 1)
+
+    def test_passing_clip_records_min_distance(self):
+        """통과한 창에도 최소 거리를 남겨 나중에 문턱을 조일 수 있게 한다.
+
+        C를 z축으로 3000cm 떼어 두면 쌍이 벌어지든 말든 최소 거리가 접촉 중
+        (half=36)의 sqrt(36^2 + 3000^2) = 3000.2로 안정적이다.
+        """
+        plans, _ = self._episode(lambda t: (0.0, 3000.0))
+        full = [p for p in plans if p["condition"] == "full"][0]
+        self.assertIn("third_object_min_cm", full)
+        self.assertAlmostEqual(full["third_object_min_cm"], 3000.2, delta=1.0)
+
+    def test_two_object_episode_has_no_third_object_field(self):
+        trace = _contact_trace(t_touch=15.0, t_release=15.6)
+        col = [_col_row(15.0, "obj001"), _col_row(15.0, "obj002")]
+        plans, _ = plan_episode("collision", trace, col, BASE, 30.0, n_control=0)
+        full = [p for p in plans if p["condition"] == "full"][0]
+        self.assertNotIn("third_object_min_cm", full)
+
+    def test_applies_to_near_miss(self):
+        """접촉이 없는 near_miss 조건에도 적용된다."""
+        trace = _near_miss_trace(d_min=95.0, t_min_s=15.0)
+        trace += _third_object_rows(lambda t: (0.0, 30.0) if 14.9 <= t <= 15.1 else FAR)
+        plans, stats = plan_episode("nearmiss", trace, [], BASE, 30.0, gap=95.0, n_control=0)
+        self.assertEqual([p for p in plans if p["condition"] == "near_miss"], [])
+        self.assertGreaterEqual(stats["near_miss"]["dropped"]["third_object_intrusion"], 1)
+
+    def test_applies_to_control(self):
+        """control은 기준 쌍이 없으므로 전 쌍의 최소 거리로 같은 검사를 한다."""
+        # 두 객체가 내내 40cm 간격으로 붙어 다니는 에피소드 — 사건은 없지만 대조군 자격도 없다
+        rows = _third_object_rows(lambda t: (0.0, 0.0), objid="obj001")
+        rows += _third_object_rows(lambda t: (40.0, 0.0), objid="obj002")
+        plans, stats = plan_episode("nearmiss", rows, [], BASE, 30.0, gap=95.0, n_control=1)
+        self.assertEqual([p for p in plans if p["condition"] == "control"], [])
+        self.assertGreaterEqual(stats["control"]["dropped"]["third_object_intrusion"], 1)
+
+    def test_clean_control_still_produced(self):
+        rows = _third_object_rows(lambda t: (0.0, 0.0), objid="obj001")
+        rows += _third_object_rows(lambda t: (900.0, 0.0), objid="obj002")
+        plans, _ = plan_episode("nearmiss", rows, [], BASE, 30.0, gap=95.0, n_control=1)
+        ctrl = [p for p in plans if p["condition"] == "control"]
+        self.assertEqual(len(ctrl), 1)
+        self.assertAlmostEqual(ctrl[0]["third_object_min_cm"], 900.0, delta=1.0)
+
+
+class WindowSpecsTest(unittest.TestCase):
+    def test_anchors_and_lengths(self):
+        specs = window_specs()
+        self.assertEqual(specs["no_approach"][0], "t_hold_start")
+        self.assertEqual(specs["no_aftermath"][0], "t_hold_end")
+        self.assertEqual(specs["full"][0], "t_touch")
+        self.assertEqual(specs["approach_only"][0], "t_touch")
+        for cond, (_, spec) in specs.items():
+            total = sum(e - s for s, e in spec)
+            self.assertAlmostEqual(total, 2.0, places=6, msg=cond)
+
+    def test_guard_shifts_only_plateau_conditions(self):
+        a, b = window_specs(0.05), window_specs(0.2)
+        self.assertEqual(a["full"], b["full"])
+        self.assertEqual(a["approach_only"], b["approach_only"])
+        self.assertNotEqual(a["no_approach"], b["no_approach"])
+        self.assertNotEqual(a["no_aftermath"], b["no_aftermath"])
+
+
+class OverlayFlagTest(unittest.TestCase):
+    """v3.2-4 — 화면 겹침 플래그. 절단과 분리된 후처리로 재부여 가능해야 한다."""
+
+    def _manifest(self):
+        return {"clips": [
+            {"condition": "near_miss", "d_min_in_window": 95.0},
+            {"condition": "control", "d_min_in_window": 300.0},
+            {"condition": "full", "pair": ["obj001", "obj002"]},   # 대상 아님
+        ]}
+
+    def test_unassigned_when_threshold_is_zero(self):
+        m = self._manifest()
+        self.assertEqual(assign_overlay_flags(m, 0.0), 0)
+        self.assertTrue(all("overlay_overlap" not in c for c in m["clips"]))
+        self.assertEqual(m["overlay_touch_cm"], 0.0)
+
+    def test_flags_only_clips_with_recorded_distance(self):
+        m = self._manifest()
+        n = assign_overlay_flags(m, 120.0)
+        self.assertEqual(n, 1)
+        self.assertTrue(m["clips"][0]["overlay_overlap"])    # 95 <= 120
+        self.assertFalse(m["clips"][1]["overlay_overlap"])   # 300 > 120
+        self.assertNotIn("overlay_overlap", m["clips"][2])   # 충돌 조건은 대상 아님
+
+    def test_reassignment_without_recutting(self):
+        """문턱이 바뀌면 같은 manifest에 다시 부여만 하면 된다 — 클립은 그대로."""
+        m = self._manifest()
+        assign_overlay_flags(m, 120.0)
+        self.assertTrue(m["clips"][0]["overlay_overlap"])
+        assign_overlay_flags(m, 80.0)
+        self.assertFalse(m["clips"][0]["overlay_overlap"])   # 95 > 80
+        self.assertEqual(m["overlay_touch_cm"], 80.0)
+
+    def test_min_pair_distance_scans_all_pairs(self):
+        rows = []
+        for i in range(10):
+            t = i / HZ
+            rows += [{"timestamp": _ts(t), "objid": "obj001", "x": "0", "y": "0", "z": "0"},
+                     {"timestamp": _ts(t), "objid": "obj002", "x": "500", "y": "0", "z": "0"},
+                     {"timestamp": _ts(t), "objid": "obj003", "x": f"{40 + i}", "y": "0", "z": "0"}]
+        frames = trace_frames(rows)
+        d = min_pair_distance(frames, [(_at(0.0), _at(9 / HZ))])
+        self.assertAlmostEqual(d, 40.0, places=6)   # obj001-obj003 최소
+
+    def test_control_clip_carries_window_distance(self):
+        trace = _near_miss_trace(d_min=95.0, t_min_s=15.0)
+        plans, _ = plan_episode("nearmiss", trace, [], BASE, 30.0, gap=95.0, n_control=1)
+        ctrl = [p for p in plans if p["condition"] == "control"]
+        self.assertEqual(len(ctrl), 1)
+        self.assertIn("d_min_in_window", ctrl[0])
+        nm = [p for p in plans if p["condition"] == "near_miss"][0]
+        self.assertAlmostEqual(nm["d_min_in_window"], nm["d_min"], places=6)
 
 
 class WindowIntegrityTest(unittest.TestCase):

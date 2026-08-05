@@ -11,7 +11,9 @@ from typing import Callable, Optional
 from .encoder import FrameEncoder
 from .frame_queue import FrameQueue
 import re
-from .overlay_composer import CircleLabel, OverlayComposer, OverlayFrame, TextItem
+from .overlay_composer import (
+    MARKER_RADIUS_PX, MARKER_UP_OFFSET, CircleLabel, OverlayComposer, OverlayFrame, TextItem,
+)
 
 
 # True로 두면 마커가 반투명 + 4-방향 tick으로 렌더되어 객체 중심과 투영 픽셀의 일치 여부를 시각 확인할 수 있다
@@ -285,11 +287,23 @@ class RealtimeCaptureRunner:
                 return OverlayFrame(timestamp_text=ts_text, object_labels=(), misc_text=tuple(misc))
 
             view, proj = matrices
-            # 객체 좌표 그대로(offset 없음). 숫자 ID를 원형 라벨로 그 위치에 표시.
+            # 어느 마커 규약으로 렌더됐는지 로그에 남긴다 — 구코드/신코드 렌더 혼동 방지
+            # (실측: 미커밋 변경 없는 사본으로 렌더된 검수가 3회 있었음, 2026-08-05).
+            _log_once(f"marker regime: up_offset={MARKER_UP_OFFSET} radius={MARKER_RADIUS_PX}px")
+            # 마커 앵커 = 객체 좌표 + 머리 위 오프셋(v2 시각 규약 — overlay_composer의
+            # MARKER_UP_OFFSET 주석 참조). 좌표 데이터는 발(원점) 기준이므로 스테이지
+            # 상향축으로 올려 투영한다. up축은 스테이지에서 판정(기본 Y-up).
+            try:
+                from pxr import UsdGeom
+                _up_idx = 1 if UsdGeom.GetStageUpAxis(stage) == UsdGeom.Tokens.y else 2
+            except Exception:
+                _up_idx = 1
             circles = []
             projected_count = 0
             for objid, world_xyz in data.items():
-                px = _project_world_to_pixel(world_xyz, view, proj, width, height)
+                anchor = list(world_xyz)
+                anchor[_up_idx] += MARKER_UP_OFFSET
+                px = _project_world_to_pixel(anchor, view, proj, width, height)
                 if px is None:
                     continue
                 projected_count += 1
@@ -298,7 +312,7 @@ class RealtimeCaptureRunner:
                         x=px[0],
                         y=px[1],
                         text=_extract_objid_number(objid),
-                        radius=12,
+                        radius=MARKER_RADIUS_PX,   # v2 규약(overlay_composer 주석 참조)
                         font_size=12,
                     )
                 )
