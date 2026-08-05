@@ -51,16 +51,107 @@ CONTROL_BUFFER_S = 3.0     # 무관 창이 이벤트와 유지해야 하는 최�
 CONTACT_CLUSTER_S = 0.5    # 접촉 rows를 사건으로 묶는 시간 반경
 PURITY_MARGIN_S = 0.25     # 창 순도 검사 시 창 가장자리 여유
 
+# 접촉 시각 보정 탐색 범위(초). collisions CSV의 timestamp는 초 단위로 잘려 기록되므로
+# 참값은 기록된 초 이후 1초 안에 있다 — 앞쪽 여유는 반올림 기록 가능성 대비.
+REFINE_BACK_S = 0.25
+REFINE_FWD_S = 1.25
+# 위치 정합 허용 오차(cm). trace와 collisions는 같은 시뮬레이션에서 나온 좌표라
+# 정상이면 오차가 수 cm 이내다. 이보다 멀면 정합 실패로 보고 보정을 포기한다.
+REFINE_MAX_DIST = 50.0
+
 
 # ---------------------------------------------------------------- 이벤트 특정
 
-def contact_clusters(rows: List[dict]) -> List[datetime.datetime]:
+def parse_event_time(
+    raw: str, capture_start: Optional[datetime.datetime] = None,
+) -> datetime.datetime:
+    """collisions CSV의 timestamp -> datetime.
+
+    collisions CSV는 날짜 없이 ``HH:MM:SS``만 남기는 반면 trace·meta는 날짜를 포함한
+    전체 시각을 쓴다. 둘 다 같은 sim-클럭이므로, 날짜가 없는 표기는 capture_start의
+    날짜를 붙여 복원한다(에피소드가 자정을 넘겼으면 하루 보정).
+    """
+    text = (raw or "").strip()
+    try:
+        return _parse(text)
+    except ValueError:
+        pass
+    if capture_start is None:
+        raise ValueError(f"날짜 없는 시각인데 기준 시각이 없다: {raw!r}")
+    for fmt in ("%H:%M:%S.%f", "%H:%M:%S"):
+        try:
+            clock = datetime.datetime.strptime(text, fmt).time()
+        except ValueError:
+            continue
+        stamped = datetime.datetime.combine(capture_start.date(), clock)
+        if (stamped - capture_start).total_seconds() < -43200:
+            stamped += datetime.timedelta(days=1)
+        return stamped
+    raise ValueError(f"Unsupported timestamp format: {raw!r}")
+
+
+def trace_index(trace_rows: List[dict]) -> Dict[str, List[Tuple[datetime.datetime, float, float]]]:
+    """trace rows -> {objid: [(t, x, z)...]} (시각 오름차순). 접촉 시각 보정용 색인."""
+    idx: Dict[str, List[Tuple[datetime.datetime, float, float]]] = defaultdict(list)
+    for r in trace_rows:
+        idx[str(r["objid"])].append((_parse(r["timestamp"]), float(r["x"]), float(r["z"])))
+    for samples in idx.values():
+        samples.sort(key=lambda s: s[0])
+    return idx
+
+
+def refine_contact_time(
+    t_floor: datetime.datetime, objid: str, x: float, z: float,
+    index: Dict[str, List[Tuple[datetime.datetime, float, float]]],
+) -> datetime.datetime:
+    """초 단위로 잘린 접촉 시각을 trace 위치 정합으로 sub-초까지 복원한다.
+
+    필요한 이유: 창 규격이 t_c 기준 0.1초 단위인데(no-approach는 t_c−0.1 시작) 기록된
+    접촉 시각의 해상도는 1초라, 보정 없이는 창 경계가 최대 1초까지 어긋나 조건의 의미
+    자체가 무너진다 — no-approach 창에 접근 구간이 1초 넘게 섞여 들어오는 식이다.
+
+    방법: collisions row에는 접촉 순간 그 객체의 좌표가 함께 남아 있다. 같은 객체의
+    trace에서 그 좌표에 가장 가까운 샘플의 시각을 찾으면 그것이 참 접촉 시각이다.
+    (y는 접촉점 높이라 trace의 객체 원점 높이와 달라 지면 좌표 x·z만 쓴다.)
+    정합에 실패하면(색인 없음·오차 과대) 보정하지 않고 원래 시각을 돌려준다.
+    """
+    samples = index.get(objid)
+    if not samples:
+        return t_floor
+    lo = t_floor - datetime.timedelta(seconds=REFINE_BACK_S)
+    hi = t_floor + datetime.timedelta(seconds=REFINE_FWD_S)
+    best: Optional[Tuple[float, datetime.datetime]] = None
+    for t, sx, sz in samples:
+        if t < lo:
+            continue
+        if t > hi:
+            break
+        d = math.hypot(sx - x, sz - z)
+        if best is None or d < best[0]:
+            best = (d, t)
+    if best is None or best[0] > REFINE_MAX_DIST:
+        return t_floor
+    return best[1]
+
+
+def contact_clusters(
+    rows: List[dict],
+    capture_start: Optional[datetime.datetime] = None,
+    index: Optional[Dict[str, List[Tuple[datetime.datetime, float, float]]]] = None,
+) -> List[datetime.datetime]:
     """collisions CSV rows -> 접촉 사건 대표 시각 목록(클러스터 첫 시각).
 
     라벨이 객체 단위(쌍 미기록)라 같은 사건이 여러 행으로 남는다 —
-    CONTACT_CLUSTER_S 내 연속 행을 한 사건으로 묶는다.
+    CONTACT_CLUSTER_S 내 연속 행을 한 사건으로 묶는다. index를 주면 행마다
+    refine_contact_time으로 시각을 sub-초까지 보정한 뒤 묶는다.
     """
-    times = sorted(_parse(r["timestamp"]) for r in rows)
+    times = []
+    for r in rows:
+        t = parse_event_time(r["timestamp"], capture_start)
+        if index:
+            t = refine_contact_time(t, str(r["objid"]), float(r["x"]), float(r["z"]), index)
+        times.append(t)
+    times.sort()
     clusters: List[datetime.datetime] = []
     for t in times:
         if not clusters or (t - clusters[-1]).total_seconds() > CONTACT_CLUSTER_S:
@@ -149,7 +240,8 @@ def plan_episode(
     반환 항목: {"condition", "t_ref", "segments": [(s,e)...], "d_min"?}
     """
     end = capture_start + datetime.timedelta(seconds=duration_s)
-    contacts = contact_clusters(collision_rows)
+    index = trace_index(trace_rows) if trace_rows else {}
+    contacts = contact_clusters(collision_rows, capture_start, index)
     plans: List[dict] = []
 
     if kind == "collision":
@@ -202,14 +294,30 @@ def _episode_files(run_dir: Path) -> List[dict]:
             video = meta_path.parent / (meta_path.name.replace(".meta.json", ".mp4"))
         idx = meta_path.stem.replace("_video_", "").replace(".meta", "")
         trace = meta_path.parent / f"_trace_{idx}.csv"
-        col = meta.get("collisions_csv")
-        col_path = (meta_path.parent / col) if col and not Path(col).is_absolute() else \
-            (Path(col) if col else None)
         if not (video.exists() and trace.exists()):
             continue
         out.append({"video": video, "trace": trace, "meta": meta,
-                    "collisions": col_path if (col_path and col_path.exists()) else None})
+                    "collisions": _resolve_collisions(meta_path.parent, meta)})
     return out
+
+
+def _resolve_collisions(ep_dir: Path, meta: dict) -> Optional[Path]:
+    """에피소드의 collisions CSV 실제 위치를 찾는다.
+
+    meta의 ``collisions_csv``는 생성 당시 작업 머신 기준 절대 경로라 다른 머신(L40 등)
+    에서는 존재하지 않는다. 반면 생성기는 CSV 사본을 에피소드 디렉터리에 함께 남기므로,
+    에피소드 옆의 ``collisions_*.csv``를 우선 신뢰하고 meta 경로는 보조로 쓴다.
+    (이 해석이 실패해 collision_rows가 빈 채로 돌면 접촉 기준 5조건이 통째로 0건이 되고
+     control·near_miss만 남는다 — 조용한 전멸이라 우선순위를 이렇게 둔다.)
+    """
+    siblings = sorted(ep_dir.glob("collisions_*.csv"))
+    if siblings:
+        return siblings[0]
+    col = meta.get("collisions_csv")
+    if not col:
+        return None
+    path = Path(col) if Path(col).is_absolute() else (ep_dir / col)
+    return path if path.exists() else None
 
 
 def _read_csv_rows(path: Path) -> List[dict]:
