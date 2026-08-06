@@ -1,6 +1,8 @@
 # window.py - UI for Time Travel Extension
 
 import datetime
+import time
+
 import carb
 
 from .task_dispatcher import UiTaskDispatcher
@@ -18,7 +20,11 @@ class TimeTravelWindow:
         self._source_status_message = ""
         self._source_switch_pending = False
         self._ui_dispatcher = UiTaskDispatcher("TimeTravelWindowUiDispatcher")
-        
+        # Probe 상태 라벨 갱신 스로틀(매 프레임 갱신하면 계측 대상 자체를 흔든다)
+        self._probe_status_next = 0.0
+        self._probe_message = ""
+        self._probe_message_until = 0.0
+
         # Create window
         from .workspace import close_existing_window
         close_existing_window("Time Travel")  # 핫리로드 유령 창 방지
@@ -207,6 +213,36 @@ class TimeTravelWindow:
                     ui.Spacer()
                     self._progress_label = ui.Label("0.0%", style={"font_size": 12})
                     ui.Spacer()
+
+                # 레이크 성능 계측(레이크성능_실험설계 §2-C). 평소 창을 짧게 두려고
+                # 기본 접힘 — 측정할 때만 펼친다.
+                # height=0 = 내용 크기에 맞춤(Kit 관용) — 접힌 상태가 남은 공간을
+                # 다 먹지 않게 한다.
+                self._probe_frame = ui.CollapsableFrame("Probe", collapsed=True, height=0)
+                with self._probe_frame:
+                    with ui.VStack(spacing=4, height=0):
+                        with ui.HStack(height=25, spacing=8):
+                            self._probe_checkbox = ui.CheckBox(width=20)
+                            self._probe_checkbox.model.set_value(self._get_probe() is not None)
+                            self._probe_checkbox.model.add_value_changed_fn(
+                                self._on_probe_enable_changed)
+                            ui.Label("Record playback timing", width=160)
+                            ui.Spacer()
+                        with ui.HStack(height=25, spacing=8):
+                            ui.Label("Scenario:", width=70)
+                            self._probe_scenario_field = ui.StringField(width=110)
+                            self._probe_scenario_field.model.set_value("")
+                            self._probe_scenario_field.model.add_end_edit_fn(
+                                self._on_probe_scenario_changed)
+                            self._probe_start_button = ui.Button("Start", width=60)
+                            self._probe_start_button.set_clicked_fn(self._on_probe_start_clicked)
+                            self._probe_dump_button = ui.Button("Dump", width=60)
+                            self._probe_dump_button.set_clicked_fn(self._on_probe_dump_clicked)
+                            ui.Label("1x / 5x / -1x / scrub", width=0,
+                                     style={"color": 0xFF888888})
+                            ui.Spacer()
+                        self._probe_status = ui.Label("probe: off",
+                                                      style={"color": 0xFF888888})
 
                 self._update_source_controls()
     
@@ -405,6 +441,81 @@ class TimeTravelWindow:
         set_near_miss_diversity 독스트링에 있다."""
         self._core.set_near_miss_gap(model.get_value_as_float())
 
+    # ---- Probe(레이크 성능 계측) ------------------------------------------
+
+    def _get_probe(self):
+        """활성 계측 인스턴스 또는 None. 구버전 core에도 안전하도록 getattr."""
+        getter = getattr(self._core, "get_lake_probe", None)
+        return getter() if callable(getter) else None
+
+    def _set_probe_message(self, text: str, seconds: float = 5.0):
+        """일회성 안내(구간 시작·덤프 파일명)를 잠깐 띄운 뒤 라이브 통계로 복귀."""
+        self._probe_message = text
+        self._probe_message_until = time.monotonic() + seconds
+        self._probe_status_next = 0.0  # 다음 update_ui에서 즉시 반영
+
+    def _on_probe_enable_changed(self, model):
+        """체크박스 — facade가 계측 인스턴스를 생성/파괴한다(끌 때 잔여 버퍼 덤프)."""
+        enabled = model.get_value_as_bool()
+        setter = getattr(self._core, "set_lake_probe_enabled", None)
+        if not callable(setter):
+            self._set_probe_message("probe: not supported by this build")
+            return
+        probe = setter(enabled)
+        if probe is not None:
+            probe.set_scenario(self._probe_scenario_field.model.get_value_as_string())
+            self._set_probe_message("probe: on")
+        else:
+            self._set_probe_message("probe: off (buffer dumped)")
+
+    def _on_probe_scenario_changed(self, model):
+        """시나리오 라벨 — 덤프 JSON과 파일명에 들어간다(사후 조건 매칭용)."""
+        probe = self._get_probe()
+        if probe is None:
+            return
+        self._set_probe_message(f"probe: scenario {probe.set_scenario(model.get_value_as_string()) or '(none)'}")
+
+    def _on_probe_start_clicked(self):
+        """Start — 파일을 쓰지 않고 버퍼만 비워 측정 구간의 시작을 찍는다."""
+        probe = self._get_probe()
+        if probe is None:
+            self._set_probe_message("probe: off - check the box first")
+            return
+        probe.set_scenario(self._probe_scenario_field.model.get_value_as_string())
+        dropped = probe.reset()
+        self._set_probe_message(f"probe: segment started (dropped {dropped} frames)")
+
+    def _on_probe_dump_clicked(self):
+        """Dump — 지금까지의 버퍼를 파일로 저장(스크럽 구간의 유일한 종료 경계)."""
+        probe = self._get_probe()
+        if probe is None:
+            self._set_probe_message("probe: off - nothing to dump")
+            return
+        path = probe.dump(reason="manual")
+        self._set_probe_message(f"probe: wrote {path.name}" if path
+                                else "probe: buffer empty, nothing written", seconds=8.0)
+
+    def _update_probe_status(self):
+        """~2Hz만 갱신 — 매 프레임 문자열을 만들면 측정 대상 프레임에 부하가 섞인다."""
+        now = time.monotonic()
+        if now < self._probe_status_next:
+            return
+        self._probe_status_next = now + 0.5
+        if self._probe_message:
+            if now < self._probe_message_until:
+                self._probe_status.text = self._probe_message
+                return
+            self._probe_message = ""
+        probe = self._get_probe()
+        if probe is None:
+            self._probe_status.text = "probe: off"
+            return
+        s = probe.live_stats()
+        label = f" [{s['scenario']}]" if s["scenario"] else ""
+        self._probe_status.text = (
+            f"probe{label}: {s['frames']} frames | stalls {s['stalls']} | {s['fps']:.0f} fps"
+        )
+
     def _on_event_checkbox_changed(self, model):
         """Handle event summary checkbox change."""
         requested_value = model.get_value_as_bool()
@@ -546,6 +657,7 @@ class TimeTravelWindow:
         self._update_mode_controls()
         self._update_source_controls()
         self._update_move_trace_controls()
+        self._update_probe_status()
         # sync capture button label with facade state
         if hasattr(self, "_capture_button"):
             expected = "Stop" if self._core.is_capturing() else "Capture"

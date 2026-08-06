@@ -82,11 +82,10 @@ class TimeTravelCore:
         # 순간이동(시계가 주인인 재생 구조에서, 공백 23h를 실시간으로 기지 않게).
         self._gap_skip_s = 10.0
         # GUI E2E 재생 계측(레이크성능_실험설계 §2-C) — env 미설정 시 None(무부하).
+        # env는 초기 기본값일 뿐이고, GUI Probe 섹션이 런타임에 켜고 끌 수 있다.
         self._lake_probe = None
         if os.environ.get("TTS_LAKE_PROBE", "0") == "1":
-            from .lake_probe import LakeProbe
-            self._lake_probe = LakeProbe()
-            carb.log_warn("[TimeTravel] lake probe enabled (TTS_LAKE_PROBE=1)")
+            self.set_lake_probe_enabled(True)
 
     # ---- 데이터 소스 / config (data_service) --------------------------------
 
@@ -258,6 +257,31 @@ class TimeTravelCore:
 
     def _on_playback_tick(self, t: datetime.datetime) -> None:
         self.set_current_time(self._maybe_skip_gap(t))
+
+    # ---- 레이크 성능 계측(lake probe) ---------------------------------------
+
+    def set_lake_probe_enabled(self, enabled: bool):
+        """계측 인스턴스를 런타임에 만들거나 없앤다. 활성 시 probe, 아니면 None 반환.
+
+        끌 때는 남은 버퍼를 먼저 덤프해 측정분을 잃지 않는다. None인 동안
+        update()는 기존과 완전히 같은 무부하 경로를 탄다.
+        """
+        if enabled:
+            if getattr(self, "_lake_probe", None) is None:
+                from .lake_probe import LakeProbe
+                self._lake_probe = LakeProbe()
+                carb.log_warn("[TimeTravel] lake probe enabled")
+        else:
+            probe = getattr(self, "_lake_probe", None)
+            self._lake_probe = None
+            if probe is not None:
+                probe.dump(reason="disable")
+                carb.log_warn("[TimeTravel] lake probe disabled")
+        return self._lake_probe
+
+    def get_lake_probe(self):
+        """활성 계측 인스턴스(없으면 None). UI가 reset/dump/통계를 직접 호출한다."""
+        return getattr(self, "_lake_probe", None)
 
     def update(self, dt: float):
         probe = getattr(self, "_lake_probe", None)  # __new__ 주입 테스트 대비 getattr

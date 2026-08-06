@@ -1,7 +1,7 @@
-"""GUI E2E 재생 계측(레이크성능_실험설계.md §2-C) — env TTS_LAKE_PROBE=1일 때만 활성.
+"""GUI E2E 재생 계측(레이크성능_실험설계.md §2-C) — env TTS_LAKE_PROBE=1 또는 GUI 토글로 활성.
 
-facade.update(dt)가 매 앱 프레임 record()를 호출한다. 기본(env 미설정)에는
-인스턴스 자체가 만들어지지 않아 계측 코드가 실행되지 않는다(무부하).
+facade.update(dt)가 매 앱 프레임 record()를 호출한다. 기본(env 미설정·GUI 체크 해제)
+에는 인스턴스 자체가 만들어지지 않아 계측 코드가 실행되지 않는다(무부하).
 
 프레임당 기록(perf_counter 2회 + append 수준 — 오버헤드 무시 가능):
   wall_ts            perf_counter 기준 시각(초)
@@ -13,7 +13,9 @@ facade.update(dt)가 매 앱 프레임 record()를 호출한다. 기본(env 미�
   playing            재생 중 플래그(후처리에서 재생/스크럽 구간 분리용)
 
 링버퍼 상한 36,000 프레임(10분@60fps). 덤프 트리거: 재생 정지(playing→not)
-전이 또는 상한 도달 → artifacts/benchmarks/gui_probe_<YYYYMMDD-HHMMSS>.json.
+전이, 상한 도달, 또는 GUI의 Dump 버튼(수동) → artifacts/benchmarks/
+gui_probe_<YYYYMMDD-HHMMSS>[_<scenario>].json. 스크럽은 정지 전이가 없어
+수동 덤프가 유일한 경계이고, 구간 시작은 reset()(GUI Start)이 잡는다.
 후처리(지표 표)는 utils/gui_probe_report.py. 로그 문자열은 ASCII만 사용.
 """
 from __future__ import annotations
@@ -35,10 +37,30 @@ except ImportError:  # pragma: no cover - headless 테스트(Kit 밖)
     carb = _CarbFallback()
 
 MAX_FRAMES = 36000  # 10분 @ 60fps
+FPS_WINDOW = 60     # 최근 fps 산출 창(프레임) — O(1) 인덱싱만 쓴다
+SCENARIO_MAX_LEN = 32
+
+
+def sanitize_scenario(name) -> str:
+    """시나리오 라벨을 파일명 안전 문자(ASCII 영숫자·대시·언더스코어)로 정규화.
+
+    나머지 문자는 대시로 치환하고 **뒤쪽** 대시만 떨어낸다. 파일명에 그대로 들어가므로
+    한글·공백·경로 구분자가 섞여도 안전해야 한다.
+
+    앞쪽 대시는 남긴다 — 역방향 재생 라벨 "-1x"의 부호가 실험 구분의 핵심이라
+    떼어내면 "1x"와 같아져 시나리오가 뒤섞인다(실측 검토 2026-08-06). 파일명은
+    항상 `gui_probe_<시각>_<라벨>.json` 꼴이라 라벨이 맨 앞에 오지 않으므로,
+    선행 대시가 CLI 옵션으로 오해될 여지도 없다.
+    """
+    if not name:
+        return ""
+    out = [c if (c.isascii() and (c.isalnum() or c in "-_")) else "-" for c in str(name)]
+    return "".join(out).rstrip("-")[:SCENARIO_MAX_LEN].rstrip("-")
 
 
 class LakeProbe:
-    def __init__(self, out_dir: Optional[Path] = None, max_frames: int = MAX_FRAMES):
+    def __init__(self, out_dir: Optional[Path] = None, max_frames: int = MAX_FRAMES,
+                 scenario: str = ""):
         # EXT_ROOT/artifacts/benchmarks (app/ -> tts -> netai -> gist -> EXT_ROOT)
         self._out_dir = Path(out_dir) if out_dir else \
             Path(__file__).resolve().parents[4] / "artifacts" / "benchmarks"
@@ -47,6 +69,7 @@ class LakeProbe:
         self._last_sync = 0
         self._last_hit = 0
         self._was_playing = False
+        self._scenario = sanitize_scenario(scenario)
         self._reset_buffer()
 
     def _reset_buffer(self):
@@ -58,9 +81,43 @@ class LakeProbe:
         self._d_sync = []
         self._d_hit = []
         self._playing = []
+        self._stall_frames = 0  # 러닝 카운터 — live_stats가 버퍼를 훑지 않게
 
     def __len__(self) -> int:
         return len(self._wall_ts)
+
+    # ---- 라벨 / 구간 경계 -------------------------------------------------
+
+    def set_scenario(self, name) -> str:
+        """시나리오 라벨(1x, 5x, -1x, scrub-fast ...) 설정. 정규화된 값을 반환."""
+        self._scenario = sanitize_scenario(name)
+        return self._scenario
+
+    def get_scenario(self) -> str:
+        return self._scenario
+
+    def reset(self) -> int:
+        """파일을 쓰지 않고 버퍼만 비운다(GUI Start = 측정 구간 시작점).
+
+        반환값은 버려진 프레임 수.
+        """
+        n = len(self._wall_ts)
+        self._reset_buffer()
+        self._was_playing = False
+        self._last_wall = None
+        return n
+
+    def live_stats(self) -> dict:
+        """UI 표시용 경량 통계 — 버퍼 전체 스캔 없이 O(1)로 계산한다."""
+        n = len(self._wall_ts)
+        fps = 0.0
+        if n >= 2:
+            k = min(FPS_WINDOW, n - 1)
+            span = self._wall_ts[-1] - self._wall_ts[-1 - k]
+            if span > 0:
+                fps = k / span
+        return {"frames": n, "stalls": self._stall_frames, "fps": fps,
+                "scenario": self._scenario}
 
     def record(self, tick_ms: float, twin_time, stats, is_playing: bool) -> None:
         """매 앱 프레임 호출. stats = repository.stats dict(레이크 아니면 None)."""
@@ -82,6 +139,8 @@ class LakeProbe:
         self._d_sync.append(d_sync)
         self._d_hit.append(d_hit)
         self._playing.append(bool(is_playing))
+        if d_sync:
+            self._stall_frames += 1
 
         stopped = self._was_playing and not is_playing
         self._was_playing = is_playing
@@ -94,10 +153,12 @@ class LakeProbe:
             return None
         self._out_dir.mkdir(parents=True, exist_ok=True)
         stamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
-        path = self._out_dir / f"gui_probe_{stamp}.json"
+        suffix = f"_{self._scenario}" if self._scenario else ""
+        path = self._out_dir / f"gui_probe_{stamp}{suffix}.json"
         payload = {
             "version": 1,
             "reason": reason,
+            "scenario": self._scenario,
             "n_frames": len(self._wall_ts),
             "frames": {
                 "wall_ts": self._wall_ts,

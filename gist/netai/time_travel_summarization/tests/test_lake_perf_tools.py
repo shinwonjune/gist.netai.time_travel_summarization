@@ -9,10 +9,11 @@
 import datetime
 import json
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
-from gist.netai.time_travel_summarization.app.lake_probe import LakeProbe
+from gist.netai.time_travel_summarization.app.lake_probe import LakeProbe, sanitize_scenario
 from gist.netai.time_travel_summarization.playback.lake_common import ingest_synthetic
 from gist.netai.time_travel_summarization.tests.lake_benchmark import (
     run_scenario,
@@ -121,6 +122,63 @@ class LakeProbeTest(unittest.TestCase):
             self.assertEqual(len(dumps), 1)
             self.assertEqual(json.loads(dumps[0].read_text(encoding="utf-8"))["reason"], "cap")
             self.assertEqual(len(probe), 0)
+
+    def test_scenario_sanitize(self):
+        """파일명에 그대로 들어가므로 ASCII 영숫자·대시·언더스코어만 남아야 한다."""
+        self.assertEqual(sanitize_scenario("1x"), "1x")
+        self.assertEqual(sanitize_scenario("-1x"), "-1x")           # 역방향 부호 보존
+        self.assertEqual(sanitize_scenario("scrub fast"), "scrub-fast")
+        self.assertEqual(sanitize_scenario("a/b\\c.json"), "a-b-c-json")
+        self.assertEqual(sanitize_scenario("스크럽"), "")           # 비ASCII 전부 제거
+        self.assertEqual(sanitize_scenario(None), "")
+        self.assertLessEqual(len(sanitize_scenario("x" * 100)), 32)
+
+    def test_reset_clears_without_writing(self):
+        """GUI Start = 구간 시작 — 버퍼만 비우고 파일은 남기지 않는다."""
+        with tempfile.TemporaryDirectory() as d:
+            probe = LakeProbe(out_dir=Path(d), max_frames=100)
+            for _ in range(3):
+                self._record(probe, True, sync=1)
+            self.assertEqual(probe.reset(), 3)
+            self.assertEqual(len(probe), 0)
+            self.assertEqual(list(Path(d).glob("*.json")), [])
+            self.assertEqual(probe.live_stats()["stalls"], 0)
+            # 리셋 후 정지 전이를 다시 잡아야 한다(재생 중 리셋했더라도)
+            self._record(probe, True, sync=2)
+            self._record(probe, False, sync=2)
+            self.assertEqual(len(list(Path(d).glob("gui_probe_*.json"))), 1)
+
+    def test_scenario_in_filename_and_payload(self):
+        with tempfile.TemporaryDirectory() as d:
+            probe = LakeProbe(out_dir=Path(d), max_frames=100)
+            self.assertEqual(probe.set_scenario("scrub fast"), "scrub-fast")
+            self._record(probe, True, sync=1)
+            path = probe.dump(reason="manual")
+            self.assertIsNotNone(path)
+            self.assertTrue(path.name.startswith("gui_probe_"))
+            self.assertTrue(path.name.endswith("_scrub-fast.json"), path.name)
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            self.assertEqual(payload["scenario"], "scrub-fast")
+            self.assertEqual(payload["reason"], "manual")
+            self.assertEqual(payload["n_frames"], 1)
+            self.assertEqual(len(probe), 0)
+            self.assertIsNone(probe.dump(reason="manual"))  # 빈 버퍼는 no-op
+
+    def test_live_stats(self):
+        with tempfile.TemporaryDirectory() as d:
+            probe = LakeProbe(out_dir=Path(d), max_frames=100)
+            self.assertEqual(probe.live_stats(),
+                             {"frames": 0, "stalls": 0, "fps": 0.0, "scenario": ""})
+            for i in range(5):
+                self._record(probe, True, sync=i)  # 매 프레임 stall
+            s = probe.live_stats()
+            self.assertEqual(s["frames"], 5)
+            self.assertEqual(s["stalls"], 4)  # 첫 프레임은 증분 0
+            # fps는 실제 벽시계 간격에서 나온다 — 프레임을 20ms 띄워 확인
+            for _ in range(3):
+                time.sleep(0.02)
+                self._record(probe, True, sync=4)
+            self.assertGreater(probe.live_stats()["fps"], 0.0)
 
     def test_analyze_report(self):
         with tempfile.TemporaryDirectory() as d:
