@@ -58,6 +58,7 @@ class LakeTrajectoryRepository(TrajectoryRepository):
         self._chunks: List[dict] = []
         self._chunk_starts: List[datetime.datetime] = []
         self._objids: List[str] = []
+        self._tracks_raw: dict = {}   # manifest "tracks" 원본 — despawn용 트랙 범위
         self._total_rows: int = 0
         self._coord_min = None
         self._coord_max = None
@@ -100,6 +101,7 @@ class LakeTrajectoryRepository(TrajectoryRepository):
         self._ext = m.get("format", "csv")
         self._chunk_seconds = m.get("chunk_seconds")
         self._objids = list(m.get("objids", []))
+        self._tracks_raw = dict(m.get("tracks") or {})
         self._total_rows = int(m.get("rows", 0))
         self._coord_min = m.get("coord_min")
         self._coord_max = m.get("coord_max")
@@ -270,6 +272,31 @@ class LakeTrajectoryRepository(TrajectoryRepository):
 
     def get_object_ids(self) -> List[str]:
         return list(self._objids)
+
+    def get_object_time_ranges(self) -> Dict[str, Tuple[datetime.datetime, datetime.datetime]]:
+        """objid별 트랙 범위 — 베이스 구현(메모리 _data 전체 스캔)을 쓰면 안 된다.
+
+        레이크는 _data가 '현재 활성 청크'뿐이라 베이스로 계산하면 트랙 범위가 첫
+        청크 스팬으로 오계산·캐시되고, 재생 헤드가 청크 1을 지나는 순간 dead-track
+        despawn이 전 객체를 숨긴다(실측 2026-08-06, 레이크성능_실험설계 §0-4).
+        - manifest "tracks"가 있으면 그대로 사용 → 레이크에서도 정확한 despawn
+          (frag 적재·입퇴장형 데이터 대응).
+        - 없으면(이 스키마 도입 전 레거시 manifest) 데이터셋 전체 범위를 전 트랙에
+          부여해 폴백 — 레거시는 전부 연속 생산 궤적이라 사실상 정확하고, despawn은
+          비활성과 동등해진다.
+        """
+        if self._object_ranges:
+            return self._object_ranges
+        if self._tracks_raw:
+            self._object_ranges = {
+                oid: (self.parse_timestamp(span[0]), self.parse_timestamp(span[1]))
+                for oid, span in self._tracks_raw.items()
+            }
+        elif self._data_start_time is not None and self._data_end_time is not None:
+            self._object_ranges = {
+                oid: (self._data_start_time, self._data_end_time) for oid in self._objids
+            }
+        return self._object_ranges
 
     def get_coord_range(self):
         if self._coord_min is not None and self._coord_max is not None:

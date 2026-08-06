@@ -11,6 +11,8 @@ manifest.json:
       "start": ts, "end": ts, "rows": int,
       "coord_min": [x,y,z], "coord_max": [x,y,z],
       "chunks": [{"key", "start", "end", "rows"}, ...]   # start 오름차순
+      "tracks": {objid: [first_ts, last_ts], ...}        # v2 추가(despawn용) — 없으면
+                                                          # 리더가 전체 범위로 폴백
     }
 
 청크 키가 결정적(시작 epoch-ms 기반)이라 시간대 -> 키를 LIST 스캔 없이 계산/조회한다.
@@ -88,6 +90,23 @@ def generate_synthetic_rows(
             for a in range(3):
                 p[a] = min(hi, max(lo, p[a] + rng.uniform(-step_units, step_units)))
             yield {"timestamp": ts, "objid": oid, "x": p[0], "y": p[1], "z": p[2]}
+
+
+def _track_time_ranges(rows_sorted: List[dict]) -> dict:
+    """objid별 [first_ts, last_ts] (rows는 timestamp 오름차순 전제) — manifest "tracks".
+
+    레이크 소스 재생/재연의 dead-track despawn이 트랙 범위를 알 수 있게 한다.
+    이게 없으면 리더는 '메모리 _data = 활성 청크뿐' 제약 탓에 범위를 알 수 없어
+    데이터셋 전체 범위로 폴백한다(연속 궤적엔 정확, frag 적재·입퇴장형엔 부정확 —
+    lake_repository.get_object_time_ranges 참조)."""
+    out: dict = {}
+    for r in rows_sorted:
+        span = out.get(r["objid"])
+        if span is None:
+            out[r["objid"]] = [r["timestamp"], r["timestamp"]]
+        else:
+            span[1] = r["timestamp"]
+    return out
 
 
 # ---------- 청크 인코딩 ----------
@@ -222,6 +241,19 @@ def append_rows(
         "coord_max": [max(a, b) for a, b in zip(old_max, maxs)] if old_max else maxs,
         "chunks": chunks,
     })
+    # 트랙 범위 병합 — old에 tracks가 있을 때만. 레거시(무-tracks) manifest에 신규
+    # rows의 부분 범위만 기록하면 기존 트랙 구간이 잘려 despawn 오판을 만들므로,
+    # 레거시는 병합 후에도 무-tracks(리더의 전체 범위 폴백) 상태를 유지한다.
+    # 시각 문자열은 고정 폭 포맷이라 사전순 비교 = 시간순 비교로 안전.
+    old_tracks = old.get("tracks")
+    if old_tracks is not None:
+        merged = {k: list(v) for k, v in old_tracks.items()}
+        for oid, span in _track_time_ranges(rows).items():
+            cur = merged.get(oid)
+            merged[oid] = span if cur is None else [min(cur[0], span[0]), max(cur[1], span[1])]
+        manifest["tracks"] = merged
+    else:
+        manifest.pop("tracks", None)
 
     bak_uri = muri + ".bak"
     from_uri(bak_uri).put_bytes(
@@ -270,6 +302,7 @@ def ingest_rows(
         "rows": total,
         "coord_min": mins,
         "coord_max": maxs,
+        "tracks": _track_time_ranges(rows),
         "chunks": manifest_chunks,
     }
     muri = manifest_uri(dataset_uri)
