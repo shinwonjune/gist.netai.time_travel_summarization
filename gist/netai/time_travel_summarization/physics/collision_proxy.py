@@ -144,7 +144,10 @@ def wrap_with_collision_proxy(
         else:
             local_translate = inv_xform.Transform(bb_center)
 
-    carb.log_info(
+    # log_warn 레벨 — 헤드리스 잡의 job.log(stdout)에 남아야 "이 데이터가 어느 접촉
+    # 규약(width_shrink)으로 생성됐는지"를 사후에 판정할 수 있다(데이터 계보 추적).
+    # log_info는 Kit 내부 로그로만 가고 job.log엔 안 실린다(실측 2026-08-06).
+    carb.log_warn(
         f"[Physics] proxy for {target_prim.GetPath()}: "
         f"prim_world_pos={tuple(prim_world_pos)} "
         f"bbox_size={tuple(bb_size)} bbox_center={tuple(bb_center)} "

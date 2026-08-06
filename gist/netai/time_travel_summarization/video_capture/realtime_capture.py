@@ -289,7 +289,12 @@ class RealtimeCaptureRunner:
             view, proj = matrices
             # 어느 마커 규약으로 렌더됐는지 로그에 남긴다 — 구코드/신코드 렌더 혼동 방지
             # (실측: 미커밋 변경 없는 사본으로 렌더된 검수가 3회 있었음, 2026-08-05).
-            _log_once(f"marker regime: up_offset={MARKER_UP_OFFSET} radius={MARKER_RADIUS_PX}px")
+            # _log_once는 "통틀어 최초 1회"라 앞선 다른 메시지가 선점하면 이 줄이 사라진다
+            # (실측 2026-08-06: 600ep 생성 job.log에 미출력) → 전용 플래그로 분리한다.
+            if not diag.get("regime_logged"):
+                diag["regime_logged"] = True
+                print(f"[A2 overlay] marker regime: up_offset={MARKER_UP_OFFSET} "
+                      f"radius={MARKER_RADIUS_PX}px")
             # 마커 앵커 = 객체 좌표 + 머리 위 오프셋(v2 시각 규약 — overlay_composer의
             # MARKER_UP_OFFSET 주석 참조). 좌표 데이터는 발(원점) 기준이므로 스테이지
             # 상향축으로 올려 투영한다. up축은 스테이지에서 판정(기본 Y-up).
