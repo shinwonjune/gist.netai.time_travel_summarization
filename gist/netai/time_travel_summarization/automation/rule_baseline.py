@@ -31,6 +31,18 @@ from gist.netai.time_travel_summarization.perturbation import load_trace
 HYSTERESIS = 1.1        # 재무장 배수 — 임계 근처 진동의 onset 중복 방지
 STEP_S = 0.1            # 거리 스캔 간격 (30Hz 데이터의 1/3 — 충분히 조밀)
 
+# 동결된 τ (기본값). 조건별 재튜닝은 oracle 누수이므로 --resweep 없이는 스윕하지 않는다.
+#
+# v2 규약(접촉거리 63.7) 기준 = 81.0 — 2026-08-07 재동결.
+#   측정: prod-20260806-v2 clean 200 에피소드 / GT 525 이벤트, τ 70~100을 1 단위 스윕.
+#   결과: 최적 81(det F1 0.9276), 최적−0.005 이내 평탄 구간 81~83,
+#         반분 표본 최적값 83(전반)·80(후반) → 잔여 불확실성 ±2, 그 구간 F1 변동 0.01 미만.
+#   교차검증: τ/접촉거리 = 81/63.7 = 1.27로 v1 비율(90/71.7 = 1.26)과 일치.
+#   주의: 소표본은 봉우리를 오른쪽으로 잘못 짚는다(30 에피소드에서는 85가 나왔고
+#         이는 대표본 평탄 구간 밖이다) — 재동결 시 표본을 충분히 크게 잡을 것.
+# v1 규약(접촉거리 71.7) 기준은 90.0이었다(기존 교란 실험 리포트의 수치는 이 값 기준).
+FROZEN_TAU = 81.0
+
 
 # --------------------------------------------------------------------------- #
 # 룰 검출기 (순수)
@@ -120,8 +132,10 @@ def main() -> None:
     ap.add_argument("--fidelity-out", default="artifacts/replay_fidelity")
     ap.add_argument("--perturb-out", default="artifacts/perturb_eval")
     ap.add_argument("--out", default="artifacts/rule_baseline")
-    ap.add_argument("--tau", type=float, default=None,
-                    help="τ 고정값(생략 시 clean 스윕으로 결정)")
+    ap.add_argument("--tau", type=float, default=FROZEN_TAU,
+                    help=f"τ 고정값 (기본 = 동결값 {FROZEN_TAU})")
+    ap.add_argument("--resweep", action="store_true",
+                    help="동결값을 쓰지 않고 clean 스윕으로 τ를 다시 결정(재동결 시에만)")
     ap.add_argument("--sweep", nargs=3, type=float, default=[40.0, 110.0, 5.0],
                     metavar=("MIN", "MAX", "STEP"))
     ap.add_argument("--self-test", action="store_true")
@@ -149,13 +163,14 @@ def main() -> None:
             return side.get("gt_remap")
         return _r
 
-    # 1) τ 결정 (clean 스윕 후 동결)
-    if args.tau is not None:
-        tau, curve = args.tau, {}
-    else:
+    # 1) τ 결정 — 기본은 동결값 사용. --resweep일 때만 clean 스윕으로 재결정한다
+    # (조건별·교란 데이터 튜닝은 oracle 누수라 금지 — 스윕은 clean에서만).
+    if args.resweep:
         lo, hi, st = args.sweep
         taus = [round(lo + i * st, 1) for i in range(int((hi - lo) / st) + 1)]
         tau, curve = sweep_tau(pairs, clean_trace, taus)
+    else:
+        tau, curve = args.tau, {}
     print(f"[tau] frozen at {tau} (sweep {args.sweep})")
 
     # 2) 전 조건 평가 (VLM과 동일 채점)
