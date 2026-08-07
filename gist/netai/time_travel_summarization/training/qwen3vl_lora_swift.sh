@@ -27,6 +27,8 @@ export VIDEO_MAX_PIXELS=$((720 * 480))      # keep native 720x480; lower first i
 export SIZE_FACTOR=28                        # Qwen patch alignment (default)
 
 # ---- train ---------------------------------------------------------------- #
+# SEED: 기본 42 고정(기존 런 재현). 같은 데이터로 여러 번 학습해 run 간 변동폭을 재는
+# 반복 시행에서만 바꾼다 — 시드가 고정이면 반복 런이 서로 구별되지 않아 변동폭을 못 잰다.
 swift sft \
     --model "${MODEL}" \
     --dataset "${DATA}/train.jsonl" \
@@ -53,7 +55,7 @@ swift sft \
     --logging_steps 5 \
     --dataloader_num_workers 4 \
     --output_dir "${OUTPUT}" \
-    --seed 42
+    --seed "${SEED:-42}"
 
 echo "LoRA adapter saved under ${OUTPUT}. Merge for serving with:"
 echo "  swift export --adapters ${OUTPUT}/<checkpoint> --merge_lora true"
