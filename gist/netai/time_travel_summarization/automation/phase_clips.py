@@ -1,4 +1,4 @@
-"""위상 분해 조건 세트 추출기 v3.3 — 플라토 기준 국면 분리 + 조건 의미·순도 검증 게이트.
+"""위상 분해 조건 세트 추출기 v3.4 — 플라토 기준 국면 분리 + 조건 의미·순도 검증 게이트.
 
 설계: docs/위상분해_실험설계.md §5. 단일 도구가 조건 전부를 한 번에 뽑는다:
   충돌 에피소드    -> full / no_approach / no_contact(스플라이스) / no_aftermath /
@@ -245,6 +245,16 @@ CLIP_S = 2.0                # 모든 창의 총장(2초/20프레임 학습 계�
 # v3의 0.1~0.2초 가드는 이보다 과했고, 그만큼 조건이 겨냥한 국면 대신 인접 국면의
 # 프레임을 창 안에 남기거나 필요한 프레임을 잘라냈다(아래 v3.1 변경 근거 참조).
 EDGE_GUARD_S = 0.05
+# v3.4 (2026-08-08): approach_only 창을 렌더 1프레임(30fps)만큼 접촉 쪽으로 민다.
+# 총장 2.0초는 유지하고 시작·끝을 함께 이동 — 끝이 t_touch−0.05에서 t_touch−0.017로.
+# 프레임 주기(0.033) > 남은 가드(0.017)라 마지막 "비디오" 프레임이 첫 접촉 순간과
+# 겹칠 수 있음을 감수한 결정(사용자 확정). trace 기준으로는 t_touch가 첫 문턱 하회
+# 시각이므로 창 안 샘플은 정의상 전부 문턱 밖 — 게이트 통과에는 영향 없다.
+FRAME_S = 1.0 / 30.0
+# v3.4: aftermath_only(사후-only)의 "튕겨나옴" 게이트 — 창 동안 기준 쌍의 거리가
+# 이만큼 이상 벌어져야 한다. 충돌 반응(반동+재출발) 속도 기준 2초면 수 m 분리되므로
+# 50cm는 보수적 하한이고, "붙어서 정지"형 사후(분리 ≈ 0)를 걸러내는 것이 목적이다.
+AFTERMATH_SEPARATION_MIN_CM = 50.0
 EXCISE_PAD_S = 0.1          # no_contact 앞 구간을 접촉 시작에서 떼어 두는 여유
 NO_CONTACT_SEG_S = 1.0      # no_contact 스플라이스 각 구간 길이
 
@@ -308,8 +318,19 @@ def window_specs(hold_guard_s: float = DEFAULT_HOLD_GUARD_S,
         # (실측 lead_out 중앙값 0.083초, 긴 접촉은 중앙값 1.083초·최대 1.184초).
         "no_aftermath": (ANCHOR_HOLD_END, [(-hold_guard_s - CLIP_S, -hold_guard_s)]),
         # approach_only: 접촉 직전에 창을 닫아 접촉 프레임을 원천 배제.
-        # v3.2에서 불변 — 창이 문턱 통과 전에 이미 끝나므로 플라토 경계와 무관하다.
-        "approach_only": (ANCHOR_TOUCH, [(-EDGE_GUARD_S - CLIP_S, -EDGE_GUARD_S)]),
+        # v3.4: 렌더 1프레임만큼 접촉 쪽으로 이동(FRAME_S 주석 참조) — 접근의 마지막
+        # 순간까지 담는다. 총장 2.0초 유지.
+        "approach_only": (ANCHOR_TOUCH,
+                          [(-EDGE_GUARD_S - CLIP_S + FRAME_S, -EDGE_GUARD_S + FRAME_S)]),
+        # aftermath_only(v3.4): 접촉이 끝난 직후부터 2초 — 사후 반응만으로 충돌을
+        # 재인하는지 묻는다(approach_only의 대칭 프로브). 창이 t_release 뒤에서
+        # 열리므로 접촉 프레임은 구조적으로 배제되고, "튕겨나옴" 게이트가
+        # 붙어서-정지형 사후를 걸러낸다(AFTERMATH_SEPARATION_MIN_CM 주석 참조).
+        # 참고: contact-only(접촉만) 조건은 이 격자에서 실현 불가 — 실측 접촉 길이
+        # 0.20~1.42s < 창 2.0s라 순수 접촉만으로 2초를 채울 수 없고, 클립을 줄이면
+        # 학습 계약(2초/20프레임)과 어긋난다. no_approach(접촉+사후)와
+        # no_aftermath(접근+접촉)의 교집합 논증으로 대신 조인다.
+        "aftermath_only": (ANCHOR_RELEASE, [(+EDGE_GUARD_S, +EDGE_GUARD_S + CLIP_S)]),
         # no_contact는 t_touch·t_release 양쪽에 걸쳐 있어 고정 오프셋으로 표현할 수
         # 없다 — no_contact_segments()가 실측 구간에서 직접 만든다. v3.2에서 불변이며
         # 문턱 기준의 넓은 절제를 그대로 쓴다(플라토 기준으로 좁히면 문턱↔플라토 사이의
@@ -787,6 +808,8 @@ def gate_window(
       no_contact    : 스플라이스 두 구간 모두 문턱 하회 순간이 없다(절제 성공 확인).
                       v3.1에서 뒤 구간이 t_release에서 바로 시작하므로 이 검사가
                       "회복 시각 이후에는 접촉이 없다"는 전제의 실제 확인이 된다.
+      aftermath_only: 창 전 구간이 문턱 밖이고(v3.4), 기준 쌍 거리가 창 동안
+                      AFTERMATH_SEPARATION_MIN_CM 이상 벌어진다(붙어서-정지형 배제).
       near_miss     : 창이 거리 극소점을 담고 있고, d_min이 [gap−5, 문턱+30] 안이다
                       (접촉해버린 조우도, 스치지도 않은 먼 조우도 배제).
       control       : 게이트 없음 — 무관 구간이라는 성질은 이벤트 간격(buffer)과
@@ -823,6 +846,18 @@ def gate_window(
         decreasing = sum(1 for x in diffs if x <= 0)
         if decreasing < APPROACH_DECREASE_FRAC * len(diffs):
             return "not_monotonic_approach"
+        return None
+
+    if condition == "aftermath_only":
+        # 사후-only: 접촉 프레임이 없어야 하고(창이 t_release 뒤라 구조적으로 배제되나
+        # 재접촉 재발 방어), 기준 쌍이 실제로 "튕겨나가는" 분리 운동을 보여야 한다 —
+        # 붙어서 정지한 사후(분리 ≈ 0)는 이 조건이 묻는 "사후 반응 단서"가 화면에 없다.
+        if len(samples) < 2:
+            return "too_few_samples"
+        if any(d < threshold for _, d in samples):
+            return "contact_frames_in_window"
+        if samples[-1][1] - samples[0][1] < AFTERMATH_SEPARATION_MIN_CM:
+            return "no_separation_motion"
         return None
 
     if condition == "no_contact":
@@ -881,7 +916,7 @@ def plan_episode(
 ) -> Tuple[List[dict], Dict[str, dict]]:
     """에피소드 1개 -> (클립 계획 목록, 조건별 게이트 통계).
 
-    kind="collision": 실측 접촉 구간마다 5조건(window_specs() + no_contact) + control.
+    kind="collision": 실측 접촉 구간마다 6조건(window_specs() 5개 + no_contact) + control.
     kind="nearmiss" : 거리 극소점마다 near_miss 1조건 + control.
 
     계획 항목: {"condition", "t_ref", "anchor", "segments", "pair",
@@ -1217,7 +1252,7 @@ def main(argv=None):
     gate_stats = {c: {**{k: v for k, v in s.items() if k != "dropped"},
                       "dropped": dict(s["dropped"])}
                   for c, s in total_stats.items()}
-    doc = {**params, "extractor_version": "v3.3", "gate_stats": gate_stats,
+    doc = {**params, "extractor_version": "v3.4", "gate_stats": gate_stats,
            "clips": manifest}
     n_overlap = assign_overlay_flags(doc, args.overlay_touch_cm)
     eligible = sum(1 for c in manifest if c.get("d_min_in_window") is not None)

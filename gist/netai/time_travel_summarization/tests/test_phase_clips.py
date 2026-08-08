@@ -478,6 +478,21 @@ class GateTest(unittest.TestCase):
         self.assertIsNone(gate_window("no_aftermath", self._segs((13.55, 15.55)),
                                       series, THR, hold_thr=75.0))
 
+    def test_aftermath_only_passes_on_separating_window(self):
+        # t_release(16.1) 직후 2초 — 접촉 프레임 없음 + 분리 운동(90→~245cm) 충분
+        self.assertIsNone(gate_window("aftermath_only", self._segs((16.15, 18.15)), self.series, THR))
+
+    def test_aftermath_only_rejects_contact_frames(self):
+        self.assertEqual(
+            gate_window("aftermath_only", self._segs((15.5, 17.5)), self.series, THR),
+            "contact_frames_in_window")
+
+    def test_aftermath_only_rejects_stationary_aftermath(self):
+        # 사건에서 먼 구간은 거리가 far(400)로 평평 — "붙어서 정지"형과 같은 무분리 사후
+        self.assertEqual(
+            gate_window("aftermath_only", self._segs((24.0, 26.0)), self.series, THR),
+            "no_separation_motion")
+
     def test_approach_only_passes_on_closing_window(self):
         self.assertIsNone(gate_window("approach_only", self._segs((12.8, 14.8)), self.series, THR))
 
@@ -553,8 +568,8 @@ class PlanEpisodeTest(unittest.TestCase):
         col = [_col_row(15.0, "obj001"), _col_row(15.0, "obj002")]
         plans, stats = plan_episode("collision", trace, col, BASE, 30.0, n_control=0)
         conds = sorted(p["condition"] for p in plans)
-        self.assertEqual(conds, ["approach_only", "full", "no_aftermath",
-                                 "no_approach", "no_contact"])
+        self.assertEqual(conds, ["aftermath_only", "approach_only", "full",
+                                 "no_aftermath", "no_approach", "no_contact"])
         for cond in conds:
             self.assertEqual(stats[cond]["passed"], 1, cond)
             self.assertEqual(sum(stats[cond]["dropped"].values()), 0, cond)
@@ -584,9 +599,9 @@ class PlanEpisodeTest(unittest.TestCase):
         self.assertAlmostEqual(off(by["no_aftermath"]["segments"][0][1]), hold_end - 0.05,
                                delta=1e-6)
         self.assertAlmostEqual(hold_end, 16.0, delta=2.0 / HZ)
-        # approach_only: [t_touch-2.05, t_touch-0.05]
-        self.assertAlmostEqual(off(by["approach_only"]["segments"][0][1]), 15.35, delta=tol)
-        self.assertAlmostEqual(off(by["approach_only"]["segments"][0][0]), 13.35, delta=tol)
+        # approach_only(v3.4): [t_touch-2.05+1/30, t_touch-0.05+1/30] — 1프레임 접촉 쪽 이동
+        self.assertAlmostEqual(off(by["approach_only"]["segments"][0][1]), 15.35 + 1.0 / 30.0, delta=tol)
+        self.assertAlmostEqual(off(by["approach_only"]["segments"][0][0]), 13.35 + 1.0 / 30.0, delta=tol)
         # 접촉 구간 길이가 manifest용으로 실려 있다
         self.assertAlmostEqual(by["full"]["contact_len_s"], 0.6, delta=2.0 / HZ)
         self.assertEqual(by["full"]["pair"], ["obj001", "obj002"])
@@ -749,12 +764,14 @@ class WindowBoundaryTest(unittest.TestCase):
                         if (t - BASE).total_seconds() <= self.t_release - 0.05][-1]
         self.assertGreater(d_at_v31_end, self.hold_thr)
 
-    def test_approach_only_unchanged_and_anchored_on_touch(self):
+    def test_approach_only_one_frame_from_touch_and_anchored(self):
+        # v3.4: 창 끝 = t_touch − (0.05 − 1/30) ≈ t_touch − 0.0167 — 접촉 1프레임 앞.
+        # trace 기준 접촉 프레임(문턱 하회)은 여전히 0이어야 한다(t_touch가 첫 하회 시각).
         samples = self._samples("approach_only")
         self.assertTrue(all(d >= THR for _, d in samples))
         self.assertEqual(self.by["approach_only"]["anchor"], "t_touch")
         end_off = (self.by["approach_only"]["segments"][0][1] - BASE).total_seconds()
-        self.assertAlmostEqual(self.t_touch - end_off, 0.05, delta=1.5 / HZ)
+        self.assertAlmostEqual(self.t_touch - end_off, 0.05 - 1.0 / 30.0, delta=1.5 / HZ)
 
     def test_no_contact_unchanged_and_opens_at_release(self):
         back_start = (self.by["no_contact"]["segments"][1][0] - BASE).total_seconds()
