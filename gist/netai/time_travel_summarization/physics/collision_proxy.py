@@ -1,15 +1,17 @@
 _PROXY_NAME = "__phys_proxy__"
 _MATERIAL_NAME = "__phys_material__"
 
-# 콜라이더-메시 정합화 (v2 데이터 규약, 2026-08-05 — 위상분해_리포트 한계 10):
-# bbox 유도 캡슐/실린더 반지름이 시각적 몸통보다 두꺼워(우주인 실측: r=35.86, 접촉거리
-# 71.7) 물리 접촉이 시각 접촉보다 먼저 성립 → 접촉 순간에도 화면엔 미세한 틈이 보였다.
-# 콜라이더 "너비"를 이 값(스테이지 단위, cm)만큼 줄여(반지름은 절반씩) 메시에 밀착시킨다.
-# 라이브 렌더 육안 이력: 5.0(접촉거리 71.7→66.7)에도 접촉 순간 미세한 틈 잔존(2026-08-06)
-# → 8.0으로 확대(r 35.86→31.86, 접촉거리 63.7). 주의: 이 값은 생성 데이터의 접촉
-# 규약을 바꾸므로(train ≠ infer 금지) **v2 데이터 재생성 + 재학습과 묶어서만** 적용
-# 의미가 있다(리포트 한계 10의 기각 논리 — 테스트 클립만 바꾸면 규약 효과가 섞인다).
-_PROXY_WIDTH_SHRINK = 8.0
+# 콜라이더-메시 정합화 이력:
+# - v2 규약(2026-08-05): bbox 유도 반지름이 시각 몸통보다 두꺼워(r=35.86, 접촉거리 71.7)
+#   접촉 순간 화면에 틈이 보였다 → 너비 −8(반지름 −4)을 육안으로 확정(접촉거리 63.7).
+# - regime3(2026-08-08): 그 "두꺼움"의 원인이 에셋 앞면의 튀어나온 끈으로 확인됐다 —
+#   bbox가 몸통이 아니라 끈 끝에 접해 있었고, −8은 사실상 끈 보정이었다. 끈 제거본
+#   (No_tie_Astronaut.usd)에서는 shrink 없이 0.45×min_dim만으로 접촉이 화면과 일치
+#   (사용자 육안 확정). shrink는 폐기하고 상수는 이력 추적용으로만 남긴다.
+# 주의: 반지름 규약 변경은 생성 데이터의 접촉 규약을 바꾸므로(train ≠ infer 금지)
+# **재생성 + 재학습과 묶어서만** 의미가 있다. regime2 데이터(prod-20260806-v2)는
+# 옛 규약(shrink 8, 월드 AABB)으로 생성된 것이다.
+_PROXY_WIDTH_SHRINK = 8.0  # regime2까지 사용, regime3에서 폐기(미적용)
 
 
 def _ensure_api(schema_api, prim):
@@ -91,6 +93,7 @@ def wrap_with_collision_proxy(
     xform_cache = UsdGeom.XformCache(0)
     prim_world_xform = xform_cache.GetLocalToWorldTransform(target_prim)
     prim_world_pos = prim_world_xform.ExtractTranslation()
+    sx = sy = sz = 1.0  # 아래 진단 try가 실패해도 지역 치수 보정이 동작하게 기본값
     try:
         rotation = prim_world_xform.ExtractRotation()
         rot_axis = rotation.GetAxis()
@@ -117,6 +120,7 @@ def wrap_with_collision_proxy(
 
     proxy_radius = radius_units
     proxy_height = height_units
+    local_dims = None  # 지역 bbox 치수(원기둥/캡슐 경로에서 채움) — 로그 스탬프용
     local_translate = _default_proxy_translate(stage, shape, radius_units, height_units)
     up_axis = UsdGeom.GetStageUpAxis(stage)
     is_y_up = up_axis == UsdGeom.Tokens.y
@@ -136,12 +140,36 @@ def wrap_with_collision_proxy(
         sizes = [abs(bb_size[0]), abs(bb_size[1]), abs(bb_size[2])]
         world_up_idx = 1 if is_y_up else 2
         height_scale = 0.45 if shape == "cylinder" else 0.9
-        proxy_height = max(sizes[world_up_idx] * height_scale, 0.1 * m_to_units)
-        other_dims = [sizes[i] for i in range(3) if i != world_up_idx]
-        # 너비 축소(_PROXY_WIDTH_SHRINK)는 지름 기준 → 반지름에서 절반을 뺀다.
-        proxy_radius = max(min(other_dims) * 0.45 - _PROXY_WIDTH_SHRINK / 2.0,
-                           0.05 * m_to_units)
-
+        # --- 치수는 지역(untransformed) bbox에서 유도 (regime3, 2026-08-08) ---- #
+        # 월드 AABB는 축 정렬 상자라 객체가 돌면 커진다(45° 정사각형 → 대각선).
+        # 프록시는 에피소드 경계마다 재생성되는데 그 시점의 걷던 요(yaw)가 남아 있어,
+        # 반지름이 스폰 각도 추첨에 좌우됐다(실측: 2r 63.7~75.3으로 51개 값,
+        # 5에피소드 진단으로 회전 이월 확정 — physics일지 #16). 지역 bbox는 월드
+        # 회전이 계산에 아예 들어가지 않으므로 반지름이 에셋 고유값으로 고정된다.
+        # 배치(bb_center·bb_min)는 그대로 월드 기준 — 몸이 지금 있는 곳에 세운다.
+        # 높이 축은 월드 상축이 아니라 "지역 프레임에서 상축에 대응하는 축"
+        # (longest_idx = local_up 최대 성분) — 이 에셋은 세우느라 90° 회전이
+        # authored돼 있어 지역 높이 축이 월드 상축 인덱스와 다를 수 있다.
+        local_dims = None
+        try:
+            local_rng = bbox_cache.ComputeUntransformedBound(target_prim).ComputeAlignedRange()
+            l_size = local_rng.GetMax() - local_rng.GetMin()
+            axis_scale = (sx, sy, sz)  # 배치 스케일 보정(진단 실측 전부 1.0)
+            if any(abs(s - 1.0) > 0.01 for s in axis_scale):
+                carb.log_warn(
+                    f"[Physics] proxy dims: non-unit scale {axis_scale} for "
+                    f"{target_prim.GetPath()} — 지역 치수에 스케일을 곱해 보정")
+            dims = [abs(l_size[i]) * axis_scale[i] for i in range(3)]
+            up_idx = longest_idx
+            local_dims = tuple(round(d, 2) for d in dims)
+        except Exception as dim_err:
+            carb.log_warn(f"[Physics] local-bbox dims failed ({dim_err!r}) — 월드 AABB 폴백"
+                          f" (회전 의존 반지름으로 퇴행하므로 regime 스탬프 확인 필요)")
+            dims = sizes
+            up_idx = world_up_idx
+        proxy_height = max(dims[up_idx] * height_scale, 0.1 * m_to_units)
+        other_dims = [dims[i] for i in range(3) if i != up_idx]
+        proxy_radius = max(min(other_dims) * 0.45, 0.05 * m_to_units)
         if shape == "cylinder":
             world_target = [bb_center[0], bb_center[1], bb_center[2]]
             world_target[world_up_idx] = bb_min[world_up_idx] + proxy_height / 2.0
@@ -159,7 +187,8 @@ def wrap_with_collision_proxy(
         f"local_translate(in-prim-local)={tuple(local_translate)} "
         f"world_up_in_prim_local={tuple(local_up)} "
         f"shape={shape} axis={axis_name} height={proxy_height:.2f} radius={proxy_radius:.2f} "
-        f"(stage units, width_shrink={_PROXY_WIDTH_SHRINK})"
+        f"local_dims={local_dims} "
+        f"(stage units, regime=r3-localbbox shrink=none)"
     )
 
     if shape not in ("sphere", "capsule", "cylinder"):
