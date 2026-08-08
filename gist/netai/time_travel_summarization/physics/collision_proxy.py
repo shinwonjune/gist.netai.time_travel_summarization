@@ -13,6 +13,16 @@ _MATERIAL_NAME = "__phys_material__"
 # 옛 규약(shrink 8, 월드 AABB)으로 생성된 것이다.
 _PROXY_WIDTH_SHRINK = 8.0  # regime2까지 사용, regime3에서 폐기(미적용)
 
+# rest 자세 치수 캐시 (regime3 2차 수정, 2026-08-08) — prim 경로 -> (dims, up_idx).
+# 1차 수정(지역 bbox)은 실패했다: 5에피소드 진단에서 지역 치수가 84.9→131.1까지
+# 변했는데, 131은 정적 단면(84.9x79.7)의 어떤 회전 AABB 상한(116.4)도 넘는 값이라
+# **걷기 애니메이션의 자세(팔다리 벌림)가 메시 자체를 변형**시킨다는 증거다 — 지역
+# bbox도 "그 순간 자세"를 읽는다. 반지름은 자세·회전 모두와 무관해야 하므로,
+# **세션에서 처음 잰 치수(= 씬 로드 직후 rest 자세)를 캐시**하고 에피소드 경계
+# 재생성 때 재사용한다. 근거: 진단에서 첫 생성 회차는 8/8건이 정확히 rest 값
+# (84.94/35.86)이었다 — 애니메이션이 돌기 전이라 항상 rest다.
+_REST_DIMS: dict = {}
+
 
 def _ensure_api(schema_api, prim):
     if not schema_api(prim):
@@ -151,22 +161,31 @@ def wrap_with_collision_proxy(
         # (longest_idx = local_up 최대 성분) — 이 에셋은 세우느라 90° 회전이
         # authored돼 있어 지역 높이 축이 월드 상축 인덱스와 다를 수 있다.
         local_dims = None
-        try:
-            local_rng = bbox_cache.ComputeUntransformedBound(target_prim).ComputeAlignedRange()
-            l_size = local_rng.GetMax() - local_rng.GetMin()
-            axis_scale = (sx, sy, sz)  # 배치 스케일 보정(진단 실측 전부 1.0)
-            if any(abs(s - 1.0) > 0.01 for s in axis_scale):
-                carb.log_warn(
-                    f"[Physics] proxy dims: non-unit scale {axis_scale} for "
-                    f"{target_prim.GetPath()} — 지역 치수에 스케일을 곱해 보정")
-            dims = [abs(l_size[i]) * axis_scale[i] for i in range(3)]
-            up_idx = longest_idx
+        cache_key = str(target_prim.GetPath())
+        cached = _REST_DIMS.get(cache_key)
+        if cached is not None:
+            # 에피소드 경계 재생성 — 세션 첫 생성(rest 자세)의 치수를 재사용한다.
+            # 지금 다시 재면 걷던 요·걸음 자세가 치수에 새어 든다(_REST_DIMS 주석).
+            dims, up_idx = list(cached[0]), cached[1]
             local_dims = tuple(round(d, 2) for d in dims)
-        except Exception as dim_err:
-            carb.log_warn(f"[Physics] local-bbox dims failed ({dim_err!r}) — 월드 AABB 폴백"
-                          f" (회전 의존 반지름으로 퇴행하므로 regime 스탬프 확인 필요)")
-            dims = sizes
-            up_idx = world_up_idx
+        else:
+            try:
+                local_rng = bbox_cache.ComputeUntransformedBound(target_prim).ComputeAlignedRange()
+                l_size = local_rng.GetMax() - local_rng.GetMin()
+                axis_scale = (sx, sy, sz)  # 배치 스케일 보정(진단 실측 전부 1.0)
+                if any(abs(s - 1.0) > 0.01 for s in axis_scale):
+                    carb.log_warn(
+                        f"[Physics] proxy dims: non-unit scale {axis_scale} for "
+                        f"{target_prim.GetPath()} — 지역 치수에 스케일을 곱해 보정")
+                dims = [abs(l_size[i]) * axis_scale[i] for i in range(3)]
+                up_idx = longest_idx
+                local_dims = tuple(round(d, 2) for d in dims)
+                _REST_DIMS[cache_key] = (tuple(dims), up_idx)
+            except Exception as dim_err:
+                carb.log_warn(f"[Physics] local-bbox dims failed ({dim_err!r}) — 월드 AABB 폴백"
+                              f" (회전 의존 반지름으로 퇴행하므로 regime 스탬프 확인 필요)")
+                dims = sizes
+                up_idx = world_up_idx
         proxy_height = max(dims[up_idx] * height_scale, 0.1 * m_to_units)
         other_dims = [dims[i] for i in range(3) if i != up_idx]
         proxy_radius = max(min(other_dims) * 0.45, 0.05 * m_to_units)
@@ -187,8 +206,8 @@ def wrap_with_collision_proxy(
         f"local_translate(in-prim-local)={tuple(local_translate)} "
         f"world_up_in_prim_local={tuple(local_up)} "
         f"shape={shape} axis={axis_name} height={proxy_height:.2f} radius={proxy_radius:.2f} "
-        f"local_dims={local_dims} "
-        f"(stage units, regime=r3-localbbox shrink=none)"
+        f"local_dims={local_dims} rest_cached={bool(_REST_DIMS)} "
+        f"(stage units, regime=r3-restcache shrink=none)"
     )
 
     if shape not in ("sphere", "capsule", "cylinder"):

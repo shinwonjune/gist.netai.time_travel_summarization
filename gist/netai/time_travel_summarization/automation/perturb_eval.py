@@ -564,6 +564,14 @@ def main() -> None:
     ap.add_argument("--remote-ext-root", default=DEFAULT_REMOTE_EXT)
     ap.add_argument("--analyze-fp", action="store_true",
                     help="FP 원인 분류만 로컬 실행 (터널·렌더 불필요)")
+    # 렌더/추론 분리(2026-08-08): 기본 루프는 조건마다 렌더->추론을 끼워 넣는데,
+    # 그러면 vLLM(GPU0 서빙)이 캠페인 내내 떠 있어야 한다. --render-only로 전 조건의
+    # 렌더·수거를 먼저 끝내 두면 그동안 GPU0을 다른 작업에 쓸 수 있고, --infer-only가
+    # 수거 완료분에 대해 추론·채점만 이어서 한다(각 단계 멱등이라 이어달리기 안전).
+    ap.add_argument("--render-only", action="store_true",
+                    help="교란·업로드·재연·수거까지만 수행 (vLLM 불필요)")
+    ap.add_argument("--infer-only", action="store_true",
+                    help="수거 완료분에 대해 추론·채점만 수행")
     ap.add_argument("--self-test", action="store_true")
     args = ap.parse_args()
     if args.self_test:
@@ -583,19 +591,27 @@ def main() -> None:
     print(f"[plan] {len(conds)} conditions x {len(pairs)} pairs = {n_jobs} replay jobs "
           f"(~{n_jobs * 3.5 / 60:.1f}h render) + {n_jobs} inferences")
 
+    if args.render_only and args.infer_only:
+        raise SystemExit("--render-only와 --infer-only는 동시 지정 불가")
     with Tunnel(args.ssh_host):
-        client = make_client(out)
+        client = None if args.render_only else make_client(out)
         done: List[dict] = []
         for cond in conds:
             phase_perturb(cond, pairs, fid_out, out)
             phase_push(cond, pairs, args, out)
-            jobs = phase_replay(cond, pairs, args, out)
+            jobs = phase_replay(cond, pairs, args, out)   # 완료 잡은 즉시 반환(멱등)
             phase_fetch(cond, jobs, args, out)
-            phase_infer(cond, pairs, jobs, out, client)
+            if not args.render_only:
+                phase_infer(cond, pairs, jobs, out, client)
             done.append(cond)
-            print(f"[{cond['name']}] condition complete ({len(done)}/{len(conds)})")
-        phase_report(pairs, fid_out, out, done)
-    print(f"\n[done] results: {out / 'report.md'}")
+            print(f"[{cond['name']}] {'render' if args.render_only else 'condition'} "
+                  f"complete ({len(done)}/{len(conds)})")
+        if not args.render_only:
+            phase_report(pairs, fid_out, out, done)
+    if args.render_only:
+        print("\n[done] render-only — 추론은 --infer-only로 이어서 실행")
+    else:
+        print(f"\n[done] results: {out / 'report.md'}")
 
 
 def _self_test() -> None:
