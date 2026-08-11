@@ -131,6 +131,7 @@ def wrap_with_collision_proxy(
     proxy_radius = radius_units
     proxy_height = height_units
     local_dims = None  # 지역 bbox 치수(원기둥/캡슐 경로에서 채움) — 로그 스탬프용
+    up_idx = None  # local_dims 안에서 높이 축의 인덱스 — 로그·진단용(원기둥/캡슐 경로에서 채움)
     local_translate = _default_proxy_translate(stage, shape, radius_units, height_units)
     up_axis = UsdGeom.GetStageUpAxis(stage)
     is_y_up = up_axis == UsdGeom.Tokens.y
@@ -142,7 +143,16 @@ def wrap_with_collision_proxy(
 
         rotation = prim_world_xform.ExtractRotation()
         inv_rotation = rotation.GetInverse()
+        # 월드 상축(월드의 '위' 방향 단위벡터)을 프림 "지역" 프레임으로 역변환한다
+        # — "월드의 위가 프림 자신의 좌표계에서는 어느 방향인가"를 얻는 계산.
+        # 왜 필요한가: 에셋은 눕혀 authored돼 있고 스폰이 프림에 rotateXYZ(-90,0,0)을
+        # 얹어 세우므로(stage_object_controller.create_astronaut_prim), 지역 프레임의
+        # 높이 축은 월드 상축 인덱스(y-up이면 1)와 다르다(실측: 지역 z). 인덱스를
+        # 하드코딩하지 않고 역변환으로 고르므로 에셋 authored 자세가 바뀌어도 자동 추종.
         local_up = inv_rotation.TransformDir(world_up)
+        # 역변환된 상축 벡터에서 절대값이 가장 큰 성분의 인덱스 = 지역 높이 축.
+        # 걷기 요(yaw)는 월드 상축을 중심으로 도는 회전이라 local_up을 바꾸지
+        # 않는다 — 진단②③ 전 기록에서 (0,0,±1) 상수 실측(H4 tilt 기각 근거).
         abs_components = [abs(local_up[0]), abs(local_up[1]), abs(local_up[2])]
         longest_idx = abs_components.index(max(abs_components))
         axis_name = ["X", "Y", "Z"][longest_idx]
@@ -186,9 +196,22 @@ def wrap_with_collision_proxy(
                               f" (회전 의존 반지름으로 퇴행하므로 regime 스탬프 확인 필요)")
                 dims = sizes
                 up_idx = world_up_idx
+        # 진단: 높이 축 선택 검증 — dims[up_idx]는 세 치수 중 최대(키 ~206)여야
+        # 한다. 아니면 상축 매핑이 어긋나 반지름이 몸통 폭이 아닌 키에서 유도되는
+        # 사고 경로이므로 즉시 경고를 남긴다(job.log로 사후 검증 가능).
+        if abs(dims[up_idx] - max(dims)) > 1.0:
+            carb.log_warn(
+                f"[Physics] proxy dims: up-axis pick suspicious for {target_prim.GetPath()} — "
+                f"dims={tuple(round(d, 2) for d in dims)} up_idx={up_idx} "
+                f"local_up=({local_up[0]:.4f}, {local_up[1]:.4f}, {local_up[2]:.4f}) "
+                f"(height axis is not the largest dim)")
         proxy_height = max(dims[up_idx] * height_scale, 0.1 * m_to_units)
         other_dims = [dims[i] for i in range(3) if i != up_idx]
-        proxy_radius = max(min(other_dims) * 0.45, 0.05 * m_to_units)
+        # 반지름 계수 0.4542 ≈ 30.0 / 66.04(끈 제거 에셋의 지역 좁은 변) — r=30.0,
+        # 접촉거리 2r=60.0으로 규약 확정(사용자, 2026-08-11). 고정 상수 대신 계수를
+        # 유지하는 이유: 에셋 치수가 바뀌면 반지름이 자동 추종하고 job.log의
+        # radius 스탬프로 사후 검증할 수 있다(끈 제거가 실사례).
+        proxy_radius = max(min(other_dims) * 0.4542, 0.05 * m_to_units)
         if shape == "cylinder":
             world_target = [bb_center[0], bb_center[1], bb_center[2]]
             world_target[world_up_idx] = bb_min[world_up_idx] + proxy_height / 2.0
@@ -206,8 +229,8 @@ def wrap_with_collision_proxy(
         f"local_translate(in-prim-local)={tuple(local_translate)} "
         f"world_up_in_prim_local={tuple(local_up)} "
         f"shape={shape} axis={axis_name} height={proxy_height:.2f} radius={proxy_radius:.2f} "
-        f"local_dims={local_dims} rest_cached={bool(_REST_DIMS)} "
-        f"(stage units, regime=r3-restcache shrink=none)"
+        f"local_dims={local_dims} up_idx={up_idx} rest_cached={bool(_REST_DIMS)} "
+        f"(stage units, regime=r3-restcache shrink=none coef=0.4542)"
     )
 
     if shape not in ("sphere", "capsule", "cylinder"):
