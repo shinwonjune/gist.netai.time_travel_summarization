@@ -71,8 +71,11 @@ def fragmentation(rows: List[Row], obj: str, t0: datetime.datetime,
                   t1: datetime.datetime, new_id: str) -> List[Row]:
     """가림 후 재연관 실패: obj의 [t0,t1) 행 삭제, t1 이후는 새 ID로 발급.
 
-    원 트랙은 t0에서 끊긴다(재연 화면에선 마지막 좌표에 정지 — 죽은 트랙을
-    유지하는 렌더 정책의 산물로 리포트 한계에 명시).
+    원 트랙은 t0에서 끊기고, 재연 화면에서는 **마지막 샘플 이후 사라진다**
+    (playback.visibility의 dead-track despawn — 트랙 범위 [first,last] 밖은 숨김,
+    허용오차 1s). 즉 결손 구간 이후로 옛 번호는 화면에 없다. 옛 주석의
+    "마지막 좌표에 정지"는 despawn 도입 이전 서술이라 폐기한다 — 얼어붙은 분신이
+    가짜 충돌을 만들던 문제를 그 모듈이 원천 차단한다.
     """
     out = []
     for r in rows:
