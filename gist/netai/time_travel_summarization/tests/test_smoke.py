@@ -13,7 +13,12 @@ class RefactoringSmokeTest(unittest.TestCase):
         config_path = Path(__file__).resolve().parents[1] / "config.json"
         config = ExtensionConfig.from_file(str(config_path))
 
-        self.assertTrue(config.data_path.endswith(".csv"))
+        # 확장자를 못 박지 않는다 — data_path는 단일 파일(.csv/.parquet)일 수도,
+        # 청크 데이터셋의 manifest.json일 수도 있고(리더는 URI 모양이 정한다,
+        # data_service._repo_factory_for 참조), 머신마다 다른 값을 env로 주입받는다.
+        # 여기서 확인할 것은 "config가 현재 패키지 모양대로 읽히는가"이므로
+        # data_uri가 URI로 해석되는지만 본다.
+        self.assertIn("://", config.data_uri)
         self.assertIsInstance(config.prim_map, dict)
 
     def test_trajectory_repository_returns_last_known_value(self):

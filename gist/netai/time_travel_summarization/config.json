@@ -1,5 +1,5 @@
 {
-  "data_path": "s3://time-travel-summarization/episodes/gen-20260718-153511/ep_0000/_trace_0000.csv",
+  "data_path": "${LOCAL_LAKE_ROOT}/${LAKE_DATASET}/manifest.json",
 
   "auto_generate": true,
 

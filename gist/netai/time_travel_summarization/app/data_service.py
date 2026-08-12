@@ -10,7 +10,28 @@ import carb
 
 from .config import ExtensionConfig
 from ..events.summary_service import EventSummaryService
+from ..playback.lake_common import MANIFEST_NAME
 from ..playback.trajectory_repository import TrajectoryRepository
+
+
+def _repo_factory_for(uri: str, lake_cfg: dict):
+    """URI 모양으로 리더를 고른다 — manifest면 청크 윈도우, 아니면 단일 파일.
+
+    버튼(local/lake)이 아니라 **데이터의 모양**이 리더를 정한다. 버튼에 리더를 묶어
+    두면 같은 청크 데이터셋을 저장소만 바꿔(로컬 미러 ↔ s3) 읽을 수가 없는데, 그
+    비교가 "지연이 minIO 경유 때문인가"를 가르는 유일한 대조군이다. 리더·캐시·
+    프리페치가 같고 경로만 다르면 두 실행의 차이가 곧 네트워크 경유 비용이 된다.
+
+    반환: (팩토리, 청크 리더 여부).
+    """
+    if uri.lower().endswith(MANIFEST_NAME):
+        from ..playback.lake_repository import LakeTrajectoryRepository
+
+        cache_chunks = int(lake_cfg.get("cache_chunks", 4))
+        prefetch_ahead = int(lake_cfg.get("prefetch_ahead", 1))
+        return (lambda: LakeTrajectoryRepository(
+            cache_chunks=cache_chunks, prefetch_ahead=prefetch_ahead), True)
+    return TrajectoryRepository, False
 
 
 def load_config(core, config_path: str) -> bool:
@@ -65,33 +86,26 @@ def activate_data_source(core, mode: str) -> bool:
         if mode == "lake":
             direct_data_uri = resolve_uri(core, lake_cfg.get("direct_data_uri", ""))
             if direct_data_uri:
-                repo_factory = TrajectoryRepository
                 uri = direct_data_uri
                 log_message = f"[TimeTravel] Lake mode test direct data URI: {uri}"
             else:
-                from ..playback.lake_repository import LakeTrajectoryRepository
-
                 manifest_uri = resolve_uri(core, lake_cfg.get("manifest_uri", ""))
                 if not manifest_uri:
                     core._last_data_load_error = "Data Lake manifest URI is not configured"
                     carb.log_warn(f"[TimeTravel] {core._last_data_load_error}")
                     return False
-                cache_chunks = int(lake_cfg.get("cache_chunks", 4))
-                prefetch_ahead = int(lake_cfg.get("prefetch_ahead", 1))
-                repo_factory = lambda: LakeTrajectoryRepository(
-                    cache_chunks=cache_chunks,
-                    prefetch_ahead=prefetch_ahead,
-                )
                 uri = manifest_uri
                 log_message = f"[TimeTravel] Lake mode: manifest URI: {uri}"
         elif mode == "local":
-            repo_factory = TrajectoryRepository
             uri = core._config.data_uri
             log_message = f"[TimeTravel] Looking for data at URI: {uri}"
         else:
             core._last_data_load_error = f"Invalid data source: {mode}"
             carb.log_warn(f"[TimeTravel] {core._last_data_load_error}")
             return False
+
+        # 리더는 버튼이 아니라 URI 모양이 정한다(_repo_factory_for 참조).
+        repo_factory, chunked = _repo_factory_for(uri, lake_cfg)
 
         output_root_uri = resolve_output_uri_for_mode(
             core,
@@ -127,7 +141,11 @@ def activate_data_source(core, mode: str) -> bool:
         )
         core._data_source = mode
         core._last_data_load_error = ""
-        if mode == "lake":
+        # 레이크 모드는 종전대로 항상 재생성한다(direct_data_uri로 단일 파일을 여는
+        # 경우 포함 — 그때도 객체 구성은 config가 아니라 데이터가 정한다). 여기에
+        # "청크 데이터셋이면"을 더한 이유는, 로컬 미러를 Local 버튼으로 열어도 같은
+        # 데이터셋이므로 똑같이 우주인을 다시 만들어야 하기 때문이다.
+        if mode == "lake" or chunked:
             prim_map = core.regenerate_astronauts_from_loaded_data()
             if not prim_map:
                 carb.log_warn("[TimeTravel] Data Lake data loaded, but no astronauts were generated")
