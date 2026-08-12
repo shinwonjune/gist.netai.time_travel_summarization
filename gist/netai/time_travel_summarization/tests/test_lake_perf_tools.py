@@ -2,8 +2,8 @@
 
 대상 (레이크성능_실험설계.md):
   - lake_benchmark 데이터셋 모드: transport_bench / seek_bench / run_scenario (A·B 계층)
-  - LakeProbe: 링버퍼·덤프 트리거(정지 전이 / 상한 도달) (C 계층)
-  - gui_probe_report.analyze: 지표 산출
+  - LakeProbe: 링버퍼·덤프 트리거(정지 전이 / 상한 도달)·idle 전용 버퍼 억제 (C 계층)
+  - gui_probe_report: 재생/탐색/idle 구간 분류와 구간별 지표 산출
   - build_lake_perf_dataset: rebase(시간축 연속 배치) + downsample 어댑터
 """
 import datetime
@@ -24,7 +24,10 @@ from gist.netai.time_travel_summarization.utils.build_lake_perf_dataset import (
     downsample_rows,
     rebase_episodes,
 )
-from gist.netai.time_travel_summarization.utils.gui_probe_report import analyze
+from gist.netai.time_travel_summarization.utils.gui_probe_report import (
+    analyze,
+    classify_regimes,
+)
 
 _FMT = "%Y-%m-%d %H:%M:%S.%f"
 
@@ -189,12 +192,163 @@ class LakeProbeTest(unittest.TestCase):
             self._record(probe, True, sync=2, twin=twin)
             self._record(probe, False, sync=2, twin=twin)
             dump = list(Path(d).glob("gui_probe_*.json"))[0]
-            rep = analyze(dump, playing_only=True)
-            self.assertEqual(rep["frames"], 3)              # 재생 중 프레임만
-            self.assertEqual(rep["warmup_stall_frames"], 1)  # 첫 stall = 콜드스타트
-            self.assertEqual(rep["stall_frames_post_warmup"], 1)
-            self.assertIn("hitch_rate_pct", rep)
-            self.assertIn("tick_p50_ms", rep)
+            play = analyze(dump)["regimes"]["playback"]
+            self.assertEqual(play["frames"], 3)              # 재생 중 프레임만
+            self.assertEqual(play["warmup_stall_frames"], 1)  # 첫 stall = 콜드스타트
+            self.assertEqual(play["stall_frames_post_warmup"], 1)
+            self.assertIn("hitch_rate_pct", play)
+            self.assertIn("tick_p50_ms", play)
+
+
+class IdleDumpSuppressionTest(unittest.TestCase):
+    """idle 전용 버퍼는 파일로 남기지 않는다(계측을 켠 채 방치할 때 쌓이던 빈 덤프).
+
+    "의미 있는 프레임"은 재생(playing=True) 또는 탐색(playing=False인데 직전 프레임
+    대비 twin_time이 달라짐) 프레임이다. 둘 다 없으면 성능 판정에 쓸 것이 없다.
+    """
+
+    def _record(self, probe, playing, sync=0, twin=None):
+        probe.record(tick_ms=0.5, twin_time=twin, stats={"sync_loads": sync}, is_playing=playing)
+
+    def test_idle_only_cap_writes_nothing_but_clears_buffer(self):
+        """상한에 닿아도 파일은 안 만들되 버퍼는 비워야 한다(메모리 무한 증가 방지)."""
+        with tempfile.TemporaryDirectory() as d:
+            probe = LakeProbe(out_dir=Path(d), max_frames=5)
+            twin = datetime.datetime(2026, 1, 1)
+            for _ in range(5):
+                self._record(probe, False, twin=twin)  # 정지 + 시계 불변 = idle
+            self.assertEqual(list(Path(d).glob("*.json")), [])
+            self.assertEqual(len(probe), 0)  # 버퍼는 비워졌다
+            self.assertFalse(probe.has_meaningful_frames())
+            # 비운 뒤에도 계속 idle이면 여전히 파일이 생기지 않아야 한다
+            for _ in range(5):
+                self._record(probe, False, twin=twin)
+            self.assertEqual(list(Path(d).glob("*.json")), [])
+
+    def test_idle_only_manual_dump_is_noop(self):
+        """수동 Dump는 사용자가 누른 경계라 버퍼를 건드리지 않고 no-op으로 끝난다."""
+        with tempfile.TemporaryDirectory() as d:
+            probe = LakeProbe(out_dir=Path(d), max_frames=100)
+            twin = datetime.datetime(2026, 1, 1)
+            for _ in range(3):
+                self._record(probe, False, twin=twin)
+            self.assertIsNone(probe.dump(reason="manual"))
+            self.assertEqual(list(Path(d).glob("*.json")), [])
+            self.assertEqual(len(probe), 3)
+
+    def test_playback_frame_makes_buffer_dumpable(self):
+        """idle 사이에 재생 프레임이 하나라도 섞이면 상한 도달 시 덤프된다."""
+        with tempfile.TemporaryDirectory() as d:
+            probe = LakeProbe(out_dir=Path(d), max_frames=5)
+            twin = datetime.datetime(2026, 1, 1)
+            for _ in range(4):
+                self._record(probe, False, twin=twin)
+            self.assertFalse(probe.has_meaningful_frames())
+            self._record(probe, True, twin=twin)  # 재생 프레임 1개 -> 5프레임 상한
+            dumps = list(Path(d).glob("gui_probe_*.json"))
+            self.assertEqual(len(dumps), 1)
+            self.assertEqual(json.loads(dumps[0].read_text(encoding="utf-8"))["reason"], "cap")
+
+    def test_seek_only_buffer_is_dumped(self):
+        """재생이 전혀 없어도 스크럽(정지 상태에서 twin_time 변화)만으로 덤프된다.
+
+        순수 스크럽 덤프는 정지 전이가 없어 예전에는 통째로 버려질 뻔한 경우다.
+        """
+        with tempfile.TemporaryDirectory() as d:
+            probe = LakeProbe(out_dir=Path(d), max_frames=4)
+            base = datetime.datetime(2026, 1, 1)
+            for i in range(4):  # 매 프레임 시계가 달라진다 = 슬라이더 스크럽
+                self._record(probe, False, twin=base + datetime.timedelta(seconds=i))
+            dumps = list(Path(d).glob("gui_probe_*.json"))
+            self.assertEqual(len(dumps), 1)
+            payload = json.loads(dumps[0].read_text(encoding="utf-8"))
+            self.assertEqual(payload["n_frames"], 4)
+            self.assertEqual(payload["frames"]["playing"], [False] * 4)
+            # 첫 프레임은 비교 대상이 없어 idle, 나머지 3개가 탐색으로 잡혀야 한다
+            groups = classify_regimes(payload["frames"])
+            self.assertEqual(groups["playback"], [])
+            self.assertEqual(groups["seek"], [1, 2, 3])
+            self.assertEqual(groups["idle"], [0])
+
+
+def _write_probe_dump(dirpath: str, playing, twin, intervals, d_sync) -> Path:
+    """구간 분류·지표 검증용 합성 덤프. 프레임 간격을 정확히 지정하려면 실제 계측이
+    아니라 이렇게 직접 만들어야 한다(record()는 perf_counter로 간격을 잰다)."""
+    n = len(playing)
+    path = Path(dirpath) / "gui_probe_synth.json"
+    path.write_text(json.dumps({
+        "version": 1, "reason": "manual", "scenario": "", "n_frames": n,
+        "frames": {
+            "wall_ts": [round(i * 0.1, 4) for i in range(n)],
+            "twin_time": list(twin),
+            "frame_interval_ms": list(intervals),
+            "tick_ms": [0.5] * n,
+            "d_sync": list(d_sync),
+            "d_hit": [0] * n,
+            "playing": list(playing),
+        },
+    }), encoding="utf-8")
+    return path
+
+
+class RegimeReportTest(unittest.TestCase):
+    def test_seek_stall_interval_stats(self):
+        """탐색의 주 판정 지표 — stall 프레임의 frame_interval p50/p95/최대."""
+        with tempfile.TemporaryDirectory() as d:
+            #        i0(idle) i1    i2    i3    i4(seek) i5(idle) i6(play)
+            playing = [False, False, False, False, False, False, True]
+            twin = ["t0", "t1", "t2", "t3", "t4", "t4", "t5"]
+            iv = [0.0, 100.0, 200.0, 300.0, 20.0, 16.0, 16.0]
+            sync = [0, 1, 1, 1, 0, 0, 0]
+            rep = analyze(_write_probe_dump(d, playing, twin, iv, sync))
+
+            seek = rep["regimes"]["seek"]
+            self.assertEqual(seek["frames"], 4)          # i1~i4
+            self.assertEqual(seek["stall_frames"], 3)
+            self.assertEqual(seek["warmup_stall_frames"], 1)
+            self.assertEqual(seek["stall_frames_post_warmup"], 2)
+            self.assertEqual(seek["stall_frame_rate_pct"], 75.0)
+            self.assertEqual(seek["stall_interval_p50_ms"], 200.0)
+            self.assertEqual(seek["stall_interval_p95_ms"], 300.0)
+            self.assertEqual(seek["stall_interval_max_ms"], 300.0)
+
+            self.assertEqual(rep["regimes"]["playback"]["frames"], 1)
+            self.assertEqual(rep["regimes"]["idle"]["frames"], 2)   # i0, i5
+            self.assertEqual(rep["n_frames"], 7)
+
+    def test_twin_time_change_separates_seek_from_idle(self):
+        """정지 중에도 twin_time이 바뀌면 탐색, 그대로면 idle."""
+        with tempfile.TemporaryDirectory() as d:
+            playing = [False] * 5
+            twin = ["t0", "t0", "t1", "t1", "t2"]
+            rep_path = _write_probe_dump(d, playing, twin, [0.0] + [16.0] * 4, [0] * 5)
+            groups = classify_regimes(json.loads(rep_path.read_text(encoding="utf-8"))["frames"])
+            self.assertEqual(groups["seek"], [2, 4])
+            self.assertEqual(groups["idle"], [0, 1, 3])
+            self.assertEqual(groups["playback"], [])
+
+    def test_playing_frames_are_playback_even_if_twin_unchanged(self):
+        """일시정지 없이 재생 중이면 twin_time이 같아 보여도 재생 구간이다
+        (같은 밀리초 안에 두 프레임이 들어가면 문자열이 같을 수 있다)."""
+        with tempfile.TemporaryDirectory() as d:
+            rep_path = _write_probe_dump(
+                d, [True, True, False], ["t0", "t0", "t0"], [0.0, 16.0, 16.0], [0, 0, 0])
+            groups = classify_regimes(json.loads(rep_path.read_text(encoding="utf-8"))["frames"])
+            self.assertEqual(groups["playback"], [0, 1])
+            self.assertEqual(groups["idle"], [2])
+
+    def test_none_twin_time_transition_counts_as_seek(self):
+        """twin_time이 None → 값으로 바뀌는 것도 시간축 이동이므로 탐색이다.
+
+        None은 "직전 프레임이 없다"와 값이 겹치므로, 첫 프레임 여부는 값이 아니라
+        별도 플래그로 판정해야 한다는 것을 고정하는 테스트다.
+        """
+        with tempfile.TemporaryDirectory() as d:
+            rep_path = _write_probe_dump(
+                d, [False, False, False], [None, "t1", "t1"], [0.0, 16.0, 16.0], [0, 0, 0])
+            groups = classify_regimes(json.loads(rep_path.read_text(encoding="utf-8"))["frames"])
+            self.assertEqual(groups["seek"], [1])
+            self.assertEqual(groups["idle"], [0, 2])
 
 
 def _episode(start: str, seconds: float, hz: float, objid: str) -> list:

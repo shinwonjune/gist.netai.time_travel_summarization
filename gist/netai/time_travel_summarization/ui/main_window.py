@@ -486,14 +486,25 @@ class TimeTravelWindow:
         self._set_probe_message(f"probe: segment started (dropped {dropped} frames)")
 
     def _on_probe_dump_clicked(self):
-        """Dump — 지금까지의 버퍼를 파일로 저장(스크럽 구간의 유일한 종료 경계)."""
+        """Dump — 지금까지의 버퍼를 파일로 저장(스크럽 구간의 유일한 종료 경계).
+
+        버퍼에 재생 프레임도 탐색 프레임도 없으면(정지한 채 시간축도 건드리지 않은
+        idle 상태) 파일을 만들지 않는다. 이때는 "버퍼가 비었다"와 구분되는 안내를
+        띄운다 — 프레임은 쌓였지만 성능 판정에 쓸 것이 없다는 뜻이기 때문이다.
+        """
         probe = self._get_probe()
         if probe is None:
             self._set_probe_message("probe: off - nothing to dump")
             return
+        n_before = len(probe)
         path = probe.dump(reason="manual")
-        self._set_probe_message(f"probe: wrote {path.name}" if path
-                                else "probe: buffer empty, nothing written", seconds=8.0)
+        if path is not None:
+            msg = f"probe: wrote {path.name}"
+        elif n_before:
+            msg = f"probe: idle-only buffer ({n_before} frames), nothing written"
+        else:
+            msg = "probe: buffer empty, nothing written"
+        self._set_probe_message(msg, seconds=8.0)
 
     def _update_probe_status(self):
         """~2Hz만 갱신 — 매 프레임 문자열을 만들면 측정 대상 프레임에 부하가 섞인다."""
