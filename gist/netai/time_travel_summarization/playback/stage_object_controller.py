@@ -158,9 +158,16 @@ class StageObjectController:
             return ""
         UsdGeom.Imageable(prim).MakeVisible()
 
-        from pxr import Sdf
+        from pxr import Sdf, Usd
 
         prim.GetReferences().AddReference(assetPath=astronaut_usd, primPath=Sdf.Path("/Root"))
+        # kind=component 선언 — BBoxCache는 자식 bound를 "가장 가까운 component 조상"의
+        # 공간에서 집계하고, 그런 조상이 없으면 월드 공간으로 폴백한다(OpenUSD
+        # bboxCache.cpp 실측·소스 검증, physics일지 #17(f)). 월드 폴백이 콜라이더
+        # 반지름 오염(요 이월·이중 AABB 래핑)의 전제 조건이었으므로, 이 선언으로
+        # ComputeUntransformedBound가 회전 무관·밀착 치수를 돌려주게 된다.
+        # collision_proxy의 rest 캐시와는 이중 안전장치 관계(둘 다 유지).
+        Usd.ModelAPI(prim).SetKind("component")
         xformable = UsdGeom.Xformable(prim)
         translate_op = xformable.AddTranslateOp()
         rotate_xyz_op = xformable.AddRotateXYZOp()
