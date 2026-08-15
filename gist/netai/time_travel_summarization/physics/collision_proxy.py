@@ -64,6 +64,13 @@ def _is_finite_vec(vec) -> bool:
     return all(value == value and value not in (float("inf"), float("-inf")) for value in vec)
 
 
+# 탄성(restitution) 규약 이력:
+# - regime2까지 0.8 (prod-20260806-v2가 이 값으로 생성됨).
+# - regime3(2026-08-16): 0.9 — 충돌 반동을 키워 사건이 화면에서 더 분명해지게(사용자
+#   결정). 0은 완전 비탄성, 1은 무손실이며 1 초과는 충돌마다 에너지가 늘어 발산한다.
+# 주의: 반동이 커지면 충돌 후 궤적·재충돌 빈도·사건 간격 분포가 달라지므로 이 값은
+# **데이터 규약**이다. regime2 데이터와 물리 조건이 다르다는 점을 비교 시 감안할 것.
+# 실효 반동은 두 재질의 조합으로 정해지는데, 전 객체가 같은 값을 쓰므로 그대로 적용된다.
 def _bind_physics_material(stage, target_prim, proxy_prim, restitution: float) -> None:
     from pxr import UsdPhysics, UsdShade
 
@@ -81,7 +88,7 @@ def wrap_with_collision_proxy(
     radius: float = 0.4,
     height: float = 1.7,
     mass: float = 80.0,
-    restitution: float = 0.8,
+    restitution: float = 0.9,
     visible: bool = False,
 ):
     """Create an invisible child collider and make the target prim a rigid body."""
