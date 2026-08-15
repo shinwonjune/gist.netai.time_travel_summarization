@@ -113,6 +113,7 @@ EXEC_ARGS="$GEN --episodes $EPISODES --duration $DURATION --render-fps $RENDER_F
  --min-objects $MIN_OBJECTS --max-objects $MAX_OBJECTS --seed $SEED --out $OUT --quit"
 [ "$EXTRA_OBJECTS" != "0" ] && EXEC_ARGS="$EXEC_ARGS --extra-objects $EXTRA_OBJECTS"
 [ -n "$STAGE" ] && EXEC_ARGS="$EXEC_ARGS --stage $STAGE"
+[ -n "$SCENE_PROFILE" ] && EXEC_ARGS="$EXEC_ARGS --scene-profile $SCENE_PROFILE"
 [ -n "$CAMERA" ] && EXEC_ARGS="$EXEC_ARGS --camera $CAMERA"
 [ -n "$UPLOAD_URI" ] && EXEC_ARGS="$EXEC_ARGS --upload-uri $UPLOAD_URI"
 [ -n "$SPAWN_PLAN" ] && EXEC_ARGS="$EXEC_ARGS --spawn-plan $SPAWN_PLAN"

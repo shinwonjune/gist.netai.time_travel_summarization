@@ -69,6 +69,9 @@ class JobSpec:
     extra_objects: int = 0            # 합성 객체 (keep_positions와 양립 불가)
     camera: str = "Capture_camera"
     stage: str = ""                   # 빈 값 = 빈 스테이지(스모크용)
+    # 씬 프로파일(scene_profiles.json 이름) — 아레나 범위·스테이지·카메라를 명시
+    # 지정해 데이터 로드 없이 생성. stage/camera를 함께 주면 그쪽이 우선(2026-08-15).
+    scene_profile: str = ""
     app_kit: str = ""                 # 빈 값 = 러너의 자동 발견(1개일 때만)
     upload_uri: str = ""              # 예: s3://time-travel-summarization/episodes/<job_id>
     spawn_plan: str = ""              # "zoneA:2,zoneB:2" (빈 값 = 기본 구역 전원)
@@ -105,6 +108,7 @@ class JobSpec:
             "EXTRA_OBJECTS": str(int(self.extra_objects)),
             "CAMERA": self.camera,
             "STAGE": self.stage,
+            "SCENE_PROFILE": self.scene_profile,
             "APP_KIT": self.app_kit,
             "UPLOAD_URI": self.upload_uri,
             "SPAWN_PLAN": self.spawn_plan,

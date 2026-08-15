@@ -39,6 +39,34 @@ def set_active_objects(core, objids) -> int:
     return len(new_map)
 
 
+def spawn_objects(core, count: int) -> Dict[str, str]:
+    """씬 프로파일 배치용: 데이터 로드 없이 obj001..objN 프림 풀을 새로 만든다.
+
+    regenerate_astronauts_from_loaded_data()의 "데이터 objid마다 1프림" 대신
+    개수만 받아 add_synthetic_objects()의 검증된 스폰 경로를 재사용한다.
+    기존 객체가 있으면 먼저 걷어낸다(프레시 배치 기준). 초기 위치는 호출부가
+    random_positions로 반드시 배치할 것(생성 직후 원점 겹침 — 일지 #6).
+    """
+    if not core._config:
+        carb.log_error("[TimeTravel] Config must be loaded before spawn_objects")
+        return {}
+    if not core._config.astronaut_usd:
+        core._config.astronaut_usd = DEFAULT_ASTRONAUT_USD
+        carb.log_info(f"[TimeTravel] Using default astronaut USD: {DEFAULT_ASTRONAUT_USD}")
+    if core._wander:
+        core._wander.stop()
+        core._wander = None
+    core._stage_objects.clear_timetravel_objects()
+    core._prim_map.clear()
+    if core._prim_map_full:
+        core._prim_map_full.clear()
+    added = add_synthetic_objects(core, count)
+    core.hide_all_cameras()
+    carb.log_warn(f"[TimeTravel] spawned {len(added)}/{count} objects without data "
+                  f"(scene-profile path)")
+    return added
+
+
 def add_synthetic_objects(core, count: int) -> Dict[str, str]:
     """배치 전용: 궤적 데이터에 없는 추가 우주인을 스폰해 prim_map에 등록.
 

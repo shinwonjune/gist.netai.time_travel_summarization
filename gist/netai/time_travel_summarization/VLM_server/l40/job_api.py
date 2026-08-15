@@ -95,6 +95,7 @@ class JobRequest(BaseModel):
     extra_objects: int = Field(0, ge=0)
     camera: str = "Capture_camera"
     stage: str = ""
+    scene_profile: str = ""   # scene_profiles.json 이름 — 아레나·스테이지·카메라 명시 지정
     app_kit: str = ""
     upload_uri: str = ""
     spawn_plan: str = ""
@@ -277,6 +278,7 @@ def create_job(req: JobRequest, x_api_key: Optional[str] = Header(default=None))
         render_fps=req.render_fps, speed_min=req.speed_min, speed_max=req.speed_max,
         min_objects=req.min_objects, max_objects=req.max_objects,
         extra_objects=req.extra_objects, camera=req.camera, stage=req.stage,
+        scene_profile=req.scene_profile,
         app_kit=req.app_kit, upload_uri=req.upload_uri, spawn_plan=req.spawn_plan,
         keep_positions=req.keep_positions, seed=seed,
         job_type=req.job_type, dataset=req.dataset, train_output=req.train_output,

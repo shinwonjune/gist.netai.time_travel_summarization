@@ -646,19 +646,45 @@ def run(args, core=None) -> None:
     run_t0 = _time.monotonic()          # 소요 시간 실측 → manifest["timing"]
     ep_elapsed: Dict[int, float] = {}
 
-    _ensure_stage(core, getattr(args, "stage", None))
-    camera_path = _resolve_camera(getattr(args, "camera", None))
-    ok = core.load_data()
-    _repo = getattr(core, "_repository", None)
-    print(f"[gen] load_data={ok} err={getattr(core, '_last_data_load_error', '')!r} "
-          f"repo_start={getattr(_repo, 'data_start_time', None)}")
-    # GUI와 동일 경로: regenerate...는 repo를 보존하지만 auto_generate...는 내부에서
-    # clear_timetravel_objects()로 _repository까지 지워버린다(facade.py:978) →
-    # 좌표 데이터 소실 → 배치 no-op → 전원 (0,0,0) 겹침 폭발의 근원.
-    if hasattr(core, "regenerate_astronauts_from_loaded_data"):
-        core.regenerate_astronauts_from_loaded_data()
-    elif hasattr(core, "auto_generate_astronauts"):
-        core.auto_generate_astronauts()
+    # 씬 프로파일(명시 파라미터) — 지정 시 데이터 로드 없이 아레나·객체 풀을 만든다.
+    # 미지정 시 구경로(암묵 CSV 의존) 폴백 + 경고. keep-positions는 데이터 좌표 배치라
+    # 정의상 데이터가 전제이므로 프로파일과 양립 불가.
+    profile = None
+    prof_name = getattr(args, "scene_profile", None)
+    if prof_name:
+        from .scene_profiles import coord_range_of, load_profile
+        profile = load_profile(prof_name)
+        if getattr(args, "keep_positions", False):
+            raise SystemExit("[gen] --scene-profile과 --keep-positions는 양립 불가 "
+                             "(keep-positions는 데이터 좌표 배치 = 데이터 로드 전제)")
+
+    stage_uri = getattr(args, "stage", None) or (profile["stage"] if profile else None)
+    camera_arg = getattr(args, "camera", None) or (profile["camera"] if profile else None)
+    _ensure_stage(core, stage_uri)
+    camera_path = _resolve_camera(camera_arg)
+
+    if profile:
+        core.set_coord_range_override(*coord_range_of(profile))
+        pool = max(int(args.max_objects), int(args.min_objects))
+        core.spawn_objects(pool)
+        # log_warn 아닌 print — run_job.sh가 stdout을 job.log로 모으므로 계보에 남는다.
+        print(f"[gen] scene profile={prof_name} pool={pool} "
+              f"coord_min={profile['coord_min']} coord_max={profile['coord_max']} "
+              f"(no data load)")
+    else:
+        print("[gen] deprecated: --scene-profile 미지정 — 암묵 CSV(config data_path) "
+              "의존 경로로 폴백 (scene_profiles.json 사용 권장)")
+        ok = core.load_data()
+        _repo = getattr(core, "_repository", None)
+        print(f"[gen] load_data={ok} err={getattr(core, '_last_data_load_error', '')!r} "
+              f"repo_start={getattr(_repo, 'data_start_time', None)}")
+        # GUI와 동일 경로: regenerate...는 repo를 보존하지만 auto_generate...는 내부에서
+        # clear_timetravel_objects()로 _repository까지 지워버린다(facade.py:978) →
+        # 좌표 데이터 소실 → 배치 no-op → 전원 (0,0,0) 겹침 폭발의 근원.
+        if hasattr(core, "regenerate_astronauts_from_loaded_data"):
+            core.regenerate_astronauts_from_loaded_data()
+        elif hasattr(core, "auto_generate_astronauts"):
+            core.auto_generate_astronauts()
 
     all_objids = list(getattr(core, "_prim_map_full", None) or getattr(core, "_prim_map", {}))
     if not all_objids:
@@ -977,6 +1003,10 @@ def main() -> None:
     ap.add_argument("--render-fps", type=int, default=30,
                     help="video/render fps (60의 약수; sim은 항상 60Hz). 60=데시메이션 없음. "
                          "30 선택 근거: 일지 #10 — 2배 단축 + 위상정렬·검수성 유지")
+    ap.add_argument("--scene-profile", type=str, default=None,
+                    help="scene_profiles.json의 프로파일 이름 — 아레나 범위·스테이지·"
+                         "카메라를 명시 지정(데이터 로드 불필요). --stage/--camera를 "
+                         "함께 주면 그쪽이 우선.")
     ap.add_argument("--stage", type=str, default=None,
                     help="USD to open (local path or omniverse:// URL); default: new empty stage")
     ap.add_argument("--camera", type=str, default=None,

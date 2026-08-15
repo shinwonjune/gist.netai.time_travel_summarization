@@ -90,6 +90,12 @@ class RemoteGenPanel:
             self._ext_root = ui.StringField()
             self._ext_root.model.set_value(_DEFAULT_EXT_ROOT)
         with ui.HStack(height=25, spacing=8):
+            ui.Label("Scene profile:", width=85)
+            # scene_profiles.json의 프로파일 이름. 지정 시 아레나 범위, 스테이지,
+            # 카메라를 프로파일이 제공(데이터 로드 불필요). Stage/Camera 입력이 우선.
+            self._scene_profile = ui.StringField()
+            self._scene_profile.model.set_value("aigrad_building_v1")
+        with ui.HStack(height=25, spacing=8):
             ui.Label("Stage:", width=85)
             self._stage = ui.StringField()
             self._stage.model.set_value(_DEFAULT_STAGE)
@@ -225,6 +231,7 @@ class RemoteGenPanel:
             max_objects=self._max_objects.model.get_value_as_int(),
             camera=self._camera.model.get_value_as_string().strip(),
             stage=self._stage.model.get_value_as_string().strip(),
+            scene_profile=self._scene_profile.model.get_value_as_string().strip(),
             app_kit=self._app_kit.model.get_value_as_string().strip(),
             upload_uri=upload,
             seed=self._seed.model.get_value_as_int(),

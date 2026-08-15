@@ -1,0 +1,16 @@
+{
+  "_doc": [
+    "씬 프로파일 레지스트리 — 생성(generate) 잡이 의존하는 씬 정의를 명시 파라미터로 둔다.",
+    "coord_min/coord_max는 배회 아레나의 좌표 범위(스테이지 단위)로, bounds 계산은",
+    "physics_service.set_physics_mode의 기존 수학(min_height 포함)을 그대로 태운다.",
+    "머신 종속 값(자격증명, 로컬 경로)은 여기 두지 않는다 — 그건 .env 소관."
+  ],
+  "aigrad_building_v1": {
+    "stage": "omniverse://10.38.38.32/Projects/Dream-AI_Plus_Twin/Workspace_Personal/swj/AI-Grad_Building/A_AI-Grad_Building.usd",
+    "camera": "Capture_camera",
+    "coord_min": [206.0, 89.5, -2879.0],
+    "coord_max": [1554.0, 200.0, -1258.0],
+    "spawn_floor": 89.5,
+    "note": "regime1/regime2 생산이 암묵 의존하던 data/living_trajectory_1min_0.2s.csv의 coord_range를 그대로 동결 (2026-08-15). 유도 box: center=(880.0, 239.5, -2068.5) size=(1348.0, 300.0, 1621.0)"
+  }
+}

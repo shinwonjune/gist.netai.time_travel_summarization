@@ -1,5 +1,5 @@
 {
-  "data_path": "${LOCAL_LAKE_ROOT}/${LAKE_DATASET}/manifest.json",
+  "data_path": "${DATA_PATH}",
 
   "auto_generate": true,
 

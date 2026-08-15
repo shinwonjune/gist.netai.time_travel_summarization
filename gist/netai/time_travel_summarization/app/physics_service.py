@@ -145,7 +145,14 @@ def set_physics_mode(core) -> None:
     # walls 위치·크기를 trajectory 좌표 범위 + margin으로 자동 결정
     # (hardcoded 5×3×5 / origin은 사용자 trajectory 범위와 안 맞을 수 있음)
     is_y_up = UsdGeom.GetStageUpAxis(stage) == UsdGeom.Tokens.y
-    coord_range = core._repository.get_coord_range()
+    # 아레나 범위 우선순위: 명시 오버라이드(씬 프로파일) > 로드된 궤적 데이터 > 기본값.
+    # 오버라이드가 있으면 데이터 로드 없이도 같은 수학으로 같은 박스가 나온다.
+    coord_range = getattr(core, "_coord_range_override", None)
+    arena_src = "profile-override"
+    if not coord_range:
+        repo = getattr(core, "_repository", None)
+        coord_range = repo.get_coord_range() if repo is not None else None
+        arena_src = "trajectory-data" if coord_range else "fallback-default"
     min_height = 3.0 * m_to_units      # 최소 천장 높이 (m)
     if coord_range:
         mins, maxs = coord_range
@@ -178,7 +185,13 @@ def set_physics_mode(core) -> None:
             box_center = (0.0, 0.0, 1.5)
             box_size = (5.0, 5.0, 3.0)
 
-    carb.log_info(f"[Physics] bounding box center={box_center} size={box_size} up_axis={'Y' if is_y_up else 'Z'}")
+    # log_warn — 헤드리스 job.log(stdout) 계보 스탬프. 어느 아레나 정의로 생성됐는지
+    # 사후 판정용(마커·콜라이더 스탬프와 같은 취지). log_info는 job.log에 안 실린다.
+    carb.log_warn(
+        f"[Physics] arena source={arena_src} "
+        f"center=({box_center[0]:.1f}, {box_center[1]:.1f}, {box_center[2]:.1f}) "
+        f"size=({box_size[0]:.1f}, {box_size[1]:.1f}, {box_size[2]:.1f}) "
+        f"up_axis={'Y' if is_y_up else 'Z'}")
     create_bounding_box(stage, center=box_center, size=box_size)
     # Persist bounds so automation can place objects at random in-bounds positions.
     core._physics_bounds = {

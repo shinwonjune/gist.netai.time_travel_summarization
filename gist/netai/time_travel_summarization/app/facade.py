@@ -437,6 +437,13 @@ class TimeTravelCore:
         """에피소드 재현성: set_physics_mode 전에 호출하면 wander heading이 seed 결정적."""
         self._wander_seed = seed
 
+    def set_coord_range_override(self, mins, maxs) -> None:
+        """배회 아레나 범위를 명시 지정(씬 프로파일 경로). set_physics_mode 전에
+        호출하면 궤적 데이터의 coord_range 대신 이 값으로 bounds를 계산한다 —
+        생성이 데이터 로드 없이 돌 수 있게 하는 승격점(2026-08-15)."""
+        self._coord_range_override = (
+            tuple(float(v) for v in mins), tuple(float(v) for v in maxs))
+
     def set_near_miss_gap(self, gap: float) -> None:
         """near-miss 안무 활성화(gap>0, cm): 짝끼리 gap까지 접근했다 흩어진다(방식은
         set_near_miss_mode) — 접촉이 없어 GT 충돌 0건. set_physics_mode 전에 호출해야
@@ -585,6 +592,9 @@ class TimeTravelCore:
 
     def add_synthetic_objects(self, count: int) -> Dict[str, str]:
         return object_service.add_synthetic_objects(self, count)
+
+    def spawn_objects(self, count: int) -> Dict[str, str]:
+        return object_service.spawn_objects(self, count)
 
     def auto_generate_astronauts(self) -> Dict[str, str]:
         return object_service.auto_generate_astronauts(self)
