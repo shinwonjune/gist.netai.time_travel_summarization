@@ -8,8 +8,8 @@
   "aigrad_building_v1": {
     "stage": "omniverse://10.38.38.32/Projects/Dream-AI_Plus_Twin/Workspace_Personal/swj/AI-Grad_Building/A_AI-Grad_Building.usd",
     "camera": "Capture_camera",
-    "coord_min": [206.0, 89.5, -2879.0],
-    "coord_max": [1554.0, 200.0, -1258.0],
+    "coord_min": [206.0, 89.5, -2935.0],
+    "coord_max": [1476.0, 200.0, -1490.0],
     "spawn_floor": 89.5,
     "note": "regime1/regime2 생산이 암묵 의존하던 data/living_trajectory_1min_0.2s.csv의 coord_range를 그대로 동결 (2026-08-15). 유도 box: center=(880.0, 239.5, -2068.5) size=(1348.0, 300.0, 1621.0)"
   }

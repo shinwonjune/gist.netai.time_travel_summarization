@@ -423,9 +423,17 @@ def sample_zone_positions(zones: dict, plan: List[Tuple[str, int]], objids: List
     return out
 
 
-def load_spawn_zones(args, core) -> dict:
-    """--spawn-zones(JSON 파일 경로 또는 인라인 JSON) 로드. 미지정 시 기본 구역 =
-    궤적 데이터 좌표 범위(순수 데이터 조회 — physics 불필요) + --spawn-floor."""
+def load_spawn_zones(args, core, profile: Optional[dict] = None) -> dict:
+    """스폰 구역 결정. 우선순위: --spawn-zones(명시) > 씬 프로파일 > 궤적 데이터.
+
+    구역은 아레나(벽) 범위 그대로 두고, 실제 여백은 sample_zone_positions의
+    margin_frac(각 변 10%)이 준다 — 벽에 딱 붙어 스폰되면 물리가 켜질 때 끼거나
+    밀려나므로 여백 자체는 필요하지만, 여기서 또 깎으면 이중 축소가 된다.
+
+    프로파일 미지정 시에는 구경로(궤적 데이터 범위)로 폴백한다. 주의: 확장이
+    on_startup에서 load_data()를 부르므로 repo에는 .env의 데이터가 로드돼 있고,
+    그 범위가 프로파일과 다르면 벽과 스폰이 어긋난다 — 프로파일 경로를 쓸 것.
+    """
     raw = getattr(args, "spawn_zones", None)
     if raw:
         p = Path(raw)
@@ -435,14 +443,26 @@ def load_spawn_zones(args, core) -> dict:
                 if key not in z:
                     raise ValueError(f"zone {name!r}: {key!r} missing")
         return zones
-    repo = getattr(core, "_repository", None)
-    cr = repo.get_coord_range() if repo is not None and hasattr(repo, "get_coord_range") else None
-    if not cr:
-        raise RuntimeError("spawn zones: coord range unavailable; provide --spawn-zones")
-    mins, maxs = cr
-    return {"trajectory_bbox": {"min": [float(mins[0]), float(mins[2])],
-                                "max": [float(maxs[0]), float(maxs[2])],
-                                "floor": float(getattr(args, "spawn_floor", 89.5))}}
+
+    floor = float(getattr(args, "spawn_floor", 89.5))
+    if profile:
+        mins, maxs = profile["coord_min"], profile["coord_max"]
+        floor = float(profile.get("spawn_floor", floor))
+        src = "profile"
+    else:
+        repo = getattr(core, "_repository", None)
+        cr = repo.get_coord_range() if repo is not None and hasattr(repo, "get_coord_range") else None
+        if not cr:
+            raise RuntimeError("spawn zones: coord range unavailable; provide --spawn-zones")
+        mins, maxs = cr
+        src = "trajectory-data"
+
+    lo0, hi0 = float(mins[0]), float(maxs[0])
+    lo1, hi1 = float(mins[2]), float(maxs[2])
+    print(f"[gen] spawn zone source={src} "
+          f"x=[{lo0:.1f}, {hi0:.1f}] z=[{lo1:.1f}, {hi1:.1f}] floor={floor:.1f} "
+          f"(실제 표집은 sample_zone_positions의 margin 10% 안쪽)")
+    return {"arena": {"min": [lo0, lo1], "max": [hi0, hi1], "floor": floor}}
 
 
 def write_run_manifest(out_root: Path, args_dict: dict, cfgs: List[EpisodeConfig],
@@ -748,7 +768,7 @@ def run(args, core=None) -> None:
     if not getattr(args, "keep_positions", False):
         if getattr(args, "spawn_plan", None) and args.min_objects != args.max_objects:
             raise RuntimeError("--spawn-plan은 고정 객체 수가 전제: --min-objects == --max-objects")
-        spawn_zones = load_spawn_zones(args, core)
+        spawn_zones = load_spawn_zones(args, core, profile)
         print(f"[gen] spawn zones: { {k: v for k, v in spawn_zones.items()} } "
               f"plan={getattr(args, 'spawn_plan', None) or '(첫 구역에 전원)'}")
 

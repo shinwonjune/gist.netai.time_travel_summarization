@@ -218,6 +218,20 @@ class NetAITimetravelDreamAI(_get_i_ext_base()):
             try:
                 if hasattr(self._core, "_wander") and self._core._wander:
                     self._core._wander.stop()
+                # 물리 잔재 제거: 우주인 프림은 아래 clear_timetravel_objects가 지우지만
+                # 벽(/World/PhysicsWalls)은 set_playback_mode 경로에서만 지워져서,
+                # Physics 모드인 채로 확장을 끄면 스테이지에 남았다(2026-08-16 확인).
+                # 남은 벽은 다음 세션에서 옛 아레나 좌표로 보이므로 여기서 걷어낸다.
+                # 우리가 만든 경로만 건드린다 — 사용자 프림은 손대지 않는다.
+                try:
+                    import omni.usd
+
+                    stage = omni.usd.get_context().get_stage()
+                    if stage and stage.GetPrimAtPath("/World/PhysicsWalls"):
+                        stage.RemovePrim("/World/PhysicsWalls")
+                        carb.log_info("[Extension] PhysicsWalls removed")
+                except Exception as wall_err:
+                    carb.log_error(f"[Extension] Error removing PhysicsWalls: {wall_err}")
                 self._core.clear_timetravel_objects()
                 carb.log_info("[Extension] TimeTravel objects cleared")
             except Exception as e:

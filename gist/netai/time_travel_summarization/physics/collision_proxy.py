@@ -88,7 +88,7 @@ def wrap_with_collision_proxy(
     radius: float = 0.4,
     height: float = 1.7,
     mass: float = 80.0,
-    restitution: float = 0.9,
+    restitution: float = 1,
     visible: bool = False,
 ):
     """Create an invisible child collider and make the target prim a rigid body."""
