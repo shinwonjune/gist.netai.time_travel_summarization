@@ -511,18 +511,41 @@ def _get_core():
 
 
 def apply_positions(core, positions: Dict[str, Tuple[float, float, float]]) -> None:
+    """프림 이동 — translate op를 찾아/만들어 직접 설정 (XformCommonAPI 금지).
+
+    XformCommonAPI는 표준 op 스택에서만 동작하고, physics 에피소드를 거친 프림은
+    PhysX가 스택을 바꿔 놓아 SetTranslate가 **조용히 무시**된다(2026-08-15 게이트
+    실측: ep0만 적용되고 ep1+는 전부 무시 → 매 에피소드 같은 자리에서 시작 + 즉시
+    충돌. run19의 "이동 명령 무시 정황"의 정체). 구경로에서는 set_to_earliest_time의
+    playback 갱신이 스택을 만져 우연히 가려졌던 결함이라, playback 컨트롤러가 쓰는
+    검증된 패턴(TypeTranslate op find-or-add)으로 통일한다.
+    """
     import omni.usd
     from pxr import UsdGeom, Gf
 
     stage = omni.usd.get_context().get_stage()
     prim_map = getattr(core, "_prim_map", {})
+    skipped = []
     for objid, xyz in positions.items():
         path = prim_map.get(objid)
-        if not path:
+        prim = stage.GetPrimAtPath(path) if path else None
+        if not (prim and prim.IsValid()):
+            skipped.append(objid)
             continue
-        prim = stage.GetPrimAtPath(path)
-        if prim and prim.IsValid():
-            UsdGeom.XformCommonAPI(prim).SetTranslate(Gf.Vec3d(float(xyz[0]), float(xyz[1]), float(xyz[2])))
+        xformable = UsdGeom.Xformable(prim)
+        translate_op = None
+        for op in xformable.GetOrderedXformOps():
+            if op.GetOpType() == UsdGeom.XformOp.TypeTranslate:
+                translate_op = op
+                break
+        if translate_op is None:
+            translate_op = xformable.AddTranslateOp()
+        try:
+            translate_op.Set(Gf.Vec3d(float(xyz[0]), float(xyz[1]), float(xyz[2])))
+        except Exception:                      # 기존 op가 float 정밀도인 경우
+            translate_op.Set(Gf.Vec3f(float(xyz[0]), float(xyz[1]), float(xyz[2])))
+    if skipped:
+        print(f"[gen] apply_positions: prim 없음/무효 → 미적용 {skipped}")
 
 
 def precompute_floor_positions(core, bounds: dict, cfgs: List[EpisodeConfig],
