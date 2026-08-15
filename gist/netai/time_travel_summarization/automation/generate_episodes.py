@@ -652,7 +652,10 @@ def run(args, core=None) -> None:
     profile = None
     prof_name = getattr(args, "scene_profile", None)
     if prof_name:
-        from .scene_profiles import coord_range_of, load_profile
+        # 절대 임포트 — 이 파일은 kit이 스크립트로 직접 실행하므로(부모 패키지 없음)
+        # 상대 임포트가 불가하다(파일 내 다른 프로젝트 임포트와 같은 규칙).
+        from gist.netai.time_travel_summarization.automation.scene_profiles import (
+            coord_range_of, load_profile)
         profile = load_profile(prof_name)
         if getattr(args, "keep_positions", False):
             raise SystemExit("[gen] --scene-profile과 --keep-positions는 양립 불가 "
