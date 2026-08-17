@@ -1058,7 +1058,18 @@ class WanderController:
     def _emit_collision(self, prim, prim_path: str, kind: str) -> None:
         if self._on_collision is None:
             return
-        pos = self._world_position(prim)
+        # 기록 좌표는 콜라이더 프록시 중심 — trace(collider-trace-v1)와 같은 규약.
+        # 접촉거리 2r은 프록시 중심 간 거리이므로 collisions CSV의 좌표도 같은 점을
+        # 가리켜야 두 채널이 정합한다(피벗 기록은 collider-trace 이전의 잔재였다).
+        # 프록시가 없으면(비물리 상황 등) 피벗 폴백. 조향·안무는 이 함수와 무관.
+        rec_prim = prim
+        try:
+            child = prim.GetChild("__phys_proxy__")
+            if child and child.IsValid():
+                rec_prim = child
+        except Exception:
+            pass
+        pos = self._world_position(rec_prim)
         position = (float(pos[0]), float(pos[1]), float(pos[2])) if pos is not None else None
         try:
             self._on_collision(prim_path, position, kind)
