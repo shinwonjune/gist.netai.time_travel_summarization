@@ -118,6 +118,36 @@ def stop_trace(core) -> Optional[str]:
     return str(out)
 
 
+def _profile_for_open_stage(stage):
+    """열린 스테이지의 루트 레이어와 stage가 일치하는 씬 프로파일 -> (이름, 프로파일).
+
+    GUI에는 생성 잡과 달리 프로파일을 넣어 주는 곳이 없어, 벽이 "로드된 좌표 데이터"의
+    범위로 만들어졌다(2026-08-17 실측: 레이크 데이터셋 범위로 South z=-2819.361).
+    아레나는 씬의 물리적 사실이므로 데이터가 아니라 씬에서 와야 한다 — 열린 씬에
+    해당하는 프로파일이 있으면 그것을 쓰고, 없으면(다른 씬) 기존 폴백을 유지한다.
+    """
+    try:
+        layer = stage.GetRootLayer()
+        opened = (getattr(layer, "identifier", "") or "").strip()
+        if not opened:
+            return None
+        from ..automation.scene_profiles import load_profile, registry_path
+
+        import json
+
+        raw = json.loads(registry_path().read_text(encoding="utf-8"))
+        for name in (k for k in raw if not k.startswith("_")):
+            prof = load_profile(name)
+            # 경로 표기 차이(대소문자·구분자)를 흡수해 비교 — 같은 씬이면 매칭된다.
+            if str(prof.get("stage", "")).replace("\\", "/").lower() == \
+                    opened.replace("\\", "/").lower():
+                return name, prof
+        carb.log_info(f"[Physics] no scene profile for open stage: {opened}")
+    except Exception as exc:
+        carb.log_warn(f"[Physics] scene profile lookup failed: {exc!r}")
+    return None
+
+
 def set_physics_mode(core) -> None:
     """Enable PhysX-driven wandering for the configured astronaut prims."""
     import omni.usd
@@ -145,10 +175,17 @@ def set_physics_mode(core) -> None:
     # walls 위치·크기를 trajectory 좌표 범위 + margin으로 자동 결정
     # (hardcoded 5×3×5 / origin은 사용자 trajectory 범위와 안 맞을 수 있음)
     is_y_up = UsdGeom.GetStageUpAxis(stage) == UsdGeom.Tokens.y
-    # 아레나 범위 우선순위: 명시 오버라이드(씬 프로파일) > 로드된 궤적 데이터 > 기본값.
-    # 오버라이드가 있으면 데이터 로드 없이도 같은 수학으로 같은 박스가 나온다.
+    # 아레나 범위 우선순위: 명시 오버라이드(생성 잡) > 열린 스테이지에 맞는 씬 프로파일
+    # > 로드된 궤적 데이터 > 기본값. 오버라이드/프로파일이면 데이터 로드 없이도 같은
+    # 수학으로 같은 박스가 나온다.
     coord_range = getattr(core, "_coord_range_override", None)
     arena_src = "profile-override"
+    if not coord_range:
+        matched = _profile_for_open_stage(stage)
+        if matched:
+            name, prof = matched
+            coord_range = (prof["coord_min"], prof["coord_max"])
+            arena_src = f"profile:{name}"
     if not coord_range:
         repo = getattr(core, "_repository", None)
         coord_range = repo.get_coord_range() if repo is not None else None
