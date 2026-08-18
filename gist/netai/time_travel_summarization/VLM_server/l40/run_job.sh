@@ -2,8 +2,8 @@
 # 스펙(env) 구동 데이터 생성 잡 러너 — remote_generation.py의 실행면 짝.
 #
 # 입력: JobSpec.to_env()가 렌더링한 env 변수들 (JOB_ID, EPISODES, DURATION, GPU,
-#       RENDER_FPS, SPEED_MIN/MAX, MIN/MAX/EXTRA_OBJECTS, CAMERA, STAGE, APP_KIT,
-#       UPLOAD_URI, SPAWN_PLAN, KEEP_POSITIONS) + NEAR_MISS/NEAR_MISS_GAP/NEAR_MISS_MODE
+#       RENDER_FPS, SPEED_MIN/MAX, MIN/MAX/EXTRA_OBJECTS, CAMERA, STAGE, SCENE_PROFILE,
+#       APP_KIT, UPLOAD_URI, SPAWN_PLAN, KEEP_POSITIONS, SEED) + NEAR_MISS/NEAR_MISS_GAP/NEAR_MISS_MODE
 #       (대조 데이터셋, 기본 모드 swerve) + NEAR_MISS_AVOID/TURN_RADIUS/AIM_FRAC
 #       (swerve 회피 곡선의 완만함 — 미지정 시 생성기 기본값) + NEAR_MISS_START_JITTER/
 #       SPEED_MIN_FRAC/SPEED_MAX_FRAC/DEPART_SPREAD (조우 지점의 다양성)
@@ -29,6 +29,9 @@ MAX_OBJECTS="${MAX_OBJECTS:-4}"
 EXTRA_OBJECTS="${EXTRA_OBJECTS:-0}"
 CAMERA="${CAMERA:-}"
 STAGE="${STAGE:-}"
+# 씬 프로파일(scene_profiles.json 이름). 미지정 잡도 있으므로 기본값이 반드시 필요하다
+# — set -u에서 정의 없이 참조하면 kit 기동 전에 "unbound variable"로 러너가 죽는다.
+SCENE_PROFILE="${SCENE_PROFILE:-}"
 UPLOAD_URI="${UPLOAD_URI:-}"
 SPAWN_PLAN="${SPAWN_PLAN:-}"
 KEEP_POSITIONS="${KEEP_POSITIONS:-}"
