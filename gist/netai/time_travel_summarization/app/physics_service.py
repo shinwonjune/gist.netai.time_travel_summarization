@@ -254,9 +254,11 @@ def set_physics_mode(core) -> None:
     # 객체 간 충돌 거리(거리 기반 fallback 전용): 스치는 접촉까지 잡도록 2.2r.
     # contact report가 기본 탐지원이므로 이 값은 use_contact_reports=False일 때만 쓰임.
     collision_distance = 2.2 * max(proxy_radii) if proxy_radii else 1.0 * m_to_units
-    # 라벨/observability용 접촉 정의: contact report는 실제 접촉(중심거리 ≈ 2r)에서
-    # 발화하므로 사이드카에는 2.0r을 기록 → 오프라인 recall 분석이 라벨과 같은
-    # 규칙을 재현한다. (fallback 탐지 2.2r과 정의가 다름에 주의)
+    # 라벨/observability용 접촉 정의: contact report는 실제 접촉 근방에서 발화하므로
+    # 사이드카에는 2.0r을 기록 → 오프라인 recall 분석이 라벨과 같은 규칙을 재현한다.
+    # 정확히는 PhysX가 contact offset 여유 껍질 진입에서 발화하고 시점도 물리 스텝
+    # 단위로 끊겨, 콜백 순간의 실측 중심거리는 2r보다 조금 크다(regime3 실측
+    # 60.6~62.3 — physics일지 #19(c)). (fallback 탐지 2.2r과 정의가 다름에 주의)
     core._collision_distance = 2.0 * max(proxy_radii) if proxy_radii else 1.0 * m_to_units
     # near-miss: gap이 접촉 거리(2r)보다 넉넉히 커야 GT가 0으로 유지된다.
     # 작으면 안무가 "정지"하기 전에 프록시가 먼저 닿아 contact report(kind=object)가 발화한다.

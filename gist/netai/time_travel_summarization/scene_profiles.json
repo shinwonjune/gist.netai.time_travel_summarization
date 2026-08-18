@@ -11,6 +11,6 @@
     "coord_min": [206.0, 89.5, -2935.0],
     "coord_max": [1476.0, 200.0, -1490.0],
     "spawn_floor": 89.5,
-    "note": "regime1/regime2 생산이 암묵 의존하던 data/living_trajectory_1min_0.2s.csv의 coord_range를 그대로 동결 (2026-08-15). 유도 box: center=(880.0, 239.5, -2068.5) size=(1348.0, 300.0, 1621.0)"
+    "note": "최초 항목(2026-08-15)은 regime1/regime2 생산이 암묵 의존하던 data/living_trajectory_1min_0.2s.csv의 coord_range(x 206~1554, z -2879~-1258)를 그대로 옮긴 값이었다. 2026-08-16(bed622e) 실제 씬의 벽 위치에 맞춰 좌표를 수정 — 현재 유도 box: center=(841.0, 239.5, -2212.5) size=(1270.0, 300.0, 1445.0). job.log의 [Physics] arena source= 스탬프와 대조해 확인할 것. prod-20260817-regime3-r1~r10은 이 값으로 생성됐다."
   }
 }
