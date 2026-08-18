@@ -1169,8 +1169,12 @@ class WanderController:
     def _handle_object_collisions(self, now: float) -> None:
         """Pairwise proximity check: when two managed prims overlap, bump them.
 
-        Contact reports are unreliable in this Kit build, so we detect
-        object-object collisions by center distance using known positions.
+        거리 기반 **폴백** 경로다. 기본값 ``use_contact_reports=True``에서는 PhysX
+        contact report 콜백(``_on_contact_event``)이 객체-객체 충돌 GT를 만들고
+        이 함수는 아예 호출되지 않는다(``_wander_step``의 분기). 콜백 구독이 되지
+        않는 빌드이거나 ``use_contact_reports=False``로 끈 경우에만, 중심 거리가
+        ``collision_distance``(2.2r — 접촉 정의 2r보다 넉넉) 미만인 쌍을 충돌로
+        간주해 대신 판정한다.
         """
         if self._collision_distance <= 0.0:
             return

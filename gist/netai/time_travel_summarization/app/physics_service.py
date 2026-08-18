@@ -172,8 +172,6 @@ def set_physics_mode(core) -> None:
     m_to_units = 1.0 / meters_per_unit
     carb.log_info(f"[Physics] stage metersPerUnit={meters_per_unit} m_to_units={m_to_units}")
 
-    # walls 위치·크기를 trajectory 좌표 범위 + margin으로 자동 결정
-    # (hardcoded 5×3×5 / origin은 사용자 trajectory 범위와 안 맞을 수 있음)
     is_y_up = UsdGeom.GetStageUpAxis(stage) == UsdGeom.Tokens.y
     # 아레나 범위 우선순위: 명시 오버라이드(생성 잡) > 열린 스테이지에 맞는 씬 프로파일
     # > 로드된 궤적 데이터 > 기본값. 오버라이드/프로파일이면 데이터 로드 없이도 같은

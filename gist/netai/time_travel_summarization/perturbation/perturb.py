@@ -5,7 +5,8 @@
     id_switch      연관 오류 — t_s 이후 두 objid 영구 스왑
     fragmentation  연관 오류 — 가림 후 재연관 실패로 새 ID 발급
     occlusion      결손 — drop / hold / linear(오프라인 보간) / extrap(온라인 칼만 coasting)
-    downsample     수집 주기 하향 (30Hz -> 실세계 1~10Hz 대역)
+    downsample     수집 주기 하향 — 시간 기반이라 소스 주기(실측 60Hz)와 무관하게
+                   목표 Hz(실세계 1~20Hz 대역)를 낸다
 
 원칙: GT는 절대 건드리지 않는다(입력 좌표만 오염). 모든 함수는 순수 변환 —
 rows(dict 리스트)를 받아 새 리스트를 반환하고, 난수는 호출자가 시드로 고정한다.

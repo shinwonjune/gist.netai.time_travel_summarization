@@ -1,8 +1,14 @@
 """
-VLM 서버에 동영상을 업로드하고, VLM 분석을 요청하고, 결과를 저장하는 `VLM Client module` 의 core.
-default_chunk_duration=2 초, default_chunk_overlap_duration=0 초로 설정됨.
+VLM 서버에 동영상을 보내 분석을 요청하고 결과를 저장하는 `VLM Client module`의 core.
+영상은 2초 청크로 잘라 청크마다 한 번 요청한다(청크 겹침 0초) — 학습 클립 길이와
+같게 맞춘 값이라 train == infer 정합이 유지된다.
 
-VLM 서버 통신: _initialize_client 메서드에서 직접 IP 주소와 포트를 지정하여 통신.
+백엔드 선택과 주소는 **환경변수**가 정한다(코드에 IP를 박지 않는다):
+  VLM_API=openai (기본) -> utils.vllm_client.VLLMClient, 주소는 VLM_BASE_URL
+                           (미설정 시 http://localhost:38011 폴백 + 경고)
+  VLM_API=vss           -> 레거시 VSS(VIA) 경유, 주소는 VIA_BACKEND
+                           (미설정 시 http://localhost:8100 폴백 + 경고)
+자세한 배선은 _initialize_client 참조.
 """
 
 import os

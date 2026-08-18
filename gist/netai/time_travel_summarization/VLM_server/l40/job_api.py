@@ -1,10 +1,11 @@
 """잡 REST API (FastAPI) — 제어면의 서버측 데몬.
 
-잡 타입 (job_type):
+잡 타입 (job_type — 정본은 remote_generation.JOB_TYPES):
   generate     데이터 생성 (run_job.sh — kit headless 배치)
   train        LoRA 학습 (run_train.sh — training/qwen3vl_lora_swift.sh 래핑)
   serve_start  vLLM 서빙 기동 (run_serve.sh — 상주 프로세스는 러너 밖에서 지속)
   serve_stop   vLLM 서빙 중지
+  replay       좌표 구간 재연 렌더 (run_replay.sh — replay_start/end·data_uri 필요)
 
 GPU 역할 분리: env `SERVE_GPU`(기본 0)는 서빙 전용. serve_* 잡은 이 GPU로
 강제되고, generate/train 잡은 이 GPU를 지정하면 422로 거부된다 —
@@ -22,7 +23,7 @@ SSH 경로로 제출한 잡과 완전히 동일하게 동작한다.
 
 엔드포인트:
   POST /jobs            JobRequest JSON → 검증 → 큐 적재 → 202 {job_id, gpu}
-  GET  /jobs            전체 잡 목록 (status 파일 스캔)
+  GET  /jobs            전체 잡 목록 (스토어가 원본, 진행 필드만 status 파일 병합)
   GET  /jobs/{id}       상태 (state=queued|running|done|failed, episodes_done/total)
   GET  /jobs/{id}/log?tail=50
   GET  /health          큐 현황 + serve_gpu
@@ -78,7 +79,7 @@ class JobRequest(BaseModel):
     """JobSpec의 HTTP 입면 — 검증 규칙 포함. 미지정 job_id/seed는 서버가 발급."""
 
     job_id: Optional[str] = None
-    job_type: str = "generate"          # generate | train | serve_start | serve_stop
+    job_type: str = "generate"          # generate|train|serve_start|serve_stop|replay
     dataset: str = ""                   # train: 데이터셋 디렉토리 (서버 경로)
     train_output: str = ""              # train: 어댑터 출력 디렉토리 (빈 값 = 러너 기본)
     model_path: str = ""                # serve_start: 병합 모델 디렉토리

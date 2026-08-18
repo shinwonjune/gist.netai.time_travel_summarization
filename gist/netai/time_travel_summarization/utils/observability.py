@@ -10,9 +10,14 @@ Method (trajectory mode, rigorous):
   1. Read a HIGH-RATE position trace (TraceRecorder output, ~30Hz) as the
      near-continuous reference truth.
   2. For each object pair, reconstruct overlap intervals using the SAME contact
-     rule the simulator uses: horizontal center distance < collision_distance
-     (physics/wander_controller.py:330-332, collision_distance = 2.2*radius @
-     app/facade.py:665). Each interval is one true collision event of duration tau.
+     rule the labels use: horizontal center distance < collision_distance, read
+     from the sidecar. That sidecar value is 2*radius (app/physics_service.py,
+     ``core._collision_distance``) because the GT rows come from PhysX contact
+     reports, which fire when the two proxies touch -- i.e. at center distance
+     ~2r (60.0 in regime3). Do NOT confuse it with the 2.2*radius threshold in
+     ``WanderController._handle_object_collisions``: that one is only the
+     distance-based fallback used when contact reports are switched off.
+     Each interval is one true collision event of duration tau.
   3. For each candidate content rate f, an event is "observable" iff a rate-f
      grid point falls inside its window -> observable fraction = recall ceiling.
   4. Report observability(f), the tau distribution, and the analytic phase-average
@@ -42,7 +47,7 @@ from typing import Dict, List, Tuple
 
 
 # --------------------------------------------------------------------------- #
-# parsing (mirrors playback/trajectory_repository.py:174-189)
+# parsing (mirrors playback.trajectory_repository.TrajectoryRepository.parse_timestamp)
 # --------------------------------------------------------------------------- #
 def parse_ts(s: str) -> datetime.datetime:
     s = (s or "").strip().replace("Z", "+00:00")

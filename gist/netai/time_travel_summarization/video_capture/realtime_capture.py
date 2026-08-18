@@ -317,7 +317,8 @@ class RealtimeCaptureRunner:
                         x=px[0],
                         y=px[1],
                         text=_extract_objid_number(objid),
-                        radius=MARKER_RADIUS_PX,   # v2 규약(overlay_composer 주석 참조)
+                        radius=MARKER_RADIUS_PX,   # regime2에서 확정, regime3도 그대로
+                                                   # 유지 (overlay_composer 주석 참조)
                         font_size=12,
                     )
                 )

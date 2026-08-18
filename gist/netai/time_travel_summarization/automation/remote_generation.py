@@ -3,11 +3,15 @@
 설계 원칙: **잡 스펙(무엇을)과 전송(어디서)을 분리**한다.
 - JobSpec — 생성 파라미터 전체의 명시적 집합. extension UI·CLI·agentic 라우터가
   공용으로 쓰는 계약이며, 값은 전부 env 변수로 렌더링되어 러너에 전달된다.
-- Transport — 같은 러너(run_job.sh)를 실행하는 위치만 다르다:
-    LocalTransport — 같은 머신에서 실행 (서버 상주형)
+- Transport — 잡을 "어디서 어떻게" 시작하느냐만 다르다:
+    LocalTransport — 같은 머신에서 러너(run_job.sh)를 직접 실행 (서버 상주형)
     SSHTransport   — `ssh <host>`로 원격 실행 (키 기반 인증 전제)
-- 실행은 tmux 세션으로 분리(detach)되어 제출 즉시 반환하고 SSH가 끊겨도 지속된다.
-- 상태는 러너가 갱신하는 status 파일(KEY=VALUE)을 transport로 읽어 폴링한다.
+    RESTTransport  — job_api 데몬에 HTTP로 제출(운영 기본). 러너를 직접 띄우지
+                     않고 데몬의 GPU 큐에 넣으므로 같은 GPU의 잡이 직렬화된다.
+- Local/SSH 경로의 실행은 tmux 세션으로 분리(detach)되어 제출 즉시 반환하고 SSH가
+  끊겨도 지속된다. REST 경로는 데몬 워커가 러너를 실행한다.
+- 상태 조회도 transport별로 갈린다: Local/SSH는 러너가 갱신하는 status 파일
+  (KEY=VALUE)을 읽고, REST는 `GET /jobs/{id}`(잡 스토어가 원본)를 읽는다.
 
 Kit 의존이 없어 어느 파이썬에서든 임포트·테스트 가능 (self-test: 이 파일을 직접 실행).
 """
@@ -79,7 +83,7 @@ class JobSpec:
     # 마스터 시드 — 에피소드 조건(시각·속도·배치·배회)이 전부 여기서 유도되므로
     # run마다 달라야 한다(같으면 이름만 다른 완전 중복 데이터가 재생성됨).
     seed: int = 42
-    # ---- 잡 타입 확장 (generate | train | serve_start | serve_stop) ---------
+    # ---- 잡 타입 확장 (generate | train | serve_start | serve_stop | replay) --
     # generate 외 타입은 아래 필드만 소비한다. 러너는 runner_rel_for()로 분기.
     job_type: str = "generate"
     dataset: str = ""       # train: 서버측 데이터셋 디렉토리 (build_dataset 산출물)

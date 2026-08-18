@@ -725,7 +725,8 @@ def run(args, core=None) -> None:
         print(f"[gen] load_data={ok} err={getattr(core, '_last_data_load_error', '')!r} "
               f"repo_start={getattr(_repo, 'data_start_time', None)}")
         # GUI와 동일 경로: regenerate...는 repo를 보존하지만 auto_generate...는 내부에서
-        # clear_timetravel_objects()로 _repository까지 지워버린다(facade.py:978) →
+        # clear_timetravel_objects()로 _repository까지 지워버린다
+        # (app/object_service.clear_timetravel_objects) →
         # 좌표 데이터 소실 → 배치 no-op → 전원 (0,0,0) 겹침 폭발의 근원.
         if hasattr(core, "regenerate_astronauts_from_loaded_data"):
             core.regenerate_astronauts_from_loaded_data()
