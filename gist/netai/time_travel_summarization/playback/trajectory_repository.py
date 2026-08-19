@@ -21,6 +21,8 @@ class TrajectoryRepository:
         # objid별 (first_sample_t, last_sample_t) — load 시 1회 계산·캐시. 재생기가
         # 트랙 시작 전/종료 후 객체를 숨겨 죽은 트랙 잔상(가짜 충돌)을 막는 근거.
         self._object_ranges: Dict[str, Tuple[datetime.datetime, datetime.datetime]] = {}
+        # objid별 표본 시각 목록 — 결손 인지 despawn(get_object_last_sample) 전용 캐시.
+        self._object_samples: Dict[str, List[datetime.datetime]] = {}
         # lookup mode
         self._lookup_mode: str = "linear"
         self._hybrid = LkvForwardBisectHybrid()
@@ -128,6 +130,28 @@ class TrajectoryRepository:
                 else:
                     span[1] = dt
         return {objid: (span[0], span[1]) for objid, span in acc.items()}
+
+    def get_object_last_sample(
+        self, timestamp: datetime.datetime
+    ) -> Dict[str, datetime.datetime]:
+        """objid별 "timestamp 이하의 마지막 표본 시각". 결손 인지 despawn 전용.
+
+        표본 시각 목록을 objid별로 한 번 만들어 캐시하고(_object_samples) 이분 탐색한다.
+        그 시각 이전 표본이 없는 objid는 결과에서 빠진다(판정은 트랙 범위에 맡김).
+        """
+        if not self._object_samples and self._timestamps:
+            acc: Dict[str, List[datetime.datetime]] = {}
+            for ts_str in self._timestamps:
+                dt = self.parse_timestamp(ts_str)
+                for objid in self._data.get(ts_str, {}):
+                    acc.setdefault(objid, []).append(dt)
+            self._object_samples = acc
+        out: Dict[str, datetime.datetime] = {}
+        for objid, samples in self._object_samples.items():
+            i = bisect.bisect_right(samples, timestamp) - 1
+            if i >= 0:
+                out[objid] = samples[i]
+        return out
 
     def get_data_at_time(self, timestamp: datetime.datetime) -> Dict[str, Tuple[float, float, float]]:
         if self._bench_active:

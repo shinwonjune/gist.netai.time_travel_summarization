@@ -105,6 +105,7 @@ class JobRequest(BaseModel):
     replay_start: str = ""              # replay: ISO "YYYY-MM-DD HH:MM:SS"
     replay_end: str = ""                # replay: ISO "YYYY-MM-DD HH:MM:SS"
     data_uri: str = ""                  # replay: 트레이스 URI 또는 레이크 데이터셋 (빈 값=config 기본)
+    despawn_gap_s: float = Field(0.0, ge=0.0)   # replay: 결손 인지 despawn 임계(초), 0=비활성
 
 
 def _check_key(x_api_key: Optional[str]) -> None:
@@ -285,6 +286,7 @@ def create_job(req: JobRequest, x_api_key: Optional[str] = Header(default=None))
         job_type=req.job_type, dataset=req.dataset, train_output=req.train_output,
         model_path=req.model_path, port=req.port, num_frames=req.num_frames,
         replay_start=req.replay_start, replay_end=req.replay_end, data_uri=req.data_uri,
+        despawn_gap_s=req.despawn_gap_s,
     )
     # dedup은 스토어 UNIQUE(job_id) — 중복이면 JobExists → 409.
     try:

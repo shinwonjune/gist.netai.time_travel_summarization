@@ -45,6 +45,13 @@ CONDITIONS: List[dict] = [
     {"name": "g50", "kind": "gaussian", "sigma": 50.0},
     {"name": "switch", "kind": "switch"},
     {"name": "frag", "kind": "frag"},
+    # frag 파생 대조군 3종 (v3 계획서 §4-5). sameid=개명 없음(번호 효과 분리),
+    # window=inclip은 충돌이 담긴 청크 안에서 소멸→재출현이 완결되도록 정렬 재연.
+    # sameid 계열은 결손 인지 despawn 없이는 화면에서 사라지지 않는다 → despawn_gap_s.
+    {"name": "frag-sameid", "kind": "frag", "sameid": True, "despawn_gap_s": 0.3},
+    {"name": "frag-inclip", "kind": "frag", "window": "inclip"},
+    {"name": "frag-inclip-sameid", "kind": "frag", "window": "inclip",
+     "sameid": True, "despawn_gap_s": 0.3},
     {"name": "occ-hold", "kind": "occlusion", "policy": "hold", "dur_s": 3.0},
     {"name": "occ-linear", "kind": "occlusion", "policy": "linear", "dur_s": 3.0},
     {"name": "occ-extrap", "kind": "occlusion", "policy": "extrap", "dur_s": 3.0},
@@ -153,27 +160,48 @@ def plan_perturbation(cond: dict, pair: dict,
         return {"kind": "occlusion", "ops": ops}, None
 
     if kind == "frag":
-        # 충돌 참가 객체별로 1회 fragment — 그 객체의 첫 충돌 [−4s,−2s) 가림 후 새 ID.
-        # 각 원본 라벨은 최대 1회 개명(1:1 remap) → ID 부기 단순. 이후 그 객체의
-        # 모든 충돌이 화면GT에서 새 라벨로 이어진다.
+        # 충돌 참가 객체별로 1회 fragment — 결손 창 뒤 재출현. 창은 두 가지:
+        #  - 기본(사건 전): 그 객체의 첫 충돌 [−4s, −2s). 충돌 청크에는 이미 바뀐
+        #    번호만 보이므로 재는 것은 "하류 귀속 오염"이다.
+        #  - inclip: 첫 충돌이 담긴 청크 안에서 소멸→재출현→충돌이 완결되도록
+        #    [T−1.0, T−0.2) 결손. 재연 시작을 T−1.7로 정렬해야 성립하며(§4-5),
+        #    그 정렬은 _submit_replay가 replay_start를 옮겨 만든다.
+        # sameid=True면 개명하지 않는다(번호 효과 분리) → remap도 비어 있고 원GT
+        # 귀속이 그대로 성립한다.
+        sameid = bool(cond.get("sameid"))
+        inclip = cond.get("window") == "inclip"
         first_ev: Dict[int, int] = {}
         for ev_t, ev_ids in events:
             for lb in ev_ids:
                 first_ev.setdefault(lb, ev_t)
+        if inclip and events:
+            # 정렬은 에피소드당 1개 사건에만 가능 → 첫 사건 당사자만 대상으로 한다.
+            first_ev = {lb: events[0][0] for lb in events[0][1]}
         ops, remap = [], []
         next_label = max(label_to_objid) + 1
         for lb in sorted(first_ev):
             ev_dt = abs_dt(cap, first_ev[lb])
-            t0 = clamp(ev_dt - datetime.timedelta(seconds=4))
-            t1 = clamp(ev_dt - datetime.timedelta(seconds=2))
+            if inclip:
+                t0 = clamp(ev_dt - datetime.timedelta(seconds=1.0))
+                t1 = clamp(ev_dt - datetime.timedelta(seconds=0.2))
+            else:
+                t0 = clamp(ev_dt - datetime.timedelta(seconds=4))
+                t1 = clamp(ev_dt - datetime.timedelta(seconds=2))
             if t1 <= t0:
                 continue  # 창이 데이터 시작에 눌려 무효 → 이 객체는 건너뜀
+            new_id = None if sameid else f"obj{next_label:03d}"
             ops.append({"obj": label_to_objid[lb], "t0": t0.isoformat(),
-                        "t1": t1.isoformat(), "new_id": f"obj{next_label:03d}"})
-            remap.append({"type": "rename", "after_s": _sec(t1),
-                          "from": lb, "to": next_label})
-            next_label += 1
-        return {"kind": "frag", "ops": ops}, remap
+                        "t1": t1.isoformat(), "new_id": new_id})
+            if not sameid:
+                remap.append({"type": "rename", "after_s": _sec(t1),
+                              "from": lb, "to": next_label})
+                next_label += 1
+        plan = {"kind": "frag", "ops": ops}
+        if inclip and events:
+            # 재연 정렬 앵커: 충돌이 청크 내 1.7초에 오도록 재연을 T−1.7에서 시작.
+            plan["replay_anchor_s"] = float(events[0][0])
+            plan["replay_lead_s"] = 1.7
+        return plan, (remap or None)
     raise ValueError(f"unknown kind {kind}")
 
 
@@ -278,10 +306,28 @@ def phase_push(cond: dict, pairs: List[dict], args, out: Path) -> None:
     print(f"[{cond['name']}] pushed {len(names)} traces")
 
 
-def _submit_replay(jid: str, cond: dict, p: dict, args) -> None:
+def replay_window(cond: dict, pair: dict, plan: Optional[dict] = None
+                  ) -> Tuple[datetime.datetime, datetime.datetime]:
+    """이 조건·쌍의 재연 구간. 기본은 에피소드 전체.
+
+    inclip 조건은 **정렬 재연**이다: 청크 격자가 영상 시작 기준이므로, 재연 시작을
+    (첫 사건 − lead)로 옮기면 그 사건이 항상 청크 내 lead초 지점(1.7s)에 떨어진다.
+    그래야 소멸→재출현→충돌이 한 청크 안에서 완결된다(§4-5). 순수 함수 — self-test 대상.
+    """
+    start = datetime.datetime.fromisoformat(pair["capture_start"])
+    end = start + datetime.timedelta(seconds=float(pair["duration_s"]))
+    anchor = (plan or {}).get("replay_anchor_s")
+    if anchor is None:
+        return start, end
+    lead = float((plan or {}).get("replay_lead_s", 1.7))
+    aligned = abs_dt(start, int(anchor)) - datetime.timedelta(seconds=lead)
+    # 에피소드 시작보다 앞서면 정렬 불가 → 전체 구간으로 폴백(사건이 너무 이른 경우).
+    return (aligned, end) if aligned >= start else (start, end)
+
+
+def _submit_replay(jid: str, cond: dict, p: dict, args, plan: Optional[dict] = None) -> None:
     fmt = "%Y-%m-%d %H:%M:%S"
-    start = datetime.datetime.fromisoformat(p["capture_start"])
-    end = start + datetime.timedelta(seconds=p["duration_s"])
+    start, end = replay_window(cond, p, plan)
     try:
         api_post("/jobs", {
             "job_type": "replay", "job_id": jid, "gpu": args.gpu,
@@ -289,11 +335,24 @@ def _submit_replay(jid: str, cond: dict, p: dict, args) -> None:
             "data_uri": (f"file://{args.remote_ext_root}/artifacts/"
                          f"perturbed/{cond['name']}/{p['pair_id']}.csv"),
             "render_fps": p["fps"], "app_kit": APP_KIT,
-            "camera": p["camera"], "stage": p["stage"]})
+            "camera": p["camera"], "stage": p["stage"],
+            "scene_profile": p.get("scene_profile", ""),
+            "despawn_gap_s": float(cond.get("despawn_gap_s", 0.0) or 0.0)})
         print(f"[{cond['name']}] submitted {jid}", flush=True)
     except urllib.error.HTTPError as e:
         if e.code != 409:
             raise
+
+
+def _plan_of(cond: dict, pair: dict, out: Path) -> Optional[dict]:
+    """phase_perturb가 남긴 사이드카에서 이 쌍의 plan을 읽는다(정렬 앵커 확인용)."""
+    f = out / "traces" / cond["name"] / f"{pair['pair_id']}.meta.json"
+    if not f.exists():
+        return None
+    try:
+        return json.loads(f.read_text(encoding="utf-8")).get("plan")
+    except Exception:
+        return None
 
 
 def phase_replay(cond: dict, pairs: List[dict], args, out: Path) -> Dict[str, str]:
@@ -309,7 +368,7 @@ def phase_replay(cond: dict, pairs: List[dict], args, out: Path) -> Dict[str, st
         if (out / "replays" / jid).is_dir() or state == "done":
             continue
         if state == "new":
-            _submit_replay(jid, cond, p, args)
+            _submit_replay(jid, cond, p, args, _plan_of(cond, p, out))
         todo.append((p, jid))
     per_job = (180 + 30 * 8 + 60) * 1.2 + 60
     skipped = []
@@ -324,7 +383,7 @@ def phase_replay(cond: dict, pairs: List[dict], args, out: Path) -> Dict[str, st
             nxt, _st = resolve_job(f"{tag}-{cond['name']}-{p['pair_id']}")
             if nxt == jid:
                 break
-            _submit_replay(nxt, cond, p, args)
+            _submit_replay(nxt, cond, p, args, _plan_of(cond, p, out))
             jid = nxt
             try:
                 poll_job(nxt, per_job, label=nxt)
@@ -645,6 +704,39 @@ def _self_test() -> None:
     plan, _ = plan_perturbation({"name": "dsr5", "kind": "downsample", "hz": 5},
                                 pair, l2o)
     assert plan["hz"] == 5
+    # frag-sameid: 결손은 같고 개명 없음 → remap None, new_id None
+    plan, remap = plan_perturbation(
+        {"name": "frag-sameid", "kind": "frag", "sameid": True}, pair, l2o)
+    assert remap is None, remap
+    assert all(op["new_id"] is None for op in plan["ops"])
+    assert {op["obj"] for op in plan["ops"]} == {"obj001", "obj003", "obj004"}
+    # 창은 사건 전 [−4s,−2s) 그대로
+    op1 = next(o for o in plan["ops"] if o["obj"] == "obj001")
+    assert op1["t0"].endswith("17:06:46") and op1["t1"].endswith("17:06:48"), op1
+
+    # frag-inclip: 첫 사건 당사자만, 창 [T−1.0, T−0.2), 정렬 앵커 기록
+    plan, remap = plan_perturbation(
+        {"name": "frag-inclip", "kind": "frag", "window": "inclip"}, pair, l2o)
+    assert {op["obj"] for op in plan["ops"]} == {"obj001", "obj003"}   # 첫 사건 {1,3}만
+    assert plan["replay_anchor_s"] == 61610 and plan["replay_lead_s"] == 1.7
+    op1 = next(o for o in plan["ops"] if o["obj"] == "obj001")
+    assert op1["t0"].endswith("17:06:49") and op1["t1"].endswith("17:06:49.800000"), op1
+    assert remap is not None and len(remap) == 2                      # 개명 있음
+
+    # frag-inclip-sameid: 같은 창, 개명 없음
+    plan, remap = plan_perturbation(
+        {"name": "frag-inclip-sameid", "kind": "frag", "window": "inclip",
+         "sameid": True}, pair, l2o)
+    assert remap is None and all(op["new_id"] is None for op in plan["ops"])
+
+    # 정렬 재연 창: 첫 사건이 청크 내 1.7초에 오도록 시작이 당겨진다
+    s, e = replay_window({"name": "frag-inclip"}, pair, plan)
+    assert s.isoformat().endswith("17:06:48.300000"), s   # 61610 − 1.7
+    assert (e - s).total_seconds() < 30.0
+    # 앵커 없는 조건은 에피소드 전체
+    s0, e0 = replay_window({"name": "frag"}, pair, {"kind": "frag"})
+    assert s0.isoformat() == cap and (e0 - s0).total_seconds() == 30.0
+
     # 시드 결정성
     assert stable_seed("a", "b") == stable_seed("a", "b") != stable_seed("a", "c")
 

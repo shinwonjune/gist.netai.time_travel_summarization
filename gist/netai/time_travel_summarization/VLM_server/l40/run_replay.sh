@@ -21,6 +21,10 @@ STAGE="${STAGE:-}"
 # 씬 프로파일(scene_profiles.json 이름) — stage/camera 출처. 기본값 필수:
 # set -u에서 미정의 참조는 kit 기동 전에 러너를 죽인다(run_job.sh와 같은 사고).
 SCENE_PROFILE="${SCENE_PROFILE:-}"
+# 결손 인지 despawn 임계(초) — 확장이 TTS_DESPAWN_GAP_S로 읽는다. 빈 값이면 미설정
+# (종전 동작). frag-sameid 계열 렌더에서만 조건별로 켠다.
+DESPAWN_GAP_S="${DESPAWN_GAP_S:-}"
+[ -n "$DESPAWN_GAP_S" ] && export TTS_DESPAWN_GAP_S="$DESPAWN_GAP_S"
 GPU="${GPU:-1}"
 UPLOAD_URI="${UPLOAD_URI:-}"
 

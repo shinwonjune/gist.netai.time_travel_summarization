@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import datetime
 import random
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 Row = Dict[str, object]          # {"t": datetime, "objid": str, "x": float, "y": float, "z": float}
 _TS_FMT = "%Y-%m-%d %H:%M:%S.%f"
@@ -69,8 +69,15 @@ def id_switch(rows: List[Row], t_s: datetime.datetime, a: str, b: str) -> List[R
 
 
 def fragmentation(rows: List[Row], obj: str, t0: datetime.datetime,
-                  t1: datetime.datetime, new_id: str) -> List[Row]:
+                  t1: datetime.datetime, new_id: Optional[str]) -> List[Row]:
     """가림 후 재연관 실패: obj의 [t0,t1) 행 삭제, t1 이후는 새 ID로 발급.
+
+    ``new_id=None``이면 **개명하지 않는다**(frag-sameid 대조군) — 결손은 같고 번호만
+    유지되므로, frag와의 차이가 "새 번호(학습 분포 밖 숫자) 효과"로 분리된다.
+    주의: 개명이 없으면 트랙 생존 창이 결손을 덮어 dead-track despawn이 발동하지
+    않는다 → 렌더러의 **결손 인지 despawn**(TTS_DESPAWN_GAP_S)을 함께 켜야 화면에서
+    실제로 사라진다. 안 켜면 hold로 "얼어 있는 객체"가 되어 occ-hold 변형이 된다
+    (v3 계획서 §4-5).
 
     원 트랙은 t0에서 끊기고, 재연 화면에서는 **마지막 샘플 이후 사라진다**
     (playback.visibility의 dead-track despawn — 트랙 범위 [first,last] 밖은 숨김,
@@ -83,7 +90,7 @@ def fragmentation(rows: List[Row], obj: str, t0: datetime.datetime,
         if r["objid"] == obj:
             if t0 <= r["t"] < t1:
                 continue
-            if r["t"] >= t1:
+            if r["t"] >= t1 and new_id is not None:
                 r = {**r, "objid": new_id}
         out.append(r)
     return out

@@ -95,6 +95,9 @@ class JobSpec:
     replay_start: str = ""  # ISO "YYYY-MM-DD HH:MM:SS" (재연 시작)
     replay_end: str = ""    # ISO "YYYY-MM-DD HH:MM:SS" (재연 끝)
     data_uri: str = ""      # 트레이스 URI(DATA_PATH) 또는 레이크 데이터셋(LAKE_DATASET); 빈 값=config 기본
+    # 결손 인지 despawn 임계(초). 0/빈 값 = 비활성(종전 동작). frag-sameid 계열 렌더만
+    # 켠다 — 다운샘플 조건에서 켜면 정상 표본 간격이 소멸로 오판된다(v3 계획서 §4-5).
+    despawn_gap_s: float = 0.0
 
     def to_env(self) -> dict:
         """run_job.sh가 소비하는 env 매핑 (값은 전부 문자열; 빈 값은 전송 생략)."""
@@ -118,6 +121,7 @@ class JobSpec:
             "SPAWN_PLAN": self.spawn_plan,
             "KEEP_POSITIONS": "1" if self.keep_positions else "",
             "SEED": str(int(self.seed)),
+            "DESPAWN_GAP_S": f"{self.despawn_gap_s:g}" if self.despawn_gap_s else "",
             "JOB_TYPE": self.job_type,
             "DATASET": self.dataset,
             "TRAIN_OUTPUT": self.train_output,

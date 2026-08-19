@@ -202,14 +202,35 @@ class TimeTravelCore:
 
     def _object_visibility_at(self, current_time: datetime.datetime) -> Optional[Dict[str, bool]]:
         """current_time에서 objid별 보임/숨김. 트랙 범위 정보가 없으면(physics/합성
-        객체 등) None — 이 경우 visibility 토글 없이 위치만 갱신한다."""
+        객체 등) None — 이 경우 visibility 토글 없이 위치만 갱신한다.
+
+        env ``TTS_DESPAWN_GAP_S``가 설정돼 있으면 **결손 인지 despawn**을 켠다:
+        트랙 범위 안이라도 마지막 표본 이후 그 초를 넘게 비면 숨긴다. 기본은 비활성
+        (미설정) — 표본이 드문 조건(다운샘플)에서 정상 객체가 깜빡이기 때문이며,
+        frag-sameid 계열 렌더에서만 조건별로 켠다(v3 계획서 §4-5).
+        """
         ranges_fn = getattr(self._repository, "get_object_time_ranges", None)
         if not callable(ranges_fn):
             return None
         ranges = ranges_fn()
         if not ranges:
             return None
-        return compute_object_visibility(current_time, ranges, DEFAULT_VISIBILITY_TOL_S)
+        gap_s = None
+        raw = os.environ.get("TTS_DESPAWN_GAP_S", "").strip()
+        if raw:
+            try:
+                gap_s = float(raw)
+            except ValueError:
+                gap_s = None
+        last_samples = None
+        if gap_s is not None:
+            fn = getattr(self._repository, "get_object_last_sample", None)
+            if callable(fn):
+                last_samples = fn(current_time)
+            else:
+                gap_s = None            # 지원 안 하는 레포지토리면 종전 동작 유지
+        return compute_object_visibility(current_time, ranges, DEFAULT_VISIBILITY_TOL_S,
+                                         last_samples, gap_s)
 
     def set_to_earliest_time(self):
         if self._repository.data_start_time:
