@@ -380,6 +380,9 @@ def phase_plan(args, runs: List[str], out: Path) -> List[dict]:
                 "fps": int(meta.get("fps", 30)),
                 "stage": run_args.get("stage") or "",
                 "camera": run_args.get("camera") or "Capture_camera",
+                # regime3 생산은 stage 대신 프로파일 이름을 남긴다 — 그대로 재연에
+                # 실어야 같은 씬이 열린다(빈 스테이지 재연 사고 방지).
+                "scene_profile": run_args.get("scene_profile") or "",
                 "gt_events": {str(t): sorted(ids) for t, ids in sorted(gt.items())},
             })
 
@@ -435,7 +438,8 @@ def phase_replay(args, pairs: List[dict], out: Path) -> None:
                     "job_type": "replay", "job_id": job_id, "gpu": args.gpu,
                     "replay_start": start.strftime(fmt), "replay_end": end.strftime(fmt),
                     "data_uri": trace_uri, "render_fps": p["fps"], "app_kit": APP_KIT,
-                    "camera": p["camera"], "stage": p["stage"]})
+                    "camera": p["camera"], "stage": p["stage"],
+                    "scene_profile": p.get("scene_profile", "")})
                 print(f"[replay] submitted {job_id}")
             except urllib.error.HTTPError as e:
                 if e.code != 409:                  # 409 = 경합 제출 — 폴링으로 합류

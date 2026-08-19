@@ -2,7 +2,7 @@
 # 스펙(env) 구동 재연 렌더 잡 러너 — run_job.sh의 재연판(headless replay capture).
 #
 # 입력: JobSpec.to_env()가 렌더링한 env (JOB_ID, REPLAY_START, REPLAY_END, DATA_URI,
-#       CAMERA, RENDER_FPS, STAGE, APP_KIT, GPU, UPLOAD_URI)
+#       CAMERA, RENDER_FPS, STAGE, SCENE_PROFILE, APP_KIT, GPU, UPLOAD_URI)
 #       - REPLAY_START/END: ISO "YYYY-MM-DD HH:MM:SS" (필수)
 #       - DATA_URI: '://' 포함이면 트레이스 URI(--data-path), 아니면 레이크 데이터셋(--lake-dataset),
 #                   빈 값이면 config 기본 소스
@@ -18,6 +18,9 @@ DATA_URI="${DATA_URI:-}"
 CAMERA="${CAMERA:-}"
 RENDER_FPS="${RENDER_FPS:-30}"
 STAGE="${STAGE:-}"
+# 씬 프로파일(scene_profiles.json 이름) — stage/camera 출처. 기본값 필수:
+# set -u에서 미정의 참조는 kit 기동 전에 러너를 죽인다(run_job.sh와 같은 사고).
+SCENE_PROFILE="${SCENE_PROFILE:-}"
 GPU="${GPU:-1}"
 UPLOAD_URI="${UPLOAD_URI:-}"
 
@@ -90,6 +93,7 @@ if [ -n "$DATA_URI" ]; then
   esac
 fi
 [ -n "$STAGE" ] && EXEC_ARGS="$EXEC_ARGS --stage $STAGE"
+[ -n "$SCENE_PROFILE" ] && EXEC_ARGS="$EXEC_ARGS --scene-profile $SCENE_PROFILE"
 [ -n "$CAMERA" ] && EXEC_ARGS="$EXEC_ARGS --camera $CAMERA"
 [ -n "$UPLOAD_URI" ] && EXEC_ARGS="$EXEC_ARGS --upload-uri $UPLOAD_URI"
 

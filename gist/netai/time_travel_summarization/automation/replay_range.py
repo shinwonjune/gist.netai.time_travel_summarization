@@ -101,6 +101,15 @@ def _upload_files(paths, upload_uri: str) -> None:
         print(f"[replay] upload {p.name} -> {dst}")
 
 
+def _load_scene_profile(name):
+    """씬 프로파일 이름 -> dict (미지정/실패는 None). 절대 임포트 — kit이 이 파일을
+    패키지 밖 스크립트로 실행하므로 상대 임포트는 즉사한다(generate_episodes와 동일)."""
+    if not name:
+        return None
+    from gist.netai.time_travel_summarization.automation.scene_profiles import load_profile
+    return load_profile(name)
+
+
 def run(args, core=None) -> None:
     import omni.kit.app  # noqa: F401  (ensures Kit context)
 
@@ -112,6 +121,20 @@ def run(args, core=None) -> None:
     )
 
     core = core or _get_core()
+    # 씬 프로파일: 생성 잡과 같은 레지스트리에서 stage/camera를 받는다. regime3 생산은
+    # stage를 명시하지 않고 프로파일 이름만 주므로(run_manifest.args.stage = None),
+    # 이 경로가 없으면 재연이 빈 스테이지를 열어 아무것도 렌더되지 않는다.
+    # 명시 --stage/--camera가 있으면 그쪽이 우선(생성 경로와 같은 우선순위 규약).
+    prof = _load_scene_profile(getattr(args, "scene_profile", None))
+    if prof:
+        if not getattr(args, "stage", None):
+            args.stage = prof.get("stage") or None
+        if not getattr(args, "camera", None):
+            args.camera = prof.get("camera") or None
+        print(f"[replay] scene profile={args.scene_profile} stage={args.stage} "
+              f"camera={args.camera}")
+    if not getattr(args, "camera", None):
+        args.camera = "Capture_camera"   # 프로파일·명시 지정이 없을 때의 종전 기본값
     out_root = Path(args.out)
     out_root.mkdir(parents=True, exist_ok=True)
 
@@ -219,10 +242,13 @@ def main() -> None:
     ap.add_argument("--lake-dataset", type=str, default=None,
                     help="레이크 데이터셋 이름(config manifest ${LAKE_DATASET} 확장). "
                          "--data-path와 둘 중 하나")
-    ap.add_argument("--camera", type=str, default="Capture_camera",
+    ap.add_argument("--camera", type=str, default=None,
                     help="capture camera: prim path(/World/..) 또는 prim 이름; "
                          "default: /World/summarization_camera")
     ap.add_argument("--render-fps", type=int, default=30, help="video/render fps (재연은 데시메이션 없음)")
+    ap.add_argument("--scene-profile", type=str, default=None,
+                    help="scene_profiles.json 이름 — stage/camera를 프로파일에서 받는다 "
+                         "(명시 --stage/--camera가 우선)")
     ap.add_argument("--stage", type=str, default=None,
                     help="USD to open (local path or omniverse:// URL); default: new empty stage")
     ap.add_argument("--out", type=str, default="artifacts/replays")
