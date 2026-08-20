@@ -345,6 +345,46 @@ def window_specs(hold_guard_s: float = DEFAULT_HOLD_GUARD_S,
     }
 
 
+# no_contact 절제 반경 계열 (v3 계획서 §5-3b, 2026-08-20) — 기존 no_contact의 절제
+# 경계가 문턱 90cm 고정인데, 그 90은 측정이 아니라 "접촉을 뺐는데도 붙어 보인다"는
+# 육안 인상에서 온 값이다. 반경을 여러 값으로 바꿔 뽑으면 이진 질문("접촉을 빼도
+# 발화하는가")이 용량-반응 질문("어느 거리까지 보여 주면 발화가 살아남는가")이 된다.
+#   None = 그 사건의 플라토 경계(d_min + PLATEAU_MARGIN_CM) 사용.
+NO_CONTACT_RADII: Dict[str, Optional[float]] = {
+    "no_contact-plateau": None,
+    "no_contact-70": 70.0,
+    "no_contact-80": 80.0,
+    "no_contact-120": 120.0,
+}
+
+
+def excision_interval(series: Series, ev: dict, radius: Optional[float]
+                      ) -> Optional[Tuple[datetime.datetime, datetime.datetime]]:
+    """이 사건에서 "거리 ≤ radius"인 구간 [시작, 끝]. radius=None이면 플라토 경계.
+
+    기존 no_contact는 문턱(90) 기준의 [t_touch, t_release]를 도려내는데, 이 함수는
+    같은 사건에서 **다른 반경**의 절제 구간을 만든다. 반경이 좁을수록 클립에 더 가까운
+    프레임이 남으므로, 조건별 "클립 내 최소 가시 거리"가 곧 실험 변수가 된다.
+
+    구간은 접촉 구간 근방(t_touch−search, t_release+search)에서 찾는다 — 에피소드
+    다른 곳의 같은 쌍 조우가 섞이지 않게 하려는 것이다. 해당 구간이 없으면 None.
+    """
+    lo = ev["t_touch"] - datetime.timedelta(seconds=DEFAULT_SEARCH_BACK_S)
+    hi = ev["t_release"] + datetime.timedelta(seconds=DEFAULT_SEARCH_FWD_S)
+    limit = radius if radius is not None else ev["hold_thr"]
+    window = [(t, d) for t, d in series if lo <= t <= hi]
+    inside_idx = [i for i, (t, d) in enumerate(window) if d <= limit]
+    if not inside_idx:
+        return None
+    i0, i1 = inside_idx[0], inside_idx[-1]
+    # 끝 경계는 **절제 밖 첫 시각**이어야 한다. t_touch/t_release 규약과 같다
+    # (t_release = 문턱을 회복한 첫 시각). 마지막 안쪽 시각을 돌려주면 오른쪽 스플라이스
+    # 조각이 절제 구간 안에서 시작해 "절제 실패"로 전량 탈락한다(실측 사고).
+    if i1 + 1 >= len(window):
+        return None                      # 회복 지점이 탐색창 밖 — 사건으로 인정 안 함
+    return window[i0][0], window[i1 + 1][0]
+
+
 WINDOW_SPECS: Dict[str, Tuple[str, List[Tuple[float, float]]]] = window_specs()
 NEARMISS_SPEC: List[Tuple[float, float]] = [(-1.0, +1.0)]
 
@@ -867,12 +907,20 @@ def gate_window(
             return "no_separation_motion"
         return None
 
-    if condition == "no_contact":
+    if condition == "no_contact" or condition.startswith("no_contact-"):
+        # 절제 반경 계열(§5-3b)은 같은 검사를 **그 조건의 반경**으로 한다 — 클립에
+        # 반경보다 가까운 프레임이 남아 있으면 절제가 실패한 것이다. 기준선
+        # no_contact는 반경 = 문턱(90), plateau 암은 반경 = 그 사건의 hold_thr.
+        limit = threshold
+        if condition.startswith("no_contact-"):
+            radius = NO_CONTACT_RADII.get(condition)
+            limit = radius if radius is not None else (
+                hold_thr if hold_thr is not None else threshold)
         for seg in segs:
             part = _samples_in(series, [seg])
             if not part:
                 return "empty_splice_segment"
-            if any(d < threshold for _, d in part):
+            if any(d < limit for _, d in part):
                 return "contact_frames_survived_excision"
         return None
 
@@ -993,6 +1041,17 @@ def plan_episode(
                           hold_thr=ev["hold_thr"])
             _consider("no_contact", no_contact_segments(ev["t_touch"], ev["t_release"]),
                       {**base, "t_ref": ev["t_touch"], "anchor": ANCHOR_TOUCH}, allow=ev)
+            # 절제 반경 계열(§5-3b): 같은 사건에서 반경만 바꿔 도려낸다. 기준선인
+            # no_contact(=반경 90)와 나란히 놓으면 발화율의 거리 의존이 드러난다.
+            for cond_name, radius in NO_CONTACT_RADII.items():
+                iv = excision_interval(ev["series"], ev, radius)
+                if iv is None:
+                    continue
+                _consider(cond_name, no_contact_segments(iv[0], iv[1]),
+                          {**base, "t_ref": iv[0], "anchor": ANCHOR_TOUCH,
+                           "excision_radius": radius if radius is not None else ev["hold_thr"],
+                           "excision_len_s": round((iv[1] - iv[0]).total_seconds(), 3)},
+                          allow=ev, hold_thr=ev["hold_thr"])
     elif kind == "nearmiss":
         for nm in minima:
             _consider("near_miss", _window_abs(nm["t"], NEARMISS_SPEC),
