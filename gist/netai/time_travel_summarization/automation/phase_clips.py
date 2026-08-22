@@ -296,6 +296,15 @@ NEARMISS_ENTER_FRAC = 2.0        # 극소점 탐지 진입 문턱 = gap × 이 �
 # 이 규칙이 곧 응급 이탈 조우의 제외다. 종전 5.0 여유는 gap−5~gap 구간의 응급 이탈 조우를
 # 통과시켰다(실측: gap 89 원료 70클립 중 26건, 2026-08-22 발견) → 0으로 정정.
 NEARMISS_DMIN_LO_MARGIN = 0.0
+# 속도 반전 게이트(2026-08-22): 최근접 ±NEARMISS_REVERSAL_WIN_S 안에서 쌍의 반경 속도가
+# 한 표본 간격에 이 값(cm/s) 이상 뛰면 응급 이탈로 본다. 거리 게이트의 보완 — 응급 이탈
+# 판정은 물리 스텝 안의 d로 이뤄지고 trace에는 이탈 속도가 적용된 뒤의 위치가 찍히므로,
+# gap 경계 ±1cm의 조우는 trace의 d_min만으로 가를 수 없다(실측: gap 89 원료 d_min 89.1,
+# 반전 453 — 육안으로 응급 이탈). 정상 스침은 반경 캡이 감속→0→가속으로 돌려 완만하다
+# (4객체 v3 안무 실측 최대 388, 응급 이탈 최소 453). 구세대(v3 조향 이전) 2객체 안무는
+# 정상 스침도 440까지 뛰므로 그 원료에는 문턱을 올려 써야 한다(--nearmiss-reversal-jump).
+NEARMISS_REVERSAL_JUMP = 400.0
+NEARMISS_REVERSAL_WIN_S = 0.3
 NEARMISS_DMIN_HI_MARGIN = 30.0   # d_min 상한 = 문턱 + 이 값 (너무 먼 조우 배제)
 
 # --- 게이트 ---------------------------------------------------------------
@@ -826,6 +835,19 @@ def purity_violation(
     return False
 
 
+def _radial_jump(samples: Series, win_s: float = NEARMISS_REVERSAL_WIN_S) -> float:
+    """최근접 ±win_s 창에서 반경 속도(dd/dt)의 인접 표본 간 최대 증가량(cm/s)."""
+    i_min = min(range(len(samples)), key=lambda i: samples[i][1])
+    t0 = samples[i_min][0]
+    pts = [(t, d) for t, d in samples if abs((t - t0).total_seconds()) <= win_s]
+    vel = []
+    for (ta, da), (tb, db) in zip(pts, pts[1:]):
+        dt = (tb - ta).total_seconds()
+        if dt > 0:
+            vel.append((db - da) / dt)
+    return max((b - a for a, b in zip(vel, vel[1:])), default=0.0)
+
+
 # ---------------------------------------------------------------- 조건 게이트
 
 def gate_window(
@@ -836,6 +858,7 @@ def gate_window(
     gap: float = 0.0,
     d_min: Optional[float] = None,
     hold_thr: Optional[float] = None,
+    reversal_jump: float = NEARMISS_REVERSAL_JUMP,
 ) -> Optional[str]:
     """창이 조건의 의미를 실제로 만족하는지 검사한다. 통과면 None, 아니면 폐기 사유.
 
@@ -861,8 +884,10 @@ def gate_window(
                       "회복 시각 이후에는 접촉이 없다"는 전제의 실제 확인이 된다.
       aftermath_only: 창 전 구간이 문턱 밖이고(v3.4), 기준 쌍 거리가 창 동안
                       AFTERMATH_SEPARATION_MIN_CM 이상 벌어진다(붙어서-정지형 배제).
-      near_miss     : 창이 거리 극소점을 담고 있고, d_min이 [gap−5, 문턱+30] 안이다
-                      (접촉해버린 조우도, 스치지도 않은 먼 조우도 배제).
+      near_miss     : 창이 거리 극소점을 담고 있고, d_min이 [gap, max(문턱,gap)+30]
+                      안이며(gap 침범 = 응급 이탈 조우 배제, 먼 조우 배제), 극소점
+                      주변의 반경 속도 한 표본 점프가 reversal_jump 미만이다(trace
+                      표본화가 놓친 gap 경계의 응급 이탈 배제).
       control       : 게이트 없음 — 무관 구간이라는 성질은 이벤트 간격(buffer)과
                       순도 검사로 이미 보장된다.
     """
@@ -941,6 +966,8 @@ def gate_window(
         # gap ≤ 문턱이면 종전과 동일하다.
         if d_min > max(threshold, gap) + NEARMISS_DMIN_HI_MARGIN:
             return "d_min_too_far"
+        if reversal_jump > 0 and _radial_jump(samples) >= reversal_jump:
+            return "velocity_reversal"
         return None
 
     raise ValueError(f"unknown condition: {condition!r}")
@@ -975,6 +1002,7 @@ def plan_episode(
     third_object_cm: float = DEFAULT_THIRD_OBJECT_CM,
     n_control: int = 1,
     seed: int = 42,
+    reversal_jump: float = NEARMISS_REVERSAL_JUMP,
 ) -> Tuple[List[dict], Dict[str, dict]]:
     """에피소드 1개 -> (클립 계획 목록, 조건별 게이트 통계).
 
@@ -1017,7 +1045,8 @@ def plan_episode(
         if d_third is not None and third_object_cm > 0.0 and d_third < third_object_cm:
             _bump(stats, cond, "dropped", "third_object_intrusion")
             return
-        why = gate_window(cond, segs, base.get("series", []), threshold, gap, d_min, hold_thr)
+        why = gate_window(cond, segs, base.get("series", []), threshold, gap, d_min, hold_thr,
+                          reversal_jump=reversal_jump)
         if why:
             _bump(stats, cond, "dropped", why)
             return
@@ -1204,6 +1233,9 @@ def main(argv=None):
                     help="near-miss 에피소드 run 디렉터리(반복 가능)")
     ap.add_argument("--out", help="클립 세트 출력 디렉터리(--reflag-manifest 모드에서는 불필요)")
     ap.add_argument("--gap", type=float, default=95.0, help="near-miss gap(cm)")
+    ap.add_argument("--nearmiss-reversal-jump", type=float, default=NEARMISS_REVERSAL_JUMP,
+                    help="near-miss 응급 이탈 속도 반전 문턱(cm/s per 표본, 0=끔). "
+                         "4객체 v3 안무 기본 400; v3 조향 이전 2객체 원료는 450")
     ap.add_argument("--touch-threshold", type=float, default=DEFAULT_TOUCH_THRESHOLD,
                     help="접촉 판정 지면 거리 문턱(cm). 물리 접촉 정의는 2r≈72cm")
     ap.add_argument("--search-back", type=float, default=DEFAULT_SEARCH_BACK_S,
@@ -1269,7 +1301,8 @@ def main(argv=None):
                 search_fwd_s=args.search_fwd, max_contact_s=args.max_contact,
                 plateau_margin_cm=args.plateau_margin, hold_guard_s=args.hold_guard,
                 third_object_cm=args.third_object_cm,
-                n_control=args.controls_per_episode, seed=args.seed)
+                n_control=args.controls_per_episode, seed=args.seed,
+                reversal_jump=args.nearmiss_reversal_jump)
             merge_stats(total_stats, stats)
             for p in plans:
                 cond = p["condition"]

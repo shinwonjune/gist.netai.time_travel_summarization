@@ -156,10 +156,11 @@ def _contact_trace(t_touch: float, t_release: float, pair=("obj001", "obj002"),
     return rows
 
 
-def _near_miss_trace(d_min: float, t_min_s: float = 15.0, span_s: float = 30.0) -> list:
-    """두 객체가 x축에서 접근 -> 극소(d_min) -> 이탈. 접촉 없음."""
+def _near_miss_trace(d_min: float, t_min_s: float = 15.0, span_s: float = 30.0,
+                     speed: float = 60.0) -> list:
+    """두 객체가 x축에서 접근 -> 극소(d_min) -> 이탈. 접촉 없음. speed = 각자 cm/s
+    (반경 속도 반전폭 = 4·speed: 60 → 240, 정상 스침 범위)."""
     rows = []
-    speed = 60.0   # cm/s (각자)
     for i in range(int(span_s * HZ) + 1):
         t = i / HZ
         half = d_min / 2 + speed * abs(t - t_min_s)
@@ -534,6 +535,18 @@ class GateTest(unittest.TestCase):
     def test_near_miss_gate_rejects_too_far(self):
         """스쳤다고 볼 수 없을 만큼 먼 조우(문턱+30cm 초과)도 배제한다."""
         self.assertEqual(self._near_miss_gate(150.0), "d_min_too_far")
+
+    def test_near_miss_gate_rejects_velocity_reversal(self):
+        """gap 바로 위(d_min ≥ gap)라도 극소점에서 반경 속도가 한 표본에 400cm/s 이상
+        뒤집히면 응급 이탈(trace 표본화가 gap 침범을 놓친 경우)로 보고 폐기한다."""
+        series = pair_series(trace_frames(_near_miss_trace(d_min=95.2, speed=150.0)),
+                             "obj001", "obj002")            # 반전폭 600
+        segs = self._segs((14.0, 16.0))
+        self.assertEqual(gate_window("near_miss", segs, series, THR, gap=95.0, d_min=95.2),
+                         "velocity_reversal")
+        # 문턱 0 = 게이트 끔(구세대 원료 등 안무별 재조정용)
+        self.assertIsNone(gate_window("near_miss", segs, series, THR, gap=95.0, d_min=95.2,
+                                      reversal_jump=0.0))
 
     def test_near_miss_gate_rejects_window_without_minimum(self):
         """창이 극소점을 담지 않으면(창 안 최솟값이 d_min보다 크면) 폐기."""
