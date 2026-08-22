@@ -568,8 +568,10 @@ class PlanEpisodeTest(unittest.TestCase):
         col = [_col_row(15.0, "obj001"), _col_row(15.0, "obj002")]
         plans, stats = plan_episode("collision", trace, col, BASE, 30.0, n_control=0)
         conds = sorted(p["condition"] for p in plans)
+        # no_contact 반경 계열(bfdf112, NO_CONTACT_RADII)이 기본 조건에 포함된다
         self.assertEqual(conds, ["aftermath_only", "approach_only", "full",
-                                 "no_aftermath", "no_approach", "no_contact"])
+                                 "no_aftermath", "no_approach", "no_contact",
+                                 "no_contact-120", "no_contact-80", "no_contact-plateau"])
         for cond in conds:
             self.assertEqual(stats[cond]["passed"], 1, cond)
             self.assertEqual(sum(stats[cond]["dropped"].values()), 0, cond)

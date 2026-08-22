@@ -291,7 +291,11 @@ DEFAULT_THIRD_OBJECT_CM = 90.0
 
 # --- near-miss -------------------------------------------------------------
 NEARMISS_ENTER_FRAC = 2.0        # 극소점 탐지 진입 문턱 = gap × 이 값
-NEARMISS_DMIN_LO_MARGIN = 5.0    # d_min 하한 = gap − 이 값 (접촉 의심 배제)
+# d_min 하한 = gap − 이 값. **0이어야 한다** — 계획서 §5-1 사전 등록 규칙은 "최소 중심거리
+# < gap 제외"이고, 안무의 응급 이탈(gap 침범 → 즉시 반전)은 정의상 gap 아래에서만 발동하므로
+# 이 규칙이 곧 응급 이탈 조우의 제외다. 종전 5.0 여유는 gap−5~gap 구간의 응급 이탈 조우를
+# 통과시켰다(실측: gap 89 원료 70클립 중 26건, 2026-08-22 발견) → 0으로 정정.
+NEARMISS_DMIN_LO_MARGIN = 0.0
 NEARMISS_DMIN_HI_MARGIN = 30.0   # d_min 상한 = 문턱 + 이 값 (너무 먼 조우 배제)
 
 # --- 게이트 ---------------------------------------------------------------
@@ -932,7 +936,10 @@ def gate_window(
             return "minimum_outside_window"
         if d_min < gap - NEARMISS_DMIN_LO_MARGIN:
             return "d_min_below_gap"
-        if d_min > threshold + NEARMISS_DMIN_HI_MARGIN:
+        # 상한은 문턱·gap 중 큰 쪽 기준 — gap이 문턱(90)을 넘는 원료(gap 113 등)에서
+        # 문턱 고정 상한(120)이 정상 조우를 40% 탈락시켜 표본이 가까운 쪽으로 치우쳤다.
+        # gap ≤ 문턱이면 종전과 동일하다.
+        if d_min > max(threshold, gap) + NEARMISS_DMIN_HI_MARGIN:
             return "d_min_too_far"
         return None
 
