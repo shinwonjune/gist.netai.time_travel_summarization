@@ -52,6 +52,15 @@ CONDITIONS: List[dict] = [
     {"name": "frag-inclip", "kind": "frag", "window": "inclip"},
     {"name": "frag-inclip-sameid", "kind": "frag", "window": "inclip",
      "sameid": True, "despawn_gap_s": 0.3},
+    # inclip v2 (2026-08-26, 사용자 재설계): 결손 [T−2.5, T−0.5) — 재출현 0.5초 뒤 충돌.
+    # 정렬 재연을 쓰지 않는다(v1의 정렬 이득 교란 제거): 재출현→충돌 0.5초가 같은 2초
+    # 청크에 들 확률이 기하적으로 75%라 정렬 없이도 "교체 장면 포함" 표본이 생기고,
+    # 청크 경계는 사후 분할 변수로 쓴다. 표적도 v1(첫 사건만)과 달리 기본 frag처럼
+    # **전 충돌 참가 객체**라 표본 혼입(표적/비표적)이 없다. sameid 짝(occ형: 소멸→재출현,
+    # 번호 유지)은 "갑자기 나타난 직후의 충돌" 반응을 번호 효과 없이 잰다.
+    {"name": "frag-inclip2", "kind": "frag", "window": "pre05", "despawn_gap_s": 0.3},
+    {"name": "frag-inclip2-sameid", "kind": "frag", "window": "pre05",
+     "sameid": True, "despawn_gap_s": 0.3},
     {"name": "occ-hold", "kind": "occlusion", "policy": "hold", "dur_s": 3.0},
     {"name": "occ-linear", "kind": "occlusion", "policy": "linear", "dur_s": 3.0},
     {"name": "occ-extrap", "kind": "occlusion", "policy": "extrap", "dur_s": 3.0},
@@ -170,6 +179,7 @@ def plan_perturbation(cond: dict, pair: dict,
         # 귀속이 그대로 성립한다.
         sameid = bool(cond.get("sameid"))
         inclip = cond.get("window") == "inclip"
+        pre05 = cond.get("window") == "pre05"
         first_ev: Dict[int, int] = {}
         for ev_t, ev_ids in events:
             for lb in ev_ids:
@@ -184,6 +194,9 @@ def plan_perturbation(cond: dict, pair: dict,
             if inclip:
                 t0 = clamp(ev_dt - datetime.timedelta(seconds=1.0))
                 t1 = clamp(ev_dt - datetime.timedelta(seconds=0.2))
+            elif pre05:
+                t0 = clamp(ev_dt - datetime.timedelta(seconds=2.5))
+                t1 = clamp(ev_dt - datetime.timedelta(seconds=0.5))
             else:
                 t0 = clamp(ev_dt - datetime.timedelta(seconds=4))
                 t1 = clamp(ev_dt - datetime.timedelta(seconds=2))

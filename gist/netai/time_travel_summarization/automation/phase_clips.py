@@ -367,6 +367,8 @@ NO_CONTACT_RADII: Dict[str, Optional[float]] = {
     "no_contact-plateau": None,
     "no_contact-70": 70.0,
     "no_contact-80": 80.0,
+    "no_contact-100": 100.0,   # 2026-08-26 추가 — 90(기준선)과 120 사이 전이 구간 해상도
+    "no_contact-110": 110.0,   # (regime3 실측: 92.2→0.460, 122.8→0.071 사이가 비어 있었다)
     "no_contact-120": 120.0,
 }
 

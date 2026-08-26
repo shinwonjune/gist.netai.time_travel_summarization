@@ -584,6 +584,7 @@ class PlanEpisodeTest(unittest.TestCase):
         # no_contact 반경 계열(bfdf112, NO_CONTACT_RADII)이 기본 조건에 포함된다
         self.assertEqual(conds, ["aftermath_only", "approach_only", "full",
                                  "no_aftermath", "no_approach", "no_contact",
+                                 "no_contact-100", "no_contact-110",
                                  "no_contact-120", "no_contact-80", "no_contact-plateau"])
         for cond in conds:
             self.assertEqual(stats[cond]["passed"], 1, cond)
