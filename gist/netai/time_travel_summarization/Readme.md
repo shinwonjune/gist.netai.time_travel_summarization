@@ -24,7 +24,7 @@
 2. **Local Path 추가**
    *    USD Composer에서: **Developer → Extensions → ☰ → Settings → Extension Search Path**
    *    `[NetAI]Time_Travel_Summarization`의 `exts` 폴더의 전체 경로 추가
-        *   예시: `C:\Users\wonjune\workspace\Omniverse\Extension\[NetAI]Time_Travel_Summarization\exts`
+        *   예시: `C:\Users\<username>\workspace\Omniverse\Extension\[NetAI]Time_Travel_Summarization\exts`
    *    Third party 에서 Extension 실행
 
 
@@ -37,8 +37,8 @@
 ### 0. VLM 서버 실행
 
 VLM 서버를 실행합니다. 
-서버에서 VLM container와 Video process pipeline (NVIDIA VSS) 를 각자 실행
-GPU는 SV4000-2 기준으로 l40 또는 A100 40GB 한대로 충분
+GPU 서버에서 vLLM 컨테이너(OpenAI 호환 API)를 실행
+GPU는 L40 또는 A100 40GB 한 대로 충분
 
 자세한 내용은 `./VLM_server` 디렉토리 README.md에서 확인
 
@@ -48,9 +48,9 @@ GPU는 SV4000-2 기준으로 l40 또는 A100 40GB 한대로 충분
 디지털트윈 환경에서 객체의 움직임을 표현할 시계열 궤적 데이터를 생성
 
 ```bash
-python utils/trajectory_data_generater_XAI_Studio.py
+python tools/generate_living_trajectory.py --duration-hours 0.02 --output data/living_trajectory_1min_0.2s.csv --objects 4 --interval 0.2
 ```
-파일 내부에서 데이터 생성 조건 변경
+좌표 범위는 스크립트 상단 상수(X_RANGE, Z_RANGE)로, 객체 수와 간격은 인자로 조정
 
 ---
 ### 2. Config 설정
@@ -87,7 +87,7 @@ VLM이 이벤트 발생 시간과 연루된 객체를 특정할 수 있도록 �
 *   timestamp, objectIDs overlay 체크박스 선택
 
 > **구현 파일:**
-> *   `modules/view_overlay.py`, `modules/overlay_control.py`
+> *   `overlay/core.py`, `overlay/components.py`, `overlay/window.py`
 ---
 ### 6. Visual Abstraction & Temporal Acceleration (Optional)
 
@@ -107,7 +107,7 @@ VLM의 추론 성능을 극대화하기 위해 디지털트윈 환경을 조정�
 
 **Movie Capture Extension** (내장 기능)을 사용하여 VLM 서버로 전송할 영상을 생성
 *현재 동영상 추출 단계가 파이프라인의 주요 병목구간*
-*영상 전달을 스트리밍 방식으로 확장 필요 (NVIDIA VSS가 RTSP를 지원함)*
+*영상 전달을 스트리밍 방식으로 확장 필요 (현재는 파일 캡처 후 업로드하는 방식이라 캡처 완료까지 대기해야 함)*
 
 #### 📸 캡쳐 가이드
 Movie Capture의 고정된 캡쳐 FPS 특성상, 원하는 재생 속도의 동영상을 얻기 위해 **Time Travel 재생 속도 조절**이 필요
@@ -118,7 +118,7 @@ Movie Capture의 고정된 캡쳐 FPS 특성상, 원하는 재생 속도의 동�
     *   **Capture range(Seconds) End**: 생성할 영상의 길이(초) 선택
     *   **Resolution**: 532 x 280 (변경가능, 빠른 추론속도와 reshape 과정에서의 정보 손실 방지를 위함)
     *   **Output Path**: extension 경로 내부의 `artifacts/video` 폴더
-    *   **Output Name**: `video_n.mp4` 형식 필수 (NVIDIA VSS 요구사항)
+    *   **Output Name**: 파일명 규칙 없음 — 임의로 지정 가능(예: `video_1.mp4`), 이후 VLM Client 단계에서 이 파일을 그대로 업로드
     
 
 #### 재생 속도 설정 공식
@@ -135,12 +135,12 @@ Movie Capture는 기본적으로 10 FPS 로 캡쳐를 진행
 ---
 ### 8. VLM Client
 
-생성된 영상을 VLM 서버(NVIDIA VSS)로 전송 및 추론 결과를 수신  
+생성된 영상을 vLLM 서버(OpenAI 호환 API)로 전송 및 추론 결과를 수신  
 VLM 서버에 동영상을 upload하고, 추론 요청(generate)하는 두 과정을 거침
-VLM 서버 ip는 `vlm_client_core.py` 의 `_initialize_client` 메서드에서 설정
+VLM 서버 주소는 `VLM_BASE_URL` 환경변수로 설정(코드에 IP를 박지 않음; 세부 배선은 `vlm_client/core.py`의 `_initialize_client` 메서드 참조)
 
 **기능:**
-*   **Upload**: 생성한 `video_n.mp4` VLM 서버에 업로드
+*   **Upload**: 생성한 영상 파일을 VLM 서버에 업로드
 *   **Delete**: VLM 서버에 업로드한 영상 삭제(삭제 안하고 다른 영상 업로드해도 작동하긴 함)
 *   **Generate**: VLM 모델 추론 요청
 *   **Settings**:
@@ -152,28 +152,28 @@ VLM 서버 ip는 `vlm_client_core.py` 의 `_initialize_client` 메서드에서 �
 **사용법:**
 *   Upload 버튼 (비디오 전송) -> Settings 확인 -> Genearte 버튼 (추론 요청)
 
-> **구현 파일:** `modules/vlm_client_core.py`, `modules/vlm_client_window.py`, `utils/VSS_client`
-*   VLM 서버의 동영상 처리 파이프라인(VSS)과 통신하는 기능은 `utils/VSS_client` 에 구현
-*   `vlm_client_core.py`는 `VSS_client`를 활용하여 작업을 지시하는 역할
+> **구현 파일:** `vlm_client/core.py`, `vlm_client/window.py`, `utils/vllm_client.py`
+*   vLLM 서버와의 통신(영상을 2초 청크로 슬라이스 → base64 data URI로 인코딩 → OpenAI 호환 엔드포인트 `/v1/chat/completions`에 요청)은 `utils/vllm_client.py`에 구현
+*   `vlm_client/core.py`는 `utils/vllm_client.py`를 활용하여 작업을 지시하는 역할
     *   경로 설정, 프롬프트 정의, 업로드된 비디오 ID 상태관리 등
-    *   VLM에 전달되는 동영상 청크의 길이는 `modules/vlm_client_core.py`의 `default_chunk_duration` 에서 설정 (청크에 포함되는 frame 개수는 VLM server에서 설정)
+    *   VLM에 전달되는 동영상 청크의 길이는 `vlm_client/core.py`의 `default_chunk_duration` 에서 설정 (청크에 포함되는 frame 개수는 vLLM 서버 기동 시 `--media-io-kwargs`로 설정하며 클라이언트가 요청별로 바꿀 수 없음)
 ---
 ### 9. Event Post Processing
 
 VLM의 output을 Time Travel 모듈에서 재생 가능한 형태(Event List)로 변환  
-core.py 에서 event_post_processing_core.py 를 import하여 데이터를 가공(core.py 의 in-memory data를 활용해야하기 때문)
+`events/summary_service.py`(EventSummaryService)가 `events/core.py`의 `consolidate_events`를 import하여 데이터를 가공(궤적 좌표는 `TrajectoryRepository`의 in-memory 데이터를 참조해야 하기 때문)
 
 **기능:**
 *   **Input**: `vlm_outputs/` 내의 JSON 파일명
-*   **Process Events** (core.py 에서 진행됨):
+*   **Process Events** (`events/summary_service.py`에서 진행됨):
     1.  JSON 파싱 및 정제 (중간단계 결과물: `artifacts/intermediate_results/*_intermediate.jsonl`)
-    2.  이벤트 발생 시점의 객체 3D 좌표 추출 (`core.py` 의 in-memory 데이터 참조)
+    2.  이벤트 발생 시점의 객체 3D 좌표 추출 (`TrajectoryRepository`의 in-memory 데이터 참조)
     3.  최종 결과물 `*_eventlist.jsonl` 생성 (경로: `artifacts/event_list/`)
 
 **사용법:**
 *   Input JSON File에 파일 이름 복붙 -> Process Evetns 버튼
 
-> **구현 파일:** `core.py`, `modules/event_post_processing_core.py`, `modules/event_post_processing_window.py`
+> **구현 파일:** `events/core.py`, `events/summary_service.py`, `events/window.py`
 ---
 ### 10. Event-based Summarization Playback
 

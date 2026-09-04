@@ -15,11 +15,10 @@ version = "0.1.0"  # Semantic Versioning is used: https://semver.org/
 description = "An extension supporting digital twin based time travel summarzation framework using VLM."
 
 category = "timetravel"  # How to categorize this in the Extension Manager
-changelog = "docs/CHANGELOG.md"
 icon = "data/icon.png"  # Icon to show in the Extension Manager
 keywords = ["kit", "example", "extension", "timetravel", "digitaltwin"]  # Search keywords for the Extension Manager
 preview_image = "data/preview.png"  # Preview to show in the Extension Manager
-readme  = "docs/README.md"  # Path (relative to the root) or content of readme markdown file for UI
+readme  = "README.md"  # Path (relative to the root) or content of readme markdown file for UI
 repository = ""  # URL of the extension source repository
 
 
@@ -63,8 +62,7 @@ name = "gist.netai.time_travel_summarization"
 
 [documentation]
 pages = [
-    "docs/Overview.md",
-    "docs/CHANGELOG.md",
+    "README.md",
 ]
 
 

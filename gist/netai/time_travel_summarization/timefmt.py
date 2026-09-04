@@ -24,6 +24,20 @@ from datetime import datetime, timedelta
 
 PRECISION = "seconds"  # "seconds" | "milliseconds"
 
+# Full-precision "YYYY-MM-DD HH:MM:SS.mmm" datetime string — the trajectory-lookup
+# dict-key format used by playback.trajectory_repository.TrajectoryRepository and its
+# lake/benchmark helpers (playback/lake_common.py, playback/lookup_benchmark.py). This
+# is a SEPARATE concern from format_event_time()/parse_event_time() below (the
+# date-less, PRECISION-gated overlay/CSV format): the lookup key always carries the
+# date and millisecond precision regardless of PRECISION, because it indexes an
+# in-memory dict rather than being shown to a human or a VLM.
+TIMESTAMP_FMT = "%Y-%m-%d %H:%M:%S.%f"
+
+
+def format_timestamp(dt: datetime) -> str:
+    """Format a full datetime as the millisecond-precision trajectory lookup key."""
+    return dt.strftime(TIMESTAMP_FMT)[:-3]
+
 
 def format_event_time(dt: datetime) -> str:
     """Format an event time for the overlay and the collisions CSV."""
@@ -41,7 +55,7 @@ def parse_event_time(s: str, anchor: datetime) -> datetime:
     than the anchor's, it is treated as having rolled past midnight (+1 day).
     """
     s = s.strip()
-    for fmt in ("%Y-%m-%d %H:%M:%S.%f", "%Y-%m-%d %H:%M:%S"):
+    for fmt in (TIMESTAMP_FMT, "%Y-%m-%d %H:%M:%S"):
         try:
             return datetime.strptime(s, fmt)
         except ValueError:

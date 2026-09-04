@@ -5,9 +5,11 @@ from pxr import UsdGeom
 
 class ObjectIdManipulator(sc.Manipulator):
     # 라벨 앵커 = 객체 좌표 + 어깨 높이 오프셋(Y-up 가정). GUI 육안으로 확정:
-    # 200=머리 위, 150=어깨 살짝 위 → 145. 캡처(overlay_composer.MARKER_UP_OFFSET)와
-    # 같은 값이어야 정상 — 앵커는 3D 점이라 시점과 무관하게 같은 신체 높이에 투영된다.
-    # (한때 "캡처에선 엉덩이로 보인다"로 분리했으나 그 관측은 구코드 렌더로 판정돼 회귀.)
+    # 200=머리 위, 150=어깨 살짝 위 → 145. 캡처(overlay_composer.MARKER_UP_OFFSET,
+    # 130.0)와는 값이 다르다 — 캡처측 주석(overlay_composer.py의 MARKER_UP_OFFSET
+    # 정의부)에 명시된 대로, GUI 라벨(여기, 145)과 ±15 이내 차이는 시점별 지각
+    # 차이로 허용한다는 것이 캡처 경로의 규약이다. 145는 GUI 전용 값이므로 캡처
+    # 상수(130.0)에 맞춰 바꾸지 말 것.
     _LABEL_Y_OFFSET = 145.0
 
     def __init__(self, prim_path: str, label_text: str, **kwargs):

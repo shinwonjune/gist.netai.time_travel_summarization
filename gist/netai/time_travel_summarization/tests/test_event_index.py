@@ -1,19 +1,10 @@
 import json
-import sys
-import types
 from datetime import datetime
 from pathlib import Path
 
+from gist.netai.time_travel_summarization.tests.conftest import install_carb_stub
 
-def _install_carb_stub():
-    carb = types.ModuleType("carb")
-    carb.log_info = lambda *args, **kwargs: None
-    carb.log_warn = lambda *args, **kwargs: None
-    carb.log_error = lambda *args, **kwargs: None
-    sys.modules["carb"] = carb
-
-
-_install_carb_stub()
+install_carb_stub()
 
 from gist.netai.time_travel_summarization.events.event_index import (  # noqa: E402
     append_index, index_uri_for, parse_events_from_vlm_result,

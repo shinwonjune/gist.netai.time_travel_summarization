@@ -162,9 +162,13 @@ class LakeTrajectoryRepository(TrajectoryRepository):
         data, ts = self._ensure_loaded(idx)
         self._data = data
         self._timestamps = ts
-        # 활성 청크의 timestamp 집합이 바뀌었으므로 stateful 캐시 무효화
+        # 활성 청크의 timestamp 집합이 바뀌었으므로 stateful 캐시 무효화. _object_samples는
+        # 부모(get_object_last_sample)가 이전 활성 청크 기준으로 지연 생성해 둔 캐시라,
+        # 여기서 같이 비우지 않으면 청크 전환 후에도 첫 청크의 표본 시각이 남아
+        # gap-despawn이 낡은 시각을 읽는다(실측: 청크 경계를 넘은 뒤 despawn 오판).
         self._hybrid.reset()
         self._lkv_cache.reset()
+        self._object_samples = {}
 
     def _ensure_loaded(self, idx: int) -> _Chunk:
         with self._cache_lock:
@@ -210,7 +214,14 @@ class LakeTrajectoryRepository(TrajectoryRepository):
         self._pf_stop = threading.Event()
         self._pf_queue = queue.Queue()
         self._pf_inflight = set()
-        self._pf_thread = threading.Thread(target=self._pf_loop, name="lake-prefetch", daemon=True)
+        # stop 이벤트·큐를 스레드 시작 인자로 지역 바인딩한다(self._pf_stop이 아니라).
+        # _stop_prefetch가 join(timeout=1.0) 뒤 self._pf_stop을 무조건 None으로 되돌리는데,
+        # 느린 minIO 페치 중이던 워커가 그 다음 루프에서 self._pf_stop.is_set()을 호출하면
+        # None에 접근해 AttributeError가 난다 — 지역 인자는 그 경쟁의 영향을 받지 않는다.
+        self._pf_thread = threading.Thread(
+            target=self._pf_loop, args=(self._pf_stop, self._pf_queue),
+            name="lake-prefetch", daemon=True,
+        )
         self._pf_thread.start()
 
     def _stop_prefetch(self):
@@ -225,10 +236,10 @@ class LakeTrajectoryRepository(TrajectoryRepository):
         self._pf_queue = None
         self._pf_thread = None
 
-    def _pf_loop(self):
-        while not self._pf_stop.is_set():
+    def _pf_loop(self, stop: threading.Event, q: "queue.Queue"):
+        while not stop.is_set():
             try:
-                idx = self._pf_queue.get(timeout=0.5)
+                idx = q.get(timeout=0.5)
             except queue.Empty:
                 continue
             if idx is None:
@@ -265,10 +276,6 @@ class LakeTrajectoryRepository(TrajectoryRepository):
 
     def has_data(self) -> bool:
         return bool(self._chunks)
-
-    @property
-    def total_rows(self) -> int:
-        return self._total_rows
 
     def get_object_ids(self) -> List[str]:
         return list(self._objids)

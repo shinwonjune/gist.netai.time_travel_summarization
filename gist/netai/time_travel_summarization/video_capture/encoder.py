@@ -4,6 +4,16 @@ import threading
 from pathlib import Path
 from typing import Optional
 
+try:
+    import carb
+except ImportError:  # pragma: no cover - used by headless tests outside Kit
+    class _CarbFallback:
+        @staticmethod
+        def log_error(*_args, **_kwargs):
+            pass
+
+    carb = _CarbFallback()
+
 
 class EncoderError(RuntimeError):
     pass
@@ -144,4 +154,21 @@ class FrameEncoder:
                 proc.stdin.close()
             except Exception:
                 pass
-            proc.wait(timeout=30)
+            try:
+                proc.wait(timeout=30)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait()
+            stderr_bytes = b""
+            try:
+                if proc.stderr is not None:
+                    stderr_bytes = proc.stderr.read()
+            except Exception:
+                pass
+            output_ok = self._output_path.exists() and self._output_path.stat().st_size > 0
+            if proc.returncode != 0 or not output_ok:
+                tail = "\n".join(stderr_bytes.decode("utf-8", errors="replace").splitlines()[-20:])
+                carb.log_error(
+                    f"[encoder] ffmpeg failed: returncode={proc.returncode} "
+                    f"output={self._output_path} frames_written={self._frames_written}\n{tail}"
+                )

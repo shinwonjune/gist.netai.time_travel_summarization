@@ -11,6 +11,7 @@ UiTaskDispatcher(메인 루프)로 되돌린다.
 from __future__ import annotations
 
 import datetime
+import os
 import threading
 import time
 
@@ -19,16 +20,16 @@ from .remote_generation import (
     connect_server, read_status, submit_job, transport_from_host,
 )
 
-_DEFAULT_HOST = "netai@sv4000-2"
-_DEFAULT_EXT_ROOT = "/home/netai/wonjune/kit-app-template/source/extensions/gist.netai.time_travel_summarization"
+_DEFAULT_HOST = os.environ.get("TTSUM_REMOTE_HOST", "")  # 머신 종속 값은 .env 소관(scene_profiles.py 원칙)
+_DEFAULT_EXT_ROOT = os.environ.get("TTSUM_REMOTE_EXT_ROOT", "")
 _DEFAULT_STAGE = ("omniverse://10.38.38.32/Projects/Dream-AI_Plus_Twin/"
                   "Workspace_Personal/swj/AI-Grad_Building/A_AI-Grad_Building.usd")
 _UPLOAD_PREFIX = "s3://time-travel-summarization/episodes"
 # L40 apps 디렉토리에 .kit이 여러 개라 러너 자동 발견이 불가 → 명시 지정 필수.
 # prod-20260709가 실제 사용한 앱(job.log "My USD Composer" 확인).
 _DEFAULT_APP_KIT = "my_company.my_usd_composer"
-_DEFAULT_DATASET = "/home/netai/wonjune/ttsum-data/bev-collision-v2"
-_DEFAULT_MERGED_MODEL = "/home/netai/wonjune/ttsum-data/lora_qwen3vl_v3/v0-20260710-051758/checkpoint-133-merged"
+_DEFAULT_DATASET = os.environ.get("TTSUM_DATASET_DIR", "")  # 머신 종속 값은 .env 소관(scene_profiles.py 원칙)
+_DEFAULT_MERGED_MODEL = os.environ.get("TTSUM_MERGED_MODEL", "")
 # GPU 역할 분리(서버 SERVE_GPU와 일치시킬 것): 0=서빙 전용, 1=잡(생성/학습).
 # REST 경로는 job_api가 강제하지만, SSH 직결 경로는 이 값이 그대로 쓰인다.
 _SERVE_GPU = 0

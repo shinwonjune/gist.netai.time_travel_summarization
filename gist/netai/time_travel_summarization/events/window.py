@@ -22,7 +22,7 @@ class EventProcessingWindow:
         self._paths = ExtensionPaths(Path(__file__).resolve().parent.parent)
 
         # UI state
-        self._json_filename_model = ui.SimpleStringModel("video_18_20251113_232343.json")
+        self._json_filename_model = ui.SimpleStringModel("")
         self._status_label = None
         self._process_button = None
 
@@ -152,11 +152,11 @@ class EventProcessingWindow:
             )
             return
 
-        self._update_status("✗ Event processing failed. Check console for details.", error=True)
+        self._update_status("FAIL Event processing failed. Check console for details.", error=True)
 
     def _apply_process_error(self, message: str):
         self._process_button.enabled = True
-        self._update_status(f"✗ Error: {message}", error=True)
+        self._update_status(f"FAIL Error: {message}", error=True)
 
     def destroy(self):
         """Clean up the window."""
@@ -166,13 +166,3 @@ class EventProcessingWindow:
         if self._window:
             self._window.destroy()
             self._window = None
-    
-    def show(self):
-        """Show the window."""
-        if self._window:
-            self._window.visible = True
-    
-    def hide(self):
-        """Hide the window."""
-        if self._window:
-            self._window.visible = False

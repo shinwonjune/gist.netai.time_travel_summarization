@@ -6,10 +6,11 @@ An *episode* is one captured wander video plus its sidecar and collision labels:
     <name>.meta.json    # capture_start (t0), fps, collisions_csv, objid_to_label
     collisions_*.csv    # [timestamp, objid, x, y, z, kind] (path taken from meta)
 
-Why 2-second clips: at inference the VSS server splits the video into 2s chunks
-(``vlm_client/core.py`` default_chunk_duration=2) and the VLM only ever sees ONE
-2s chunk per call, reading the burned-in HH:MM:SS overlay to report collisions.
-So each training sample = one 2s clip = exactly what the model sees at inference.
+Why 2-second clips: at inference the vLLM direct client (``utils/vllm_client.py``,
+default_chunk_duration=2.0) slices the video into 2s chunks itself and the VLM only
+ever sees ONE 2s chunk per call, reading the burned-in HH:MM:SS overlay to report
+collisions. So each training sample = one 2s clip = exactly what the model sees at
+inference.
 
 Labels: collisions are stamped with ``datetime.now()`` — the SAME wall-clock the
 overlay shows — so a collision at wall-clock ``t`` lands in the clip whose window
@@ -310,7 +311,7 @@ def main() -> None:
     ap.add_argument("--clip-sec", type=float, default=2.0)
     ap.add_argument("--neg-ratio", type=float, default=1.0, help="negatives per positive (~50:50 at 1.0)")
     ap.add_argument("--preset", default="twin_view", choices=sorted(PROMPTS.keys()))
-    ap.add_argument("--nframes", type=int, default=20, help="frames/clip the VLM sees at inference (VSS); informational")
+    ap.add_argument("--nframes", type=int, default=20, help="frames/clip the VLM sees at inference (vLLM direct client); informational")
     ap.add_argument("--content-hz", type=float, default=None,
                     help="decimate distinct content to this rate (e.g. 5) for a sampling-rate A/B; default keeps native")
     ap.add_argument("--kinds", nargs="*", default=["object"], help="collision kinds to label (default: object-object only)")

@@ -3,12 +3,9 @@ VLM 서버에 동영상을 보내 분석을 요청하고 결과를 저장하는 
 영상은 2초 청크로 잘라 청크마다 한 번 요청한다(청크 겹침 0초) — 학습 클립 길이와
 같게 맞춘 값이라 train == infer 정합이 유지된다.
 
-백엔드 선택과 주소는 **환경변수**가 정한다(코드에 IP를 박지 않는다):
-  VLM_API=openai (기본) -> utils.vllm_client.VLLMClient, 주소는 VLM_BASE_URL
-                           (미설정 시 http://localhost:38011 폴백 + 경고)
-  VLM_API=vss           -> 레거시 VSS(VIA) 경유, 주소는 VIA_BACKEND
-                           (미설정 시 http://localhost:8100 폴백 + 경고)
-자세한 배선은 _initialize_client 참조.
+백엔드는 vLLM OpenAI 호환 직결만 지원한다(VLM_API=openai, 기본값). 주소는
+VLM_BASE_URL 환경변수(코드에 IP를 박지 않는다; 미설정 시 http://localhost:38011
+폴백 + 경고). VSS(VIA) 경유 백엔드는 제거됐다 — 자세한 배선은 _initialize_client 참조.
 """
 
 import os
@@ -27,7 +24,7 @@ class VLMClientCore:
     def __init__(self):
         """Initialize VLM Client Core."""
         self._client = None
-        self._api = "openai"                 # "openai"(vLLM 직접) | "vss"(레거시)
+        self._api = "openai"                 # "openai"(vLLM 직접) — 유일 지원 백엔드
         self._current_video_id = None
         self._current_video_path = None      # openai 모드: 업로드 대신 로컬 경로 보관
         self._current_video_source = None    # 원본 URI/경로 (사이드카 앵커 조회용)
@@ -45,48 +42,35 @@ class VLMClientCore:
     def _initialize_client(self):
         """VLM 백엔드 초기화.
 
-        기본은 vLLM OpenAI 호환 직접 호출(VLM_API=openai) — 클라이언트가 청크를
-        직접 슬라이스해 /v1/chat/completions로 보낸다(VSS 스택 불필요, 평가 때
-        쓴 경로와 동일 → train==infer 정합). VLM_API=vss면 레거시 VSS(VIA) 경유.
+        vLLM OpenAI 호환 직접 호출(VLM_API=openai)만 지원 — 클라이언트가 청크를
+        직접 슬라이스해 /v1/chat/completions로 보낸다(평가 때 쓴 경로와 동일 →
+        train==infer 정합). VSS(VIA) 경유 백엔드는 제거됐다.
         """
         try:
             from .prompts import PROMPTS
 
             self._api = os.environ.get("VLM_API", "openai").strip().lower()
-            if self._api == "vss":
-                from ..utils.VSS_client import VSSClient, PromptPreset
-
-                base_url = os.environ.get("VIA_BACKEND")
-                if not base_url:
-                    base_url = "http://localhost:8100"
-                    carb.log_warn(
-                        "[VLMClient] VIA_BACKEND not set; falling back to "
-                        f"{base_url}. Set VIA_BACKEND to your VSS server URL."
-                    )
-                presets = {name: PromptPreset(**spec) for name, spec in PROMPTS.items()}
-                self._client = VSSClient(
-                    base_url=base_url,
-                    default_chunk_duration=2,
-                    default_chunk_overlap_duration=0,
-                    prompt_presets=presets,
+            if self._api != "openai":
+                raise ValueError(
+                    "VLM_API must be 'openai' (VSS backend removed)"
                 )
-            else:
-                from ..utils.vllm_client import VLLMClient
 
-                # vLLM 기동 스크립트(VLM_server/run_qwen3-vl-8b.sh)의 포트가 기본값.
-                base_url = os.environ.get("VLM_BASE_URL")
-                if not base_url:
-                    base_url = "http://localhost:38011"
-                    carb.log_warn(
-                        "[VLMClient] VLM_BASE_URL not set; falling back to "
-                        f"{base_url}. Set VLM_BASE_URL to your vLLM server URL."
-                    )
-                # 프리셋 원본(dict)을 그대로 전달 — 학습 빌더와 동일 문자열 보장.
-                self._client = VLLMClient(
-                    base_url=base_url,
-                    prompt_presets=PROMPTS,
-                    default_chunk_duration=2.0,
+            from ..utils.vllm_client import VLLMClient
+
+            # vLLM 기동 스크립트(VLM_server/run_qwen3-vl-8b.sh)의 포트가 기본값.
+            base_url = os.environ.get("VLM_BASE_URL")
+            if not base_url:
+                base_url = "http://localhost:38011"
+                carb.log_warn(
+                    "[VLMClient] VLM_BASE_URL not set; falling back to "
+                    f"{base_url}. Set VLM_BASE_URL to your vLLM server URL."
                 )
+            # 프리셋 원본(dict)을 그대로 전달 — 학습 빌더와 동일 문자열 보장.
+            self._client = VLLMClient(
+                base_url=base_url,
+                prompt_presets=PROMPTS,
+                default_chunk_duration=2.0,
+            )
 
             carb.log_info(f"[VLMClient] Initialized api={self._api} base_url={base_url}")
 
@@ -98,15 +82,16 @@ class VLMClientCore:
     
     def upload_video(self, video_source: str) -> bool:
         """
-        Upload video to VSS server.
-        
+        Select the video for analysis (direct/vLLM mode: stages a local path,
+        no server-side upload).
+
         Args:
             video_source: Video filename (relative to videos/ directory) or storage URI
 
         Returns:
             True if successful, False otherwise
         """
-        # minIO 콘솔 복사(`버킷/키`) 입력에 s3:// 접두 — openai/vss 두 경로 공통 초입.
+        # minIO 콘솔 복사(`버킷/키`) 입력에 s3:// 접두.
         from ..storage import normalize_source
 
         video_source = normalize_source(video_source)
@@ -115,76 +100,10 @@ class VLMClientCore:
             carb.log_error("[VLMClient] Client not initialized")
             return False
 
-        if self._api != "vss":
-            # 직접(vLLM) 모드: 서버 업로드 개념이 없다 — 요청마다 청크를 실어 보내므로
-            # 여기서는 로컬 경로 확보(URI면 임시 파일로 스테이징)만 한다.
-            return self._stage_video_direct(video_source)
+        # 직접(vLLM) 모드: 서버 업로드 개념이 없다 — 요청마다 청크를 실어 보내므로
+        # 여기서는 로컬 경로 확보(URI면 임시 파일로 스테이징)만 한다.
+        return self._stage_video_direct(video_source)
 
-        if "://" in video_source:
-            tmp_path = None
-            try:
-                import tempfile
-
-                from ..storage import from_uri
-
-                adapter = from_uri(video_source)
-                if not adapter.exists(video_source):
-                    carb.log_error(f"[VLMClient] Video URI not found: {video_source}")
-                    return False
-
-                with tempfile.NamedTemporaryFile(delete=False, suffix=".mp4") as tmp_file:
-                    tmp_path = Path(tmp_file.name)
-
-                with adapter.open_read(video_source) as stream:
-                    tmp_path.write_bytes(stream.read())
-
-                carb.log_info(f"[VLMClient] Uploading video URI via temp file: {video_source}")
-
-                response = self._client.upload_video(str(tmp_path))
-                self._last_upload_response = response
-                self._current_video_id = response.get("id")
-
-                carb.log_info(f"[VLMClient] Uploaded video ID: {self._current_video_id}")
-                return True
-
-            except Exception as e:
-                carb.log_error(f"[VLMClient] Upload failed: {e}")
-                import traceback
-                carb.log_error(traceback.format_exc())
-                return False
-            finally:
-                if tmp_path and tmp_path.exists():
-                    try:
-                        tmp_path.unlink()
-                    except Exception as cleanup_error:
-                        carb.log_warn(f"[VLMClient] Failed to delete temp upload file: {cleanup_error}")
-
-        try:
-            # Construct full path
-            video_path = self._videos_base_path / video_source
-            
-            if not video_path.exists():
-                carb.log_error(f"[VLMClient] Video file not found: {video_path}")
-                return False
-            
-            carb.log_info(f"[VLMClient] Uploading video: {video_path}")
-            
-            # Upload video
-            response = self._client.upload_video(str(video_path))
-            
-            # Store response and video ID
-            self._last_upload_response = response
-            self._current_video_id = response.get("id")
-            
-            carb.log_info(f"[VLMClient] Uploaded video ID: {self._current_video_id}")
-            return True
-            
-        except Exception as e:
-            carb.log_error(f"[VLMClient] Upload failed: {e}")
-            import traceback
-            carb.log_error(traceback.format_exc())
-            return False
-    
     def _cleanup_staged(self):
         if self._staged_tmp_path:
             try:
@@ -247,34 +166,14 @@ class VLMClientCore:
             carb.log_error("[VLMClient] No video ID to delete")
             return False
 
-        if self._api != "vss":
-            # 직접 모드: 서버에 지울 것이 없다 — 로컬 선택 상태만 해제.
-            self._cleanup_staged()
-            self._current_video_id = None
-            self._current_video_path = None
-            self._last_upload_response = None
-            carb.log_info("[VLMClient] Cleared selected video (direct mode)")
-            return True
+        # 직접 모드: 서버에 지울 것이 없다 — 로컬 선택 상태만 해제.
+        self._cleanup_staged()
+        self._current_video_id = None
+        self._current_video_path = None
+        self._last_upload_response = None
+        carb.log_info("[VLMClient] Cleared selected video (direct mode)")
+        return True
 
-        try:
-            carb.log_info(f"[VLMClient] Deleting video ID: {self._current_video_id}")
-            
-            response = self._client.delete_video(self._current_video_id)
-            
-            carb.log_info(f"[VLMClient] Video deleted: {response}")
-            
-            # Clear current video ID
-            self._current_video_id = None
-            self._last_upload_response = None
-            
-            return True
-            
-        except Exception as e:
-            carb.log_error(f"[VLMClient] Delete failed: {e}")
-            import traceback
-            carb.log_error(traceback.format_exc())
-            return False
-    
     def generate_captions(
         self,
         model: str = "Qwen3-VL-8B-Instruct",
@@ -310,26 +209,18 @@ class VLMClientCore:
             carb.log_info(f"[VLMClient] Model: {model}, Preset: {preset_name}")
             carb.log_info(f"[VLMClient] Chunk overlap duration: {chunk_overlap_duration}s")
             
-            # Generate captions — 백엔드 분기 (응답은 둘 다 chunk_responses 형식)
-            if self._api != "vss":
-                if not self._current_video_path:
-                    carb.log_error("[VLMClient] No video selected (direct mode)")
-                    return False, None
-                if chunk_overlap_duration:
-                    carb.log_warn("[VLMClient] direct 모드는 chunk overlap 미지원 — 0으로 진행")
-                response = self._client.analyze_video(
-                    str(self._current_video_path),
-                    model=model,
-                    preset_name=preset_name,
-                )
-            else:
-                response = self._client.generate_vlm_captions(
-                    video_id=self._current_video_id,
-                    model=model,
-                    preset_name=preset_name,
-                    chunk_overlap_duration=chunk_overlap_duration
-                )
-            
+            # Generate captions (응답은 chunk_responses 형식)
+            if not self._current_video_path:
+                carb.log_error("[VLMClient] No video selected (direct mode)")
+                return False, None
+            if chunk_overlap_duration:
+                carb.log_warn("[VLMClient] direct 모드는 chunk overlap 미지원 — 0으로 진행")
+            response = self._client.analyze_video(
+                str(self._current_video_path),
+                model=model,
+                preset_name=preset_name,
+            )
+
             # 원본 영상 URI 기록 — 결과 JSON의 video는 스테이징 임시명이라 사이드카를
             # 역추적할 수 없다. Process Events가 base_date(사이드카 capture_start)를
             # 복원하려면 원본 참조가 필요.
@@ -411,11 +302,3 @@ class VLMClientCore:
     def has_video_uploaded(self) -> bool:
         """Check if video is uploaded."""
         return self._current_video_id is not None
-    
-    def get_videos_path(self) -> str:
-        """Get videos directory path."""
-        return str(self._videos_base_path)
-    
-    def get_outputs_path(self) -> str:
-        """Get outputs directory path."""
-        return str(self._outputs_base_path)

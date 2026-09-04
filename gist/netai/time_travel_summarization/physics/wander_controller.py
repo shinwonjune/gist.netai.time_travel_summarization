@@ -1,11 +1,6 @@
 import math
 import os
 import random
-from enum import Enum
-
-
-class PrimState(Enum):
-    MOVING = "moving"
 
 
 class WanderController:

@@ -1,6 +1,5 @@
 # 정적 게이트 + 단위 테스트 CI (플랫폼고도화 J1-③)
-# push/PR마다: ruff 린트 → mypy(점진 대상) → Kit 불필요 테스트.
-# Kit 런타임(omni.*)이 필요한 테스트는 `kit` 마커로 표시하고 여기서 제외한다.
+# push/PR마다: ruff 린트 → mypy(점진 대상) → 단위 테스트.
 name: ci
 
 on:
@@ -29,8 +28,8 @@ jobs:
       - name: Type check (mypy — 점진 대상 모듈)
         run: mypy
 
-      - name: Unit tests (Kit 불필요 분량)
-        run: pytest -m "not kit" -q
+      - name: Unit tests
+        run: pytest -q
 
       - name: Pure-helper self-tests
         run: |

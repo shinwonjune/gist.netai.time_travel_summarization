@@ -1,7 +1,7 @@
 # 정적 품질 게이트 설정 (플랫폼고도화 J1-②③)
 # 실행:  uvx ruff check gist/        (린트)
 #        uvx mypy                    (타입 검사 — 신규 순수 모듈부터 점진 적용)
-#        uvx --with minio pytest     (테스트 — kit 마커 제외는 CI 참조)
+#        uvx --with minio pytest     (테스트)
 
 [tool.ruff]
 line-length = 120
@@ -47,6 +47,3 @@ check_untyped_defs = true
 
 [tool.pytest.ini_options]
 testpaths = ["gist/netai/time_travel_summarization/tests"]
-markers = [
-    "kit: Omniverse Kit 런타임(omni.*)이 필요한 테스트 — CI에서는 -m 'not kit'로 제외",
-]

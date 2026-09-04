@@ -1,5 +1,6 @@
 import os
 import shutil
+import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import BinaryIO, Iterator, Optional
@@ -16,7 +17,7 @@ class LocalAdapter(StorageAdapter):
     def put_bytes(self, uri: str, data: bytes, content_type: Optional[str] = None) -> None:
         target = self._path_from_uri(uri)
         target.parent.mkdir(parents=True, exist_ok=True)
-        tmp_path = self._tmp_path(target)
+        tmp_path = self._make_tmp_path(target)
         try:
             tmp_path.write_bytes(data)
             os.replace(tmp_path, target)
@@ -27,7 +28,7 @@ class LocalAdapter(StorageAdapter):
     def put_file(self, uri: str, local_path: Path, content_type: Optional[str] = None) -> None:
         target = self._path_from_uri(uri)
         target.parent.mkdir(parents=True, exist_ok=True)
-        tmp_path = self._tmp_path(target)
+        tmp_path = self._make_tmp_path(target)
         try:
             shutil.copyfile(local_path, tmp_path)
             os.replace(tmp_path, target)
@@ -59,8 +60,14 @@ class LocalAdapter(StorageAdapter):
         return self._object_info(path)
 
     @staticmethod
-    def _tmp_path(path: Path) -> Path:
-        return path.with_name(f"{path.name}.tmp")
+    def _make_tmp_path(target: Path) -> Path:
+        # 같은 대상에 동시 쓰기가 들어와도 서로 다른 임시 파일을 쓰도록 고정 ".tmp" 이름
+        # 대신 mkstemp로 유니크한 이름을 받는다(디렉토리 동일 = os.replace 원자성 유지).
+        fd, tmp_name = tempfile.mkstemp(
+            prefix=f"{target.name}.", suffix=".tmp", dir=str(target.parent)
+        )
+        os.close(fd)
+        return Path(tmp_name)
 
     @staticmethod
     def _path_from_uri(uri: str) -> Path:

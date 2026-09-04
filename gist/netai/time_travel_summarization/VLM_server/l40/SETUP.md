@@ -10,7 +10,7 @@ L40에서 이 repo를 `git pull` 받아 사용하는 전제의 셋업 절차. �
 | Python | 3.10+ | `python3 --version` |
 | CUDA GPU | L40 (LoRA 학습용) | `nvidia-smi` |
 | ffmpeg | build_dataset 클립 슬라이싱에 필수 | `ffmpeg -version` |
-| minIO 접근 | 아웃바운드 HTTPS | `curl -sS -m 5 https://api.minio.mobilex.kr/minio/health/live -o /dev/null -w "%{http_code}\n"` → 200 |
+| minIO 접근 | 아웃바운드 HTTPS | `curl -sS -m 5 $MINIO_ENDPOINT/minio/health/live -o /dev/null -w "%{http_code}\n"` → 200 |
 
 ## 1. 저장소 + 가상환경
 

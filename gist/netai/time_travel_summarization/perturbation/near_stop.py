@@ -9,15 +9,16 @@
 **만드는 것.** 한 쌍(A,B)에 대해:
   1. 접근  — 실측 near-miss 에피소드에서 두 객체가 서로 다가가는 구간을 그대로 쓴다
              (운동 질감 = 실측). 중심거리가 목표 정지 거리 이하로 내려가는 첫 샘플에서 절단.
-  2. 정지  — 절단 지점 좌표를 30Hz로 hold_s초만큼 반복. 반동이 없다(접촉이 없으므로).
+  2. 정지  — 절단 지점 좌표를 원본 표집률(infer_hz()로 trace에서 유도)로 hold_s초만큼
+             반복. 반동이 없다(접촉이 없으므로).
   3. 이탈  — 실측 이탈 조각을 **첫 샘플이 정지 위치와 일치하도록 평행이동**하고,
              진행 방향만 away 방향으로 회전해 붙인다. 위치 공백은 구성상 불가능하다.
              몸 자세(orientation)는 건드리지 않는다 — 이 안무에는 헤딩 회전이 없다.
-  4. 시각  — 전체를 균일 30Hz 격자로 재작성한다(결손 없음 → despawn 무관).
+  4. 시각  — 전체를 원본 표집률의 균일 격자로 재작성한다(결손 없음 → despawn 무관).
 
 **GT**: 접촉이 없으므로 충돌 0건. 발화는 전부 FP로 계상한다(near_miss와 같은 규약).
 
-self-test:  python3 perturbation/near_stop.py
+self-test:  python3 -m gist.netai.time_travel_summarization.perturbation.near_stop --self-test
 """
 from __future__ import annotations
 
@@ -81,12 +82,16 @@ def author_near_stop(rows: List[Row], a: str, b: str, stop_distance: float,
                      pre_s: Optional[float] = None,
                      post_s: Optional[float] = None,
                      align_seconds: bool = False) -> List[Row]:
-    """접근 → 정지(hold_s) → 이탈 trace를 만든다. 30Hz 균일 격자로 재작성.
+    """접근 → 정지(hold_s) → 이탈 trace를 만든다. 원본 표집률의 균일 격자로 재작성.
 
-    depart_rows가 None이면 원본의 정지 이후 구간을 이탈 조각으로 쓰되, **서로
-    멀어지는 방향으로 반사**해 재접근을 막는다. 다른 객체(비대상)는 접근 구간의
-    마지막 위치에 그대로 둔다 — 이 조건이 재는 것은 대상 쌍의 운동이므로 제3자가
-    창 안에서 새 조우를 만들면 안 된다.
+    depart_rows가 None이면 이탈 조각으로 **각 객체 자신의 접근 구간을 역순으로 뒤집어
+    부호를 반전**해 쓴다(들어온 길을 그대로 되짚어 나간다) — 원본이 충돌 에피소드라서
+    "정지 이후 구간"에는 반동·pause·방향 재추첨 같은 충돌 안무가 들어 있으므로 그걸
+    그대로 쓰면 안 되고(상세 사유는 아래 구현부 주석), 접근 스텝을 반전하면 실측 질감은
+    유지하면서 거리가 단조 증가함이 보장된다. depart_rows를 명시하면 외부 이탈 조각을
+    우선한다. 다른 객체(비대상)는 정지·이탈 구간 내내 **원 궤적을 계속 따라간다**(마지막
+    위치에 얼어붙지 않는다) — 대상 쌍만 멈추고 배경 전체가 정지하면 "정지 형식" 자체가
+    새 단서가 되므로, 이 조건이 재는 것은 어디까지나 대상 쌍의 접근-정지 운동이다.
     """
     hz = hz or infer_hz(rows)
     frames = frames_by_time(rows)
@@ -241,6 +246,9 @@ def verify_near_stop(rows: List[Row], a: str, b: str, stop_distance: float,
        충돌 에피소드의 사후 구간을 이탈 템플릿으로 쓰면 그 안의 반동·재추첨 때문에
        멀어지다 되돌아오는데(실측 121→125→117), 그건 접촉 없는 조건에 접촉의 운동
        서명을 심는 것이라 반드시 걸러야 한다.
+
+    stop_distance: 현재 미사용(호환 유지) — author_near_stop과 같은 시그니처를
+    맞추려고 남겨둔 파라미터로, 검증 자체는 contact_distance 하나만 본다.
     """
     hz = hz or infer_hz(rows)
     frames = frames_by_time(rows)
@@ -265,7 +273,10 @@ def verify_near_stop(rows: List[Row], a: str, b: str, stop_distance: float,
     # 정지 구간 검출: 대상 쌍이 움직이지 않는 최장 연속 구간
     still, best_still, best_end = 0, 0, 0
     for k, ((_t1, o1), (_t2, o2)) in enumerate(zip(frames, frames[1:]), start=1):
-        moved = max(horiz_dist(o1[o], o2[o]) for o in (a, b) if o in o1 and o in o2)
+        pair_moves = [horiz_dist(o1[o], o2[o]) for o in (a, b) if o in o1 and o in o2]
+        if not pair_moves:
+            raise ValueError(f"{a},{b}: 프레임 {k}에 대상 쌍이 없다 — 결손 trace는 정지로 세지 않는다")
+        moved = max(pair_moves)
         still = still + 1 if moved < 1e-6 else 0
         if still > best_still:
             best_still, best_end = still, k

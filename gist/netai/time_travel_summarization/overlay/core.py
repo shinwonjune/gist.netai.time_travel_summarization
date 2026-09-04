@@ -33,13 +33,6 @@ class ViewOverlay:
         if self._usd_context.get_stage():
             self._build_scene_for_stage()
 
-    def set_visible(self, visible: bool):
-        self._visible = visible
-        self._labels_visible = visible
-        self._time_visible = visible
-        self._set_scene_visible(visible)
-        self._time_overlay.set_visible(visible)
-
     def set_labels_visible(self, visible: bool):
         self._labels_visible = visible
         self._set_scene_visible(visible)
@@ -47,9 +40,6 @@ class ViewOverlay:
     def set_time_visible(self, visible: bool):
         self._time_visible = visible
         self._time_overlay.set_visible(visible)
-
-    def is_visible(self) -> bool:
-        return self._visible
 
     def shutdown(self):
         self._stage_event_sub = None

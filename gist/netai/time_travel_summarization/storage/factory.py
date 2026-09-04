@@ -1,3 +1,4 @@
+import threading
 from urllib.parse import urlparse
 
 from .base import StorageAdapter
@@ -6,6 +7,7 @@ from .minio_adapter import MinioAdapter
 
 _LOCAL = None
 _MINIO = None
+_lock = threading.Lock()
 
 
 def from_uri(uri: str) -> StorageAdapter:
@@ -14,10 +16,14 @@ def from_uri(uri: str) -> StorageAdapter:
     global _LOCAL, _MINIO
     if scheme in ("s3", "minio"):
         if _MINIO is None:
-            _MINIO = MinioAdapter()
+            with _lock:
+                if _MINIO is None:
+                    _MINIO = MinioAdapter()
         return _MINIO
     if scheme in ("file", ""):
         if _LOCAL is None:
-            _LOCAL = LocalAdapter()
+            with _lock:
+                if _LOCAL is None:
+                    _LOCAL = LocalAdapter()
         return _LOCAL
     raise ValueError(f"Unsupported URI scheme: {scheme!r} (uri={uri!r})")

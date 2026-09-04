@@ -42,8 +42,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
-from fastapi import FastAPI, Header, HTTPException
-from pydantic import BaseModel, Field
+from fastapi import FastAPI, Header, HTTPException, Request
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import JSONResponse
+from pydantic import BaseModel, Field, field_validator
 
 # 확장 루트: .../EXT_ROOT/gist/netai/time_travel_summarization/VLM_server/l40/job_api.py
 EXT_ROOT = Path(__file__).resolve().parents[5]
@@ -61,8 +63,25 @@ API_KEY = os.environ.get("JOB_API_KEY", "")
 # 서빙(상주 프로세스)과 잡(유한 실행)의 경합을 큐가 아니라 역할 분리로 차단.
 SERVE_GPU = int(os.environ.get("SERVE_GPU", "0"))
 _JOB_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,80}$")  # 경로 조작 방지
+# 자유 문자열로 러너 셸 커맨드라인에 이어붙는 필드 — 화이트리스트는 아니지만
+# 공백류(개행·탭·스페이스)와 "-"로 시작하는 값(플래그 주입)만 최소 차단한다.
+# omniverse://, s3://, 절대경로, 평범한 이름은 전부 통과해야 한다.
+_STRICT_STRING_FIELDS = (
+    "stage", "camera", "upload_uri", "spawn_plan", "scene_profile",
+    "dataset", "train_output", "model_path",
+)
 
 app = FastAPI(title="TTS Generation Job API", version="1.0")
+
+
+@app.exception_handler(RequestValidationError)
+async def _strict_string_field_validation_handler(request: Request, exc: RequestValidationError):
+    """_STRICT_STRING_FIELDS 위반만 400으로 승격 — 그 외 pydantic 검증 실패는 기존 422 유지."""
+    errors = exc.errors()
+    if errors and all(err["loc"] and err["loc"][-1] in _STRICT_STRING_FIELDS for err in errors):
+        detail = "; ".join(f"{err['loc'][-1]}: {err['msg']}" for err in errors)
+        return JSONResponse(status_code=400, content={"detail": detail})
+    return JSONResponse(status_code=422, content={"detail": errors})
 
 # 잡 스토어: 상태·큐의 영속 소스 오브 트루스(SQLite 기본, Postgres 선택 — JOB_STORE_URL).
 # 파일 status는 러너가 쓰는 "진행·로그 채널"로 병존(아래 _worker/get_job 병합).
@@ -106,6 +125,15 @@ class JobRequest(BaseModel):
     replay_end: str = ""                # replay: ISO "YYYY-MM-DD HH:MM:SS"
     data_uri: str = ""                  # replay: 트레이스 URI 또는 레이크 데이터셋 (빈 값=config 기본)
     despawn_gap_s: float = Field(0.0, ge=0.0)   # replay: 결손 인지 despawn 임계(초), 0=비활성
+
+    @field_validator(*_STRICT_STRING_FIELDS)
+    @classmethod
+    def _reject_shell_injection_shapes(cls, value: str) -> str:
+        if any(ch.isspace() for ch in value):
+            raise ValueError("must not contain whitespace/tab/newline")
+        if value.startswith("-"):
+            raise ValueError("must not start with '-' (looks like a CLI flag)")
+        return value
 
 
 def _check_key(x_api_key: Optional[str]) -> None:

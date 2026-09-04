@@ -16,7 +16,7 @@ if curl -sf -m 2 "http://127.0.0.1:$PORT/health" >/dev/null 2>&1; then
 fi
 
 # tmux 비대화형 셸엔 venv PATH가 없을 수 있어 직접 활성화 (run_train.sh와 동일 규칙)
-VENV="${VENV:-$HOME/wonjune/venv}"
+VENV="${VENV:-${TTSUM_HOME:-$HOME/ttsum}/venv}"
 [ -f "$VENV/bin/activate" ] && . "$VENV/bin/activate"
 
 cd "$(dirname "${BASH_SOURCE[0]}")"

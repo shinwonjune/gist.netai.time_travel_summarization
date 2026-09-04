@@ -34,9 +34,8 @@ import urllib.request
 from pathlib import Path
 from typing import Dict, List, Optional, Set, Tuple
 
-DEFAULT_SSH_HOST = "netai@10.38.38.40"   # WSL엔 sv4000-2 알리아스가 없어 IP 직결
-DEFAULT_REMOTE_EXT = ("/home/netai/wonjune/kit-app-template/source/extensions/"
-                      "gist.netai.time_travel_summarization")
+DEFAULT_SSH_HOST = os.environ.get("TTSUM_REMOTE_HOST", "")  # 머신 종속 값은 .env 소관(scene_profiles.py 원칙)
+DEFAULT_REMOTE_EXT = os.environ.get("TTSUM_REMOTE_EXT_ROOT", "")
 API_LOCAL_PORT = 18800    # GUI 터널(8800)과 충돌하지 않는 로컬 포트
 VLLM_LOCAL_PORT = 18011
 MODEL = "Qwen3-VL-8B-Instruct"
@@ -644,6 +643,10 @@ def main() -> None:
     if args.self_test:
         _self_test()
         return
+    if not args.ssh_host:
+        raise SystemExit("TTSUM_REMOTE_HOST unset — --ssh-host로 지정하거나 TTSUM_REMOTE_HOST 환경변수를 설정하세요")
+    if not args.remote_ext_root:
+        raise SystemExit("TTSUM_REMOTE_EXT_ROOT unset — --remote-ext-root로 지정하거나 TTSUM_REMOTE_EXT_ROOT 환경변수를 설정하세요")
 
     out = Path(args.out).resolve()
     out.mkdir(parents=True, exist_ok=True)

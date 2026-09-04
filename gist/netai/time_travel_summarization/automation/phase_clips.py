@@ -51,9 +51,10 @@ collisions CSV에서 ``kind == "object"`` 행을 0.5초 반경으로 묶어 사�
 = 2r)보다 넉넉히 크게 잡은 값이다 — contact report는 중심 거리가 2r 근방(정확히는
 contact offset 여유 껍질, 실측 2r+0.6~2.3)에서 발화하므로 거리 시계열의 최저값이 2r을
 크게 밑돌지 않고, 문턱을 2r에 딱 맞추면 샘플링 격자 탓에 하회 순간을 놓친다. **2r은 규약 세대마다 다르다**: v1 71.7 /
-regime2 63.7 / regime3 60.0(반지름 30 상수). 위 90cm과 아래 실측 d_min
-72.2~75.3cm은 v1 규약에서 정한 값이므로, regime3 클립을 새로 뽑을 때는 문턱을
-그 규약의 2r 기준으로 다시 정할지 검토할 것(v3 계획서 §5).
+regime2 63.7 / regime3 60.0(반지름 30 상수). 문턱 90은 육안 인상에서 온 값이었으나,
+regime2·regime3 모두 절제 반경 계열 실험(plateau/70/80/90/100/110/120)으로
+거리-발화 곡선을 직접 측정해 90의 위치를 확정했다(regime3: 92→102cm 사이 급전이).
+기준선 조건 이름은 no_contact(반경 90)로 유지한다.
 접촉 구간 길이는 사건마다 다르다(실측 0.20s~1.42s) — v2가 쓰던 고정 1초 절제가
 틀린 이유이자, 이 값을 manifest에 ``contact_len_s``로 남기는 이유다.
 
@@ -400,7 +401,6 @@ def excision_interval(series: Series, ev: dict, radius: Optional[float]
     return window[i0][0], window[i1 + 1][0]
 
 
-WINDOW_SPECS: Dict[str, Tuple[str, List[Tuple[float, float]]]] = window_specs()
 NEARMISS_SPEC: List[Tuple[float, float]] = [(-1.0, +1.0)]
 
 
@@ -439,6 +439,12 @@ def parse_event_time(
     collisions CSV는 날짜 없이 ``HH:MM:SS``만 남기는 반면 trace·meta는 날짜를 포함한
     전체 시각을 쓴다. 둘 다 같은 sim-클럭이므로, 날짜가 없는 표기는 capture_start의
     날짜를 붙여 복원한다(에피소드가 자정을 넘겼으면 하루 보정).
+
+    timefmt.parse_event_time과 자정 넘김 문턱이 다르지만(−43200s vs −1s) 생성기가
+    capture_start를 정수 초로 두고 에피소드가 자정을 넘지 못하게 막으며
+    (generate_episodes.py의 base_time_s assert) sim_time이 0 이상으로 clamp되므로
+    두 문턱의 결론은 항상 같다 — 로컬 산출물 2,024 에피소드 32,828행 스캔에서
+    음수 오프셋 0건(2026-09-04 확인). 측정 코드 보존을 위해 통합하지 않음.
     """
     text = (raw or "").strip()
     try:
@@ -727,7 +733,7 @@ def no_contact_segments(
 
 
 def min_pair_distance(frames: Frames, segs: Segments) -> Optional[float]:
-    """창 안 모든 프레임에서 **모든 쌍**의 지면 거리 최솟값. 쌍이 없으면 None.
+    """(2D 지면거리) 창 안 모든 프레임에서 **모든 쌍**의 지면 거리 최솟값. 쌍이 없으면 None.
 
     control 창에는 기준 쌍이 없으므로(무관 구간이라 사건 자체가 없다) 화면 겹침 여부를
     판단하려면 전 쌍을 봐야 한다. near_miss는 기준 쌍의 d_min이 이미 그 값이다.
@@ -1255,10 +1261,13 @@ def main(argv=None):
                     help="제3객체 근접 폐기 문턱(cm). 창 동안 기준 쌍이 아닌 객체가 "
                          "이보다 가까이 오면 창 폐기. 0이면 비활성")
     ap.add_argument("--overlay-touch-cm", type=float, default=0.0,
-                    help="화면 겹침 판정 거리(cm). 0이면 overlay_overlap 미부여. "
-                         "near_miss·control 클립에만 적용")
+                    help="[legacy] 픽셀 판정(overlay_flags.py)이 정본 — 이 거리 문턱 방식은 "
+                         "철회됨(기본 0.0 = 비활성). 화면 겹침 판정 거리(cm). 0이면 "
+                         "overlay_overlap 미부여. near_miss·control 클립에만 적용")
     ap.add_argument("--reflag-manifest",
-                    help="기존 clips_manifest.json에 overlay_overlap만 재부여(재절단 없음)")
+                    help="[legacy] 픽셀 판정(overlay_flags.py)이 정본 — 이 거리 문턱 방식은 "
+                         "철회됨(기본 0.0 = 비활성). 기존 clips_manifest.json에 "
+                         "overlay_overlap만 재부여(재절단 없음)")
     ap.add_argument("--controls-per-episode", type=int, default=1)
     ap.add_argument("--seed", type=int, default=42)
     ap.add_argument("--dry-run", action="store_true", help="ffmpeg 없이 계획만 출력")

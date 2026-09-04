@@ -1,25 +1,9 @@
 import datetime
-import sys
 import types
 
+from gist.netai.time_travel_summarization.tests.conftest import install_carb_stub
 
-def _install_carb_stub():
-    carb = types.ModuleType("carb")
-    carb.log_info = lambda *args, **kwargs: None
-    carb.log_warn = lambda *args, **kwargs: None
-    carb.log_error = lambda *args, **kwargs: None
-    sys.modules["carb"] = carb
-
-    stage_module = types.ModuleType(
-        "gist.netai.time_travel_summarization.playback.stage_object_controller"
-    )
-    stage_module.StageObjectController = object
-    sys.modules[
-        "gist.netai.time_travel_summarization.playback.stage_object_controller"
-    ] = stage_module
-
-
-_install_carb_stub()
+install_carb_stub(with_stage_object_controller=True)
 
 from gist.netai.time_travel_summarization.app.facade import TimeTravelCore  # noqa: E402
 from gist.netai.time_travel_summarization.playback.controller import PlaybackController  # noqa: E402

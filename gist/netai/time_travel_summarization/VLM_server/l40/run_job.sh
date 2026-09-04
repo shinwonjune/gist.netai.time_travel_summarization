@@ -13,7 +13,7 @@
 # 공용 서버 수칙 (run_smoke.sh와 동일):
 #  - 산출물은 repo 안에만, 프로세스 정리는 자기 자식 PID만 (이름 기반 pkill 금지)
 #  - GPU는 지정 1개만 (--/renderer/activeGpu + multiGpu off + CUDA_VISIBLE_DEVICES)
-# 자격증명: $HOME/wonjune/.env.l40 이 있으면 source (MINIO_*, OMNI_USER/PASS —
+# 자격증명: ${TTSUM_HOME:-$HOME/ttsum}/.env.l40 이 있으면 source (MINIO_*, OMNI_USER/PASS —
 #           무인 잡의 Nucleus 인증·minIO 업로드에 필요)
 set -euo pipefail
 
@@ -84,7 +84,7 @@ write_status running 0 "resolving kit/app"
 
 KIT_ROOT="${KIT_ROOT:-}"
 if [ -z "$KIT_ROOT" ]; then
-  for cand in "$EXT_ROOT/../../.." "$HOME/wonjune/kit-app-template" "$HOME/kit-app-template"; do
+  for cand in "$EXT_ROOT/../../.." "${TTSUM_HOME:-$HOME/ttsum}/kit-app-template" "$HOME/kit-app-template"; do
     if [ -x "$cand/_build/linux-x86_64/release/kit/kit" ]; then
       KIT_ROOT="$(cd "$cand" && pwd)"; break
     fi
@@ -104,8 +104,8 @@ fi
 [ -f "$APP" ] || fail "앱 없음: $APP"
 
 # 자격증명 (무인 Nucleus/minIO)
-if [ -f "$HOME/wonjune/.env.l40" ]; then
-  set -a; . "$HOME/wonjune/.env.l40"; set +a
+if [ -f "${TTSUM_HOME:-$HOME/ttsum}/.env.l40" ]; then
+  set -a; . "${TTSUM_HOME:-$HOME/ttsum}/.env.l40"; set +a
 fi
 
 write_status running 0

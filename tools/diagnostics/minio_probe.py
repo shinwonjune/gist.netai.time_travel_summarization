@@ -5,7 +5,7 @@ MinIO 연결 read-only 점검.
 - ListBuckets / ListObjectsV2 만 호출 (쓰기/삭제 없음)
 - pure stdlib AWS Signature V4 (외부 패키지 불필요)
 
-사용: python3 minio_probe.py [prefix]
+사용: python3 tools/diagnostics/minio_probe.py [prefix]
 """
 import datetime
 import hashlib
@@ -71,7 +71,7 @@ def signed_get(endpoint, access, secret, region, path, query=""):
 
 
 def main():
-    env_path = Path(__file__).resolve().parent.parent / ".env"
+    env_path = Path(__file__).resolve().parent.parent.parent / "gist" / "netai" / "time_travel_summarization" / ".env"
     env = {**load_env(env_path), **os.environ}
 
     endpoint = env.get("MINIO_ENDPOINT", "").rstrip("/")

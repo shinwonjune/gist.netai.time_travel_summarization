@@ -29,6 +29,7 @@ import math
 import random
 from typing import Dict, Iterable, List, Optional, Tuple
 
+from .. import timefmt
 from .trajectory_repository import TrajectoryRepository
 
 MANIFEST_NAME = "manifest.json"
@@ -76,15 +77,14 @@ def generate_synthetic_rows(
     성능 측정용. n_objects/duration_s로 규모를 조절한다(예: 100객체×12시간).
     """
     rng = random.Random(seed)
-    fmt = "%Y-%m-%d %H:%M:%S.%f"
-    base = datetime.datetime.strptime(start, fmt)
+    base = datetime.datetime.strptime(start, timefmt.TIMESTAMP_FMT)
     step = datetime.timedelta(seconds=1.0 / hz)
     n_steps = int(round(duration_s * hz))
     lo, hi = bounds
     objids = [f"obj{idx:03d}" for idx in range(1, n_objects + 1)]
     pos = {oid: [rng.uniform(lo, hi), rng.uniform(lo, hi), rng.uniform(lo, hi)] for oid in objids}
     for i in range(n_steps):
-        ts = (base + step * i).strftime(fmt)[:-3]
+        ts = timefmt.format_timestamp(base + step * i)
         for oid in objids:
             p = pos[oid]
             for a in range(3):
@@ -198,6 +198,9 @@ def append_rows(
     - 기존 청크와 시간이 겹치면 거부(같은 데이터 재적재 방지).
     - manifest가 없으면 ingest_rows로 새 데이터셋 생성.
     - 교체 전 이전 manifest를 manifest.json.bak으로 백업.
+
+    manifest가 없을 때 300초·parquet으로 신규 생성(ingest_rows 기본값 60·csv와 다름 —
+    의도된 배포 기본값, ingest_trajectory.py --chunk-seconds 도움말과 일치).
     """
     from ..storage import from_uri
 
@@ -278,6 +281,9 @@ def ingest_rows(
 
     dataset_uri: 's3://bucket/trajectory/ds1' 또는 'file:///tmp/lake/ds1'.
     반환: 작성한 manifest dict.
+
+    기본값 60초 청크·csv는 직접 호출·테스트·성능 측정용. 프로덕션 궤적 레이크
+    신규 생성은 append_rows(300초·parquet) 경로를 쓸 것.
     """
     from ..storage import from_uri
 

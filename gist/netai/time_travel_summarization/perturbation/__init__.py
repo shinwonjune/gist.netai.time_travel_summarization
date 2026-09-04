@@ -1,3 +1,4 @@
+from .near_stop import author_near_stop, verify_near_stop
 from .perturb import (
     downsample,
     dump_trace,
@@ -11,4 +12,5 @@ from .perturb import (
 __all__ = [
     "load_trace", "dump_trace",
     "gaussian", "id_switch", "fragmentation", "occlusion", "downsample",
+    "author_near_stop", "verify_near_stop",
 ]

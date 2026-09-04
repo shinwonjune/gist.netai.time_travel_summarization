@@ -2,8 +2,8 @@
 # 스펙(env) 구동 LoRA 학습 잡 러너 — run_job.sh와 동일한 status 파일 계약.
 #
 # 입력: JOB_ID(필수), DATASET(필수 — build_dataset 산출 디렉토리, train/val.jsonl 포함),
-#       GPU(기본 1), TRAIN_OUTPUT(빈 값 = $HOME/wonjune/ttsum-data/lora_runs/$JOB_ID),
-#       MODEL(기본 Qwen/Qwen3-VL-8B-Instruct), VENV(기본 $HOME/wonjune/venv)
+#       GPU(기본 1), TRAIN_OUTPUT(빈 값 = ${TTSUM_HOME:-$HOME/ttsum}/ttsum-data/lora_runs/$JOB_ID),
+#       MODEL(기본 Qwen/Qwen3-VL-8B-Instruct), VENV(기본 ${TTSUM_HOME:-$HOME/ttsum}/venv)
 # 상태: $EXT_ROOT/artifacts/jobs/$JOB_ID/status (state=running|done|failed)
 #
 # 학습 본체는 검증된 training/qwen3vl_lora_swift.sh를 그대로 호출(하이퍼파라미터
@@ -16,7 +16,7 @@ DATASET="${DATASET:?DATASET 필요 (build_dataset 산출 디렉토리)}"
 GPU="${GPU:-1}"
 MODEL="${MODEL:-Qwen/Qwen3-VL-8B-Instruct}"
 TRAIN_OUTPUT="${TRAIN_OUTPUT:-}"
-VENV="${VENV:-$HOME/wonjune/venv}"
+VENV="${VENV:-${TTSUM_HOME:-$HOME/ttsum}/venv}"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 EXT_ROOT="$(git -C "$SCRIPT_DIR" rev-parse --show-toplevel)"
@@ -30,7 +30,7 @@ JOB_DIR="$EXT_ROOT/artifacts/jobs/$JOB_ID"
 LOG="$JOB_DIR/job.log"
 STATUS="$JOB_DIR/status"
 mkdir -p "$JOB_DIR"
-[ -n "$TRAIN_OUTPUT" ] || TRAIN_OUTPUT="$HOME/wonjune/ttsum-data/lora_runs/$JOB_ID"
+[ -n "$TRAIN_OUTPUT" ] || TRAIN_OUTPUT="${TTSUM_HOME:-$HOME/ttsum}/ttsum-data/lora_runs/$JOB_ID"
 mkdir -p "$TRAIN_OUTPUT"
 
 write_status() {  # write_status <state>
@@ -45,7 +45,7 @@ write_status() {  # write_status <state>
 
 # 자격증명 + 학습 환경: venv(ms-swift) + HF 소스 고정
 # (USE_HF=1 — 기본 ModelScope로 새면 모델 전체 재다운로드, 일지 #7)
-if [ -f "$HOME/wonjune/.env.l40" ]; then set -a; . "$HOME/wonjune/.env.l40"; set +a; fi
+if [ -f "${TTSUM_HOME:-$HOME/ttsum}/.env.l40" ]; then set -a; . "${TTSUM_HOME:-$HOME/ttsum}/.env.l40"; set +a; fi
 [ -f "$VENV/bin/activate" ] && . "$VENV/bin/activate"
 export USE_HF=1
 

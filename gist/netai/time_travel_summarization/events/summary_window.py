@@ -363,11 +363,3 @@ class EventSummaryWindow:
         if self._window:
             self._window.destroy()
             self._window = None
-
-    def show(self):
-        if self._window:
-            self._window.visible = True
-
-    def hide(self):
-        if self._window:
-            self._window.visible = False

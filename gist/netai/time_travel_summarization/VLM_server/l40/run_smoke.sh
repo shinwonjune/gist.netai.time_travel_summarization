@@ -19,7 +19,7 @@ STAGE="${STAGE:-}"
 CAMERA="${CAMERA:-}"
 
 # 경로 해석 — 두 배치 모두 지원:
-#  (a) 확장 repo 단독 clone (예: ~/wonjune/gist.netai.time_travel_summarization)
+#  (a) 확장 repo 단독 clone (예: ${TTSUM_HOME:-$HOME/ttsum}/gist.netai.time_travel_summarization)
 #  (b) kit-app-template 안에 중첩 (source/extensions/<확장>)
 # 확장 루트 = 이 스크립트가 속한 git repo. Kit 빌드 위치는 KIT_ROOT env로 지정하거나
 # 관례 후보에서 자동 탐색.
@@ -35,7 +35,7 @@ fi
 
 KIT_ROOT="${KIT_ROOT:-}"
 if [ -z "$KIT_ROOT" ]; then
-  for cand in "$EXT_ROOT/../../.." "$HOME/wonjune/kit-app-template" "$HOME/kit-app-template"; do
+  for cand in "$EXT_ROOT/../../.." "${TTSUM_HOME:-$HOME/ttsum}/kit-app-template" "$HOME/kit-app-template"; do
     if [ -x "$cand/_build/linux-x86_64/release/kit/kit" ]; then
       KIT_ROOT="$(cd "$cand" && pwd)"; break
     fi

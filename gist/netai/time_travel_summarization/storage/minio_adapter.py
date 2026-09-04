@@ -1,5 +1,6 @@
 import io
 import os
+import threading
 from pathlib import Path
 from typing import Any, BinaryIO, Iterator, Optional
 from urllib.parse import urlparse
@@ -14,6 +15,8 @@ except Exception:  # pragma: no cover - optional dependency; import failure must
     S3Error = None
 
 from .base import ObjectInfo, StorageAdapter
+
+_client_lock = threading.Lock()
 
 
 class _MinioStream:
@@ -111,18 +114,20 @@ class MinioAdapter(StorageAdapter):
 
     def _get_client(self):
         if self._client is None:
-            config = self._load_config()
-            endpoint = config["MINIO_ENDPOINT"]
-            host = endpoint.split("://", 1)[1] if "://" in endpoint else endpoint
-            secure = config.get("MINIO_SECURE", "false").lower() == "true"
-            region = config.get("MINIO_REGION", "us-east-1")
-            self._client = Minio(
-                host,
-                access_key=config["MINIO_ACCESS_KEY"],
-                secret_key=config["MINIO_SECRET_KEY"],
-                secure=secure,
-                region=region,
-            )
+            with _client_lock:
+                if self._client is None:
+                    config = self._load_config()
+                    endpoint = config["MINIO_ENDPOINT"]
+                    host = endpoint.split("://", 1)[1] if "://" in endpoint else endpoint
+                    secure = config.get("MINIO_SECURE", "false").lower() == "true"
+                    region = config.get("MINIO_REGION", "us-east-1")
+                    self._client = Minio(
+                        host,
+                        access_key=config["MINIO_ACCESS_KEY"],
+                        secret_key=config["MINIO_SECRET_KEY"],
+                        secure=secure,
+                        region=region,
+                    )
         return self._client
 
     @classmethod

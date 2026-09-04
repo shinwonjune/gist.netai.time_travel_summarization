@@ -1,5 +1,8 @@
 """Floor lookup 알고리즘 4종 벤치마크.
 
+레이크성능_리포트 재현용 측정 도구 — pytest 수집 대상 아님(파일명이 test_*.py가
+아님 / 벤치마크 하네스).
+
 목적: timestamp 기반 인덱싱 자료구조는 동일하게 두고, miss 시 가장 가까운
 이전 timestamp를 찾는 **알고리즘**만 4가지로 바꿔 성능·정확성 비교.
 
@@ -20,6 +23,8 @@ import random
 import time
 from pathlib import Path
 from typing import Dict, List, Optional
+
+from .. import timefmt
 
 
 # ---------- pure functions ----------
@@ -154,10 +159,9 @@ def synthesize_timestamps(
     start: str = "2025-01-01 00:00:00.000",
 ) -> List[str]:
     """N개의 timestamp string을 interval_s 간격으로 생성."""
-    fmt = "%Y-%m-%d %H:%M:%S.%f"
-    base = _dt.datetime.strptime(start, fmt)
+    base = _dt.datetime.strptime(start, timefmt.TIMESTAMP_FMT)
     step = _dt.timedelta(seconds=interval_s)
-    return [(base + step * i).strftime(fmt)[:-3] for i in range(n_unique)]
+    return [timefmt.format_timestamp(base + step * i) for i in range(n_unique)]
 
 
 def synthesize_random_queries(
@@ -172,14 +176,13 @@ def synthesize_random_queries(
     랜덤 offset을 더해 grid에 없는 ts도 생성. forward/backward seek 혼합.
     """
     rng = random.Random(seed)
-    fmt = "%Y-%m-%d %H:%M:%S.%f"
-    parsed = [_dt.datetime.strptime(ts, fmt) for ts in timestamps]
+    parsed = [_dt.datetime.strptime(ts, timefmt.TIMESTAMP_FMT) for ts in timestamps]
     out: List[str] = []
     for _ in range(n_queries):
         base = rng.choice(parsed)
         offset_s = rng.uniform(-offset_max_s, offset_max_s)
         ts = base + _dt.timedelta(seconds=offset_s)
-        out.append(ts.strftime(fmt)[:-3])
+        out.append(timefmt.format_timestamp(ts))
     return out
 
 
@@ -189,10 +192,9 @@ def synthesize_forward_queries(
     fps: int = 60,
 ) -> List[str]:
     """60fps wall-clock 단조증가 forward play."""
-    fmt = "%Y-%m-%d %H:%M:%S.%f"
-    start = _dt.datetime.strptime(timestamps[0], fmt)
+    start = _dt.datetime.strptime(timestamps[0], timefmt.TIMESTAMP_FMT)
     step = _dt.timedelta(seconds=1.0 / fps)
-    return [(start + step * i).strftime(fmt)[:-3] for i in range(n_queries)]
+    return [timefmt.format_timestamp(start + step * i) for i in range(n_queries)]
 
 
 def synthesize_backward_queries(
@@ -201,10 +203,9 @@ def synthesize_backward_queries(
     fps: int = 60,
 ) -> List[str]:
     """60fps wall-clock 단조감소 backward play."""
-    fmt = "%Y-%m-%d %H:%M:%S.%f"
-    start = _dt.datetime.strptime(timestamps[-1], fmt)
+    start = _dt.datetime.strptime(timestamps[-1], timefmt.TIMESTAMP_FMT)
     step = _dt.timedelta(seconds=-1.0 / fps)
-    return [(start + step * i).strftime(fmt)[:-3] for i in range(n_queries)]
+    return [timefmt.format_timestamp(start + step * i) for i in range(n_queries)]
 
 
 def synthesize_slider_drag_queries(
@@ -220,14 +221,13 @@ def synthesize_slider_drag_queries(
     """
     if direction not in ("forward", "backward"):
         raise ValueError("direction must be forward|backward")
-    fmt = "%Y-%m-%d %H:%M:%S.%f"
     if direction == "forward":
-        base = _dt.datetime.strptime(timestamps[0], fmt)
+        base = _dt.datetime.strptime(timestamps[0], timefmt.TIMESTAMP_FMT)
         step = _dt.timedelta(seconds=step_s)
     else:
-        base = _dt.datetime.strptime(timestamps[-1], fmt)
+        base = _dt.datetime.strptime(timestamps[-1], timefmt.TIMESTAMP_FMT)
         step = _dt.timedelta(seconds=-step_s)
-    return [(base + step * i).strftime(fmt)[:-3] for i in range(n_queries)]
+    return [timefmt.format_timestamp(base + step * i) for i in range(n_queries)]
 
 
 # ---------- top-level driver ----------

@@ -5,6 +5,18 @@ import omni.usd
 from pxr import Gf, UsdGeom
 
 
+def _get_or_add_translate_op(xformable: UsdGeom.Xformable) -> UsdGeom.XformOp:
+    """ordered xform ops에서 translate op를 찾아 반환하고, 없으면 추가한다.
+
+    XformCommonAPI 대신 이 패턴을 쓰는 이유: physics를 거친 프림에서
+    XformCommonAPI는 예외 없이 조용히 실패한다(프로젝트 표준, physics일지 §39 (e-3)).
+    """
+    for op in xformable.GetOrderedXformOps():
+        if op.GetOpType() == UsdGeom.XformOp.TypeTranslate:
+            return op
+    return xformable.AddTranslateOp()
+
+
 class StageObjectController:
     def __init__(self, camera_path: str = "/World/summarization_camera"):
         self._usd_context = omni.usd.get_context()
@@ -85,14 +97,7 @@ class StageObjectController:
                 continue
 
             xformable = UsdGeom.Xformable(prim)
-            translate_op = None
-            for op in xformable.GetOrderedXformOps():
-                if op.GetOpType() == UsdGeom.XformOp.TypeTranslate:
-                    translate_op = op
-                    break
-
-            if not translate_op:
-                translate_op = xformable.AddTranslateOp()
+            translate_op = _get_or_add_translate_op(xformable)
 
             x, y, z = data[objid]
             translate_op.Set(Gf.Vec3d(x, y, z))
@@ -236,14 +241,7 @@ class StageObjectController:
             return
 
         xformable = UsdGeom.Xformable(camera_prim)
-        translate_op = None
-        for op in xformable.GetOrderedXformOps():
-            if op.GetOpType() == UsdGeom.XformOp.TypeTranslate:
-                translate_op = op
-                break
-
-        if not translate_op:
-            translate_op = xformable.AddTranslateOp()
+        translate_op = _get_or_add_translate_op(xformable)
 
         obj_x, _obj_y, obj_z = event_position
         translate_op.Set(Gf.Vec3d(obj_x, self._camera_height, obj_z))

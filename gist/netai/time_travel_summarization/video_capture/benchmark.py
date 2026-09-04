@@ -10,16 +10,15 @@ NOTE: exec(open(...).read())는 사용 금지 — 본 모듈의 relative import(
 
 만약 extension이 enable되지 않은 상태라면 sys.path 추가:
     import sys
-    sys.path.insert(0, r"C:\\Users\\wonjune\\workspace\\kit-app-template\\source\\extensions\\gist.netai.time_travel_summarization")
+    sys.path.insert(0, r"C:\\Users\\<username>\\workspace\\kit-app-template\\source\\extensions\\gist.netai.time_travel_summarization")
     from gist.netai.time_travel_summarization.video_capture.benchmark import run
     run(duration_s=10.0, repeat=1)
 
 수행 사항:
 - A1, A2 runner 각각 repeat 회 실행
-- 동일 CaptureRequest (해상도 532×280, fps 30, duration_s=60 기본)
+- 동일 CaptureRequest (해상도 720×480, fps 30, duration_s=60 기본)
 - wall_clock_s / output_size_bytes / dropped_frames / sim_fps_avg / error 기록
 - artifacts/benchmarks/capture_<ts>.json 저장
-- docs/REALTIME_CAPTURE.md 결과 표 덮어쓰기 (자기소개서 인용용)
 """
 
 import json
@@ -82,54 +81,6 @@ def _summarize(label: str, results: list) -> dict:
     }
 
 
-def _markdown_table(summary_a1: dict, summary_a2: dict, duration_s: float, repeat: int, width: int, height: int, fps: int) -> str:
-    def fmt(x, suffix=""):
-        if x is None:
-            return "—"
-        if isinstance(x, float):
-            return f"{x:.2f}{suffix}"
-        return f"{x}{suffix}"
-
-    rows = [
-        ("wall_clock_s (mean ± std)", f"{fmt(summary_a1['wall_clock_s_mean'])} ± {fmt(summary_a1['wall_clock_s_std'])}", f"{fmt(summary_a2['wall_clock_s_mean'])} ± {fmt(summary_a2['wall_clock_s_std'])}"),
-        ("output_size_bytes (mean)", fmt(summary_a1["output_size_bytes_mean"]), fmt(summary_a2["output_size_bytes_mean"])),
-        ("dropped_frames (mean)", fmt(summary_a1["dropped_frames_mean"]), fmt(summary_a2["dropped_frames_mean"])),
-        ("sim_fps_avg (mean)", fmt(summary_a1["sim_fps_avg_mean"]), fmt(summary_a2["sim_fps_avg_mean"])),
-        ("runs_success / total", f"{summary_a1['runs_success']} / {summary_a1['runs_total']}", f"{summary_a2['runs_success']} / {summary_a2['runs_total']}"),
-    ]
-    speedup_line = ""
-    a1_m = summary_a1.get("wall_clock_s_mean")
-    a2_m = summary_a2.get("wall_clock_s_mean")
-    if a1_m and a2_m:
-        ratio = a1_m / a2_m
-        speedup_line = f"\n**Speedup (A1/A2 wall-clock 비)**: **{ratio:.2f}×**\n"
-
-    body = [
-        "# Realtime Capture 벤치마크",
-        "",
-        f"- 측정 시각: {datetime.now().isoformat(timespec='seconds')}",
-        f"- 통제 변수: 해상도 {width}×{height}, fps {fps}, duration {duration_s}s, repeat {repeat}",
-        "- 환경: Omniverse Kit Python 3.12.x, 단일 viewport",
-        "",
-        "| 메트릭 | A1 (Movie Capture) | A2 (viewport+async) |",
-        "|---|---|---|",
-    ]
-    for name, a1v, a2v in rows:
-        body.append(f"| {name} | {a1v} | {a2v} |")
-    body.append("")
-    if speedup_line:
-        body.append(speedup_line)
-    if summary_a1.get("errors"):
-        body.append("\n## A1 errors\n")
-        for e in summary_a1["errors"]:
-            body.append(f"- `{e}`")
-    if summary_a2.get("errors"):
-        body.append("\n## A2 errors\n")
-        for e in summary_a2["errors"]:
-            body.append(f"- `{e}`")
-    return "\n".join(body) + "\n"
-
-
 def _run_one(runner, req: CaptureRequest, label: str) -> CaptureResult:
     print(f"  [{label}] start, output={req.output_uri}")
     t0 = time.perf_counter()
@@ -145,7 +96,6 @@ def run(duration_s: float = 60.0,
         width: int = 720,
         height: int = 480,
         fps: int = 30,
-        write_markdown: bool = True,
         background: bool = True,
         run_a1: bool = True,
         run_a2: bool = True,
@@ -165,7 +115,6 @@ def run(duration_s: float = 60.0,
                 width,
                 height,
                 fps,
-                write_markdown,
                 run_a1,
                 run_a2,
                 with_overlay,
@@ -176,11 +125,11 @@ def run(duration_s: float = 60.0,
         thread.start()
         print(f"[benchmark] started in background (thread={thread.name}); watch console for progress")
         return thread
-    return _run_sync(duration_s, repeat, width, height, fps, write_markdown, run_a1, run_a2, with_overlay)
+    return _run_sync(duration_s, repeat, width, height, fps, run_a1, run_a2, with_overlay)
 
 
 def _run_sync(duration_s: float, repeat: int, width: int, height: int, fps: int,
-              write_markdown: bool, run_a1: bool = True, run_a2: bool = True,
+              run_a1: bool = True, run_a2: bool = True,
               with_overlay: bool = True) -> dict:
     # Kit 내부에서 asyncio.get_event_loop()가 호출되는 경로가 있어
     # 워커 스레드에도 이벤트 루프가 필요. 없으면 새로 만들어 부착.
@@ -238,12 +187,6 @@ def _run_sync(duration_s: float, repeat: int, width: int, height: int, fps: int,
     out_json = _benchmarks_dir() / f"capture_{ts}.json"
     out_json.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
     print(f"\n[saved] {out_json}")
-
-    if write_markdown:
-        md_path = _module_dir().parent.parent / "docs" / "REALTIME_CAPTURE.md"
-        md_path.parent.mkdir(parents=True, exist_ok=True)
-        md_path.write_text(_markdown_table(summary_a1, summary_a2, duration_s, repeat, width, height, fps), encoding="utf-8")
-        print(f"[saved] {md_path}")
 
     print("\n=== Summary ===")
     print(f"A1 wall_clock_s mean: {summary_a1['wall_clock_s_mean']}")

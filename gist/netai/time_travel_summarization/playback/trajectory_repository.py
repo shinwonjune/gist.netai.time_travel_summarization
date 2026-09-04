@@ -6,6 +6,7 @@ import time
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
+from .. import timefmt
 from .lookup_benchmark import LkvCache, LkvForwardBisectHybrid
 
 
@@ -259,7 +260,7 @@ class TrajectoryRepository:
         candidate = (timestamp_str or "").strip().replace("Z", "+00:00")
         for parser in (
             datetime.datetime.fromisoformat,
-            lambda value: datetime.datetime.strptime(value, "%Y-%m-%d %H:%M:%S.%f"),
+            lambda value: datetime.datetime.strptime(value, timefmt.TIMESTAMP_FMT),
             lambda value: datetime.datetime.strptime(value, "%Y-%m-%d %H:%M:%S"),
         ):
             try:
@@ -270,7 +271,7 @@ class TrajectoryRepository:
 
     @staticmethod
     def format_timestamp(dt: datetime.datetime) -> str:
-        return dt.strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
+        return timefmt.format_timestamp(dt)
 
     @staticmethod
     def _read_rows(uri: str) -> List[dict]:

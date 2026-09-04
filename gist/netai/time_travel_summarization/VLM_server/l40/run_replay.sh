@@ -59,7 +59,7 @@ write_status running "resolving kit/app"
 
 KIT_ROOT="${KIT_ROOT:-}"
 if [ -z "$KIT_ROOT" ]; then
-  for cand in "$EXT_ROOT/../../.." "$HOME/wonjune/kit-app-template" "$HOME/kit-app-template"; do
+  for cand in "$EXT_ROOT/../../.." "${TTSUM_HOME:-$HOME/ttsum}/kit-app-template" "$HOME/kit-app-template"; do
     if [ -x "$cand/_build/linux-x86_64/release/kit/kit" ]; then
       KIT_ROOT="$(cd "$cand" && pwd)"; break
     fi
@@ -79,15 +79,17 @@ fi
 [ -f "$APP" ] || fail "앱 없음: $APP"
 
 # 자격증명 (무인 Nucleus/minIO)
-if [ -f "$HOME/wonjune/.env.l40" ]; then
-  set -a; . "$HOME/wonjune/.env.l40"; set +a
+if [ -f "${TTSUM_HOME:-$HOME/ttsum}/.env.l40" ]; then
+  set -a; . "${TTSUM_HOME:-$HOME/ttsum}/.env.l40"; set +a
 fi
 
 write_status running
 
 # ---- 재연 인자 조립 --------------------------------------------------------- #
-# env는 최종적으로 --exec 문자열 안에서 셸이 재파싱하므로, 공백 포함 인자(시각)는
-# 홑따옴표로 감싼다(replay_range.py argparse가 하나의 토큰으로 받게).
+# kit --exec 파서가 문자열을 토큰으로 나누므로, 공백 포함 인자(시각)는 홑따옴표로
+# 감싼다(replay_range.py argparse가 하나의 토큰으로 받게). 셸 재파싱이 아니다 —
+# _worker가 subprocess.run(["bash", runner])로 셸 없이 실행하고 container_lib.sh의
+# "$@"도 배열 전개일 뿐 eval을 거치지 않는다.
 EXEC_ARGS="$REPLAY --replay-start '$REPLAY_START' --replay-end '$REPLAY_END' \
  --render-fps $RENDER_FPS --out $OUT --quit"
 if [ -n "$DATA_URI" ]; then

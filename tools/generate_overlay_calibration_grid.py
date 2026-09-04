@@ -12,9 +12,8 @@ import csv
 from datetime import datetime, timedelta
 from pathlib import Path
 
+from generate_living_trajectory import X_RANGE, Z_RANGE
 
-X_RANGE = (206.0, 1554.0)
-Z_RANGE = (-2879.0, -1258.0)
 GROUND_Y = 89.5
 START_TIME = datetime(2025, 1, 1, 0, 0, 0)
 DEFAULT_OUTPUT = (

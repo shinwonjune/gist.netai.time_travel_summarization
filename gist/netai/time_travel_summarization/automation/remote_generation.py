@@ -372,7 +372,7 @@ def read_status(job_id: str, transport, remote_ext_root: str) -> dict:
 
 def _self_test() -> None:
     spec = JobSpec(job_id="gen-20260708-0001", episodes=75, duration=30,
-                   stage="omniverse://10.38.38.32/Projects/A B/scene.usd",
+                   stage="omniverse://gpu-host/Projects/A B/scene.usd",
                    upload_uri="s3://bucket/episodes/gen-20260708-0001")
     env = spec.to_env()
     assert env["EPISODES"] == "75" and env["DURATION"] == "30"
@@ -380,7 +380,7 @@ def _self_test() -> None:
     cmd = build_submit_command(spec, "/home/x/ext")
     assert "tmux new-session -d -s job-gen-20260708-0001" in cmd
     assert "KEEP_POSITIONS" not in cmd, "빈 값은 명령에 포함되지 않아야"
-    assert "'omniverse://10.38.38.32/Projects/A B/scene.usd'" in cmd, "공백 경로 인용 유지"
+    assert "'omniverse://gpu-host/Projects/A B/scene.usd'" in cmd, "공백 경로 인용 유지"
     assert cmd.endswith("&& echo SUBMITTED")
     # 잡 타입 → 러너 디스패치
     assert env["JOB_TYPE"] == "generate"
@@ -430,7 +430,7 @@ def _self_test() -> None:
     # transport 판별
     assert isinstance(transport_from_host(""), LocalTransport)
     assert isinstance(transport_from_host("local"), LocalTransport)
-    assert isinstance(transport_from_host("netai@sv4000-2"), SSHTransport)
+    assert isinstance(transport_from_host("user@gpu-host"), SSHTransport)
     assert isinstance(transport_from_host("http://localhost:8800"), RESTTransport)
     # REST 경로 디스패치 (HTTP는 mock)
     calls = []

@@ -140,7 +140,7 @@ class TimeTravelWindow:
                 
                 # Playback controls
                 with ui.HStack(height=30):
-                    self._play_button = ui.Button("▶ Play", width=80)
+                    self._play_button = ui.Button("Play", width=80)
                     self._play_button.set_clicked_fn(self._on_play_clicked)
                     
                     ui.Spacer(width=20)
@@ -657,8 +657,7 @@ class TimeTravelWindow:
             self._updating_slider = True  # Prevent triggering _on_slider_changed
             self._time_slider.model.set_value(progress)
             self._updating_slider = False
-            # self._update_goto_fields()
-        
+
         # Update progress percentage
         progress_pct = self._core.get_progress() * 100
         self._progress_label.text = f"{progress_pct:.1f}%"

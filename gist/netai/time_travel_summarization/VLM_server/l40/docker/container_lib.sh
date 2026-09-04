@@ -22,7 +22,7 @@
 #
 # 필요 env (없으면 기본값 또는 즉시 에러):
 #   KIT_CONTAINER_IMAGE   docker/Dockerfile로 빌드한 이미지 태그 (필수)
-#   L40_ENV_FILE          minIO/Nucleus 자격증명 파일 (기본 $HOME/wonjune/.env.l40)
+#   L40_ENV_FILE          minIO/Nucleus 자격증명 파일 (기본 ${TTSUM_HOME:-$HOME/ttsum}/.env.l40)
 #   (셰이더 등 캐시는 호스트 홈 ~/.cache·~/.local/share·~/.nvidia-omniverse를
 #    native 경로로 바인드 마운트해 재사용 — 별도 env 없음)
 
@@ -30,7 +30,7 @@ container_kit_launch() {
   # container_kit_launch <container_name> <kit_root> <ext_root> <gpu> <kit_bin> <app> <kit-args...>
   local name="$1" kit_root="$2" ext_root="$3" gpu="$4" kit_bin="$5" app="$6"; shift 6
   local image="${KIT_CONTAINER_IMAGE:?KIT_CONTAINER_IMAGE 필요 (docker/Dockerfile로 빌드한 이미지 태그, 예: ttsum-kit-runtime:2026.2.3)}"
-  local envfile="${L40_ENV_FILE:-$HOME/wonjune/.env.l40}"
+  local envfile="${L40_ENV_FILE:-${TTSUM_HOME:-$HOME/ttsum}/.env.l40}"
   local env_args=()
   [ -f "$envfile" ] && env_args=(--env-file "$envfile")
 
@@ -38,7 +38,7 @@ container_kit_launch() {
   # 없고 kit의 allow-root도 불필요. kit이 $HOME 기준으로 쓰는 캐시를 native 절대경로로
   # 마운트해 재사용한다(실측: ~/.cache = packman 17G + 셰이더, ~/.local/share = ov 27G,
   # ~/.nvidia-omniverse = config/logs). kit_root 하위 _build의 packman 심링크가 절대경로
-  # /home/netai/.cache/packman를 가리키는 것도 ~/.cache 마운트로 해석된다. blast radius를
+  # $HOME/.cache/packman를 가리키는 것도 ~/.cache 마운트로 해석된다. blast radius를
   # 좁히려 홈 전체가 아니라 이 캐시 경로들만 마운트 — .ssh·문서 등은 노출 안 함.
   # 존재하는 것만 마운트해, 없는 경로를 docker가 root 소유로 새로 만드는 것을 피한다.
   local mounts=(-v "$kit_root:$kit_root")

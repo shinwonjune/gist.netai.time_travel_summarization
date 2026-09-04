@@ -244,7 +244,7 @@ def main() -> None:
                          "--data-path와 둘 중 하나")
     ap.add_argument("--camera", type=str, default=None,
                     help="capture camera: prim path(/World/..) 또는 prim 이름; "
-                         "default: /World/summarization_camera")
+                         "default: Capture_camera")
     ap.add_argument("--render-fps", type=int, default=30, help="video/render fps (재연은 데시메이션 없음)")
     ap.add_argument("--scene-profile", type=str, default=None,
                     help="scene_profiles.json 이름 — stage/camera를 프로파일에서 받는다 "

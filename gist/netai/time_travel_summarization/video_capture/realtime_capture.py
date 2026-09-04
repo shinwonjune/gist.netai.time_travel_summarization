@@ -425,6 +425,7 @@ class RealtimeCaptureRunner:
             completed_cond = threading.Condition()
             next_to_encode = 0
             last_encoded_item = None
+            push_failed = False
 
             def _make_on_frame(seq, overlay_snapshot):
                 def _on_frame(buf, buf_size, width, height, fmt):
@@ -465,14 +466,21 @@ class RealtimeCaptureRunner:
                 return (seq, source_item[1], source_item[2], source_item[3])
 
             def _flush_ordered_ready():
-                nonlocal next_to_encode, last_encoded_item, encoded_input_count
+                nonlocal next_to_encode, last_encoded_item, encoded_input_count, push_failed
                 flushed = 0
                 while True:
                     with completed_cond:
                         item = completed_frames.pop(next_to_encode, None)
                         if item is None:
                             break
-                    queue.push(item)
+                    # 인코더 스레드가 죽으면 아무도 큐를 비우지 않아 push가 영원히
+                    # 대기했었다(headless 경로와 동일 사고). timeout으로 사망을 감지해
+                    # 캡처를 중단시킨다 -> encoder.error가 실패로 보고됨.
+                    if not queue.push(item, timeout=10.0):
+                        print(f"[A2] frame push timeout at seq={next_to_encode} "
+                              f"(encoder stalled? error={bool(encoder.error)}) -> abort capture")
+                        push_failed = True
+                        return flushed
                     last_encoded_item = item
                     next_to_encode += 1
                     encoded_input_count += 1
@@ -484,6 +492,9 @@ class RealtimeCaptureRunner:
             request_deadline = request_started_at + req.duration_s
             while requested < target_frames:
                 if stop_event is not None and stop_event.is_set():
+                    stopped_early = True
+                    break
+                if push_failed:
                     stopped_early = True
                     break
                 now = time.perf_counter()
@@ -524,6 +535,9 @@ class RealtimeCaptureRunner:
                 return True
 
             while next_to_encode < requested:
+                if push_failed:
+                    stopped_early = True
+                    break
                 if _flush_ordered_ready():
                     continue
                 if _handle_failed_head():
@@ -546,7 +560,11 @@ class RealtimeCaptureRunner:
                     next_to_encode += 1
 
             target_output_frames = requested if stopped_early else target_frames
-            while next_to_encode < target_output_frames and last_encoded_item is not None:
+            while (
+                next_to_encode < target_output_frames
+                and last_encoded_item is not None
+                and not push_failed
+            ):
                 queue.push(_make_duplicate_item(next_to_encode, last_encoded_item))
                 last_encoded_item = _make_duplicate_item(next_to_encode, last_encoded_item)
                 duplicate_count += 1
@@ -575,7 +593,6 @@ class RealtimeCaptureRunner:
             wall = time.perf_counter() - start_wall
             metadata.update(
                 {
-                    "frames_received": completed_count,
                     "frames_requested": requested,
                     "frames_completed": completed_count,
                     "frames_failed": failed_count,

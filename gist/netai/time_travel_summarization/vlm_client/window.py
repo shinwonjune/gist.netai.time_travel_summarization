@@ -38,7 +38,7 @@ class VLMClientWindow:
                     ui.Label("Source:", width=60, style={"font_size": 16, "font_weight": "bold"})
                     ui.Label("Filename or URI (s3://, file://)", width=190)
                     self._video_filename_field = ui.StringField()
-                    self._video_filename_field.model.set_value("video_19.mp4")
+                    self._video_filename_field.model.set_value("")
                 
                 # Video ID display — 폰트가 행 높이를 넘치면 이웃 줄과 겹친다
                 with ui.HStack(height=24, spacing=5):

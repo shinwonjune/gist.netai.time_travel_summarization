@@ -99,19 +99,3 @@ class ExtensionConfig:
             return path
         return self.config_dir / value.lstrip("./")
 
-    def resolve_data_path(self, module_dir: Path) -> Path:
-        raw = self.data_path
-        if "://" in raw:
-            from urllib.parse import urlparse
-
-            parsed = urlparse(raw)
-            if parsed.scheme == "file":
-                return Path(parsed.path)
-            raise ValueError(
-                f"resolve_data_path() returns a Path and cannot handle scheme {parsed.scheme!r}; "
-                f"use ExtensionConfig.data_uri or TrajectoryRepository.load_from_uri instead."
-            )
-        path = Path(raw)
-        if path.is_absolute():
-            return path
-        return module_dir / raw.lstrip("./")

@@ -1,42 +1,19 @@
 import json
-import sys
 import tempfile
-import types
 from io import BytesIO
 from pathlib import Path
 
+from gist.netai.time_travel_summarization.tests.conftest import install_carb_stub
 
-def _install_carb_stub():
-    carb = types.ModuleType("carb")
-    carb.log_info = lambda *args, **kwargs: None
-    carb.log_warn = lambda *args, **kwargs: None
-    carb.log_error = lambda *args, **kwargs: None
-    sys.modules["carb"] = carb
-
-
-_install_carb_stub()
+install_carb_stub()
 
 from gist.netai.time_travel_summarization.vlm_client.core import VLMClientCore  # noqa: E402
 
 
-class FakeVSSClient:
-    def __init__(self):
-        self.uploaded_path = None
-        self.observed_bytes = None
+class FakeVLLMClient:
+    """openai/vLLM 직결 경로용 더미 클라이언트 — 업로드 개념이 없어 analyze_video만 구현."""
 
-    def upload_video(self, path):
-        upload_path = Path(path)
-        self.uploaded_path = upload_path
-        assert upload_path.exists()
-        self.observed_bytes = upload_path.read_bytes()
-        return {"id": "vid-123"}
-
-
-class FakeGenerationClient:
-    def __init__(self):
-        self.saved_path = None
-
-    def generate_vlm_captions(self, **kwargs):
+    def analyze_video(self, video_path, model, preset_name):
         return {
             "execution_time": 1.25,
             "chunk_responses": [
@@ -45,14 +22,13 @@ class FakeGenerationClient:
         }
 
     def save_json(self, data, path):
-        self.saved_path = Path(path)
-        self.saved_path.parent.mkdir(parents=True, exist_ok=True)
-        self.saved_path.write_text(json.dumps(data, indent=4, ensure_ascii=False), encoding="utf-8")
+        path = Path(path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(data, indent=4, ensure_ascii=False), encoding="utf-8")
 
 
-def test_upload_video_file_uri_uses_temp_file_and_cleans_it_up():
+def test_upload_video_file_uri_stages_temp_file_and_cleans_up_on_delete():
     fake_bytes = b"\x00\x00\x00\x18ftypmp42fake-video"
-    fake_client = FakeVSSClient()
     source_path = None
 
     try:
@@ -61,14 +37,20 @@ def test_upload_video_file_uri_uses_temp_file_and_cleans_it_up():
             source_path = Path(source.name)
 
         core = VLMClientCore()
-        core._api = "vss"  # 이 테스트는 레거시 VSS 업로드 경로를 검증
-        core._client = fake_client
+        core._api = "openai"  # direct/vLLM 경로 검증
+        core._client = FakeVLLMClient()
 
         assert core.upload_video(source_path.as_uri()) is True
-        assert core._current_video_id == "vid-123"
-        assert fake_client.observed_bytes == fake_bytes
-        assert fake_client.uploaded_path is not None
-        assert not fake_client.uploaded_path.exists()
+        assert core._current_video_id == source_path.name
+        staged_path = core._current_video_path
+        assert staged_path is not None
+        assert Path(staged_path).exists()
+        assert Path(staged_path).read_bytes() == fake_bytes
+
+        # 실제 서버 업로드가 없는 direct 모드는 delete_video 시점에 스테이징
+        # 임시 파일을 정리한다 (upload 직후가 아니라 — 분석에 이 파일을 쓴다).
+        assert core.delete_video() is True
+        assert not Path(staged_path).exists()
     finally:
         if source_path and source_path.exists():
             source_path.unlink()
@@ -76,7 +58,6 @@ def test_upload_video_file_uri_uses_temp_file_and_cleans_it_up():
 
 def test_upload_video_s3_uri_uses_storage_adapter_temp_bridge(monkeypatch):
     fake_bytes = b"\x00\x00\x00\x18ftypmp42fake-minio-video"
-    fake_client = FakeVSSClient()
     source_uri = "s3://time-travel-summarization/timetravel/video/capture.mp4"
 
     class FakeStorageAdapter:
@@ -99,42 +80,48 @@ def test_upload_video_s3_uri_uses_storage_adapter_temp_bridge(monkeypatch):
     monkeypatch.setattr(storage_module, "from_uri", lambda uri: adapter)
 
     core = VLMClientCore()
-    core._api = "vss"  # 이 테스트는 레거시 VSS 업로드 경로를 검증
-    core._client = fake_client
+    core._api = "openai"  # direct/vLLM 경로 검증
+    core._client = FakeVLLMClient()
 
     assert core.upload_video(source_uri) is True
-    assert core._current_video_id == "vid-123"
+    assert core._current_video_id == "capture.mp4"
     assert adapter.exists_calls == [source_uri]
     assert adapter.open_read_calls == [source_uri]
-    assert fake_client.observed_bytes == fake_bytes
-    assert fake_client.uploaded_path is not None
-    assert fake_client.uploaded_path.suffix == ".mp4"
-    assert not fake_client.uploaded_path.exists()
+    staged_path = core._current_video_path
+    assert staged_path is not None
+    assert Path(staged_path).suffix == ".mp4"
+    assert Path(staged_path).read_bytes() == fake_bytes
+
+    assert core.delete_video() is True
+    assert not Path(staged_path).exists()
 
 
 def test_upload_video_missing_file_uri_returns_false():
     with tempfile.TemporaryDirectory() as tmpdir:
         missing_uri = (Path(tmpdir) / "missing.mp4").as_uri()
         core = VLMClientCore()
-        core._api = "vss"
-        core._client = FakeVSSClient()
+        core._api = "openai"
+        core._client = FakeVLLMClient()
 
         assert core.upload_video(missing_uri) is False
 
 
 def test_upload_video_missing_local_filename_returns_false():
     core = VLMClientCore()
-    core._api = "vss"
-    core._client = FakeVSSClient()
+    core._api = "openai"
+    core._client = FakeVLLMClient()
 
     assert core.upload_video("missing-local-video.mp4") is False
 
 
 def test_generate_captions_saves_raw_result_only_to_output_root_uri(tmp_path):
     core = VLMClientCore.__new__(VLMClientCore)
-    core._api = "vss"  # 레거시 생성 경로 검증
-    core._client = FakeGenerationClient()
+    core._api = "openai"  # direct 경로 검증
+    core._client = FakeVLLMClient()
     core._current_video_id = "vid-123"
+    core._current_video_path = tmp_path / "capture.mp4"
+    core._current_video_path.write_bytes(b"fake-video-bytes")
+    core._current_video_source = None
     core._last_generation_response = None
     core._outputs_base_path = tmp_path / "local_vlm_outputs"
     remote_root = tmp_path / "lake_root"
@@ -173,8 +160,8 @@ def _run_test(name, func):
 
 if __name__ == "__main__":
     _run_test(
-        "test_upload_video_file_uri_uses_temp_file_and_cleans_it_up",
-        test_upload_video_file_uri_uses_temp_file_and_cleans_it_up,
+        "test_upload_video_file_uri_stages_temp_file_and_cleans_up_on_delete",
+        test_upload_video_file_uri_stages_temp_file_and_cleans_up_on_delete,
     )
     _run_test(
         "test_upload_video_missing_file_uri_returns_false",

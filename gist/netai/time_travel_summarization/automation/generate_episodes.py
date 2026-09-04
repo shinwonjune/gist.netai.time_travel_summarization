@@ -568,56 +568,6 @@ def apply_positions(core, positions: Dict[str, Tuple[float, float, float]]) -> N
         print(f"[gen] apply_positions: prim 없음/무효 → 미적용 {skipped}")
 
 
-def precompute_floor_positions(core, bounds: dict, cfgs: List[EpisodeConfig],
-                               all_objids: List[str]) -> Dict[int, Dict[str, Tuple[float, float, float]]]:
-    """startup의 physics 활성 윈도우에서 전 에피소드 시작 위치를 레이캐스트 검증으로 사전 계산.
-
-    시뮬레이션 활성 중 USD 텔레포트는 PhysX에 반영되지 않으므로(run17 실측: 전원 동결·
-    trace 0행) 여기서는 좌표 "계산"만 하고, 적용(apply_positions)은 에피소드 루프에서
-    physics OFF 상태에 한다(#6의 검증된 순서: 배치 → physics ON).
-    바닥 기준(floor_ref) = 데이터 좌표에 서 있는 현재 객체들의 수직 좌표 중앙값.
-    """
-    import carb
-    import omni.kit.app
-    from omni.physx import get_physx_scene_query_interface
-
-    app = omni.kit.app.get_app()
-    for _ in range(10):  # physics scene/콜라이더 초기화 소진 (scene query 준비)
-        app.update()
-
-    is_y_up = bounds.get("is_y_up", True)
-    vert = 1 if is_y_up else 2
-    cur = core.get_current_object_positions() or {}
-    floors = sorted(float(p[vert]) for p in cur.values())
-    floor_ref = floors[len(floors) // 2] if floors else float(bounds["center"][vert])
-    top = floor_ref + max(float(bounds["size"][vert]), 300.0) + 200.0
-    max_dist = (top - floor_ref) + 1000.0
-
-    sq = get_physx_scene_query_interface()
-
-    def probe_floor(h0, h1):
-        if is_y_up:
-            origin, direction = carb.Float3(h0, top, h1), carb.Float3(0.0, -1.0, 0.0)
-        else:
-            origin, direction = carb.Float3(h0, h1, top), carb.Float3(0.0, 0.0, -1.0)
-        hit = sq.raycast_closest(origin, direction, max_dist)
-        if hit and hit.get("hit"):
-            return float(hit["position"][vert])
-        return None
-
-    out: Dict[int, Dict[str, Tuple[float, float, float]]] = {}
-    for cfg in cfgs:
-        objids = pick_objids(all_objids, cfg.n_objects, cfg.seed)
-        pos = sample_floor_positions(bounds, objids, cfg.seed, probe_floor, floor_ref)
-        missing = [o for o in objids if o not in pos]
-        if missing:
-            print(f"[gen] pre-pos ep{cfg.idx}: no valid floor for {missing} -> data-coord fallback")
-        out[cfg.idx] = pos
-        print(f"[gen] pre-pos ep{cfg.idx}: {len(pos)}/{len(objids)} floor_ref={floor_ref:.1f} "
-              f"{ {k: tuple(round(v, 1) for v in xyz) for k, xyz in pos.items()} }")
-    return out
-
-
 def _ensure_stage(core, stage_url: Optional[str] = None) -> None:
     """Headless bootstrap: open the requested USD (또는 빈 스테이지) + BEV 카메라 재보장.
 

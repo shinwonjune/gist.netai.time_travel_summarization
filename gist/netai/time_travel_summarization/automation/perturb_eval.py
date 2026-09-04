@@ -30,6 +30,7 @@ import urllib.error
 from pathlib import Path
 from typing import Dict, List, Optional, Set, Tuple
 
+from gist.netai.time_travel_summarization.automation.geom import center_distance_3d
 from gist.netai.time_travel_summarization.automation.replay_fidelity import (
     APP_KIT, DEFAULT_REMOTE_EXT, DEFAULT_SSH_HOST, MODEL, PRESET, Tunnel,
     api_get, api_post, f1, make_client, match_events, parse_pred_events, poll_job,
@@ -539,7 +540,7 @@ def _pos_at(samples: List[Tuple[float, float, float, float]],
 def min_pair_distance(by: Dict[int, List], s_lo: float, s_hi: float,
                       labels: Optional[List[int]] = None,
                       step: float = 0.1) -> Optional[Tuple[float, Tuple[int, int]]]:
-    """[s_lo,s_hi] 창에서 (지정 라벨들 간) 최소 쌍 거리. 표본 없으면 None."""
+    """(3D 중심거리) [s_lo,s_hi] 창에서 (지정 라벨들 간) 최소 쌍 거리. 표본 없으면 None."""
     cand = sorted(labels) if labels else sorted(by)
     best: Optional[Tuple[float, Tuple[int, int]]] = None
     s = s_lo
@@ -549,8 +550,7 @@ def min_pair_distance(by: Dict[int, List], s_lo: float, s_hi: float,
         for i in range(len(ok)):
             for j in range(i + 1, len(ok)):
                 (la, pa), (lb2, pb) = ok[i], ok[j]
-                d = ((pa[0] - pb[0]) ** 2 + (pa[1] - pb[1]) ** 2
-                     + (pa[2] - pb[2]) ** 2) ** 0.5
+                d = center_distance_3d(pa, pb)
                 if best is None or d < best[0]:
                     best = (d, (la, lb2))
         s += step
@@ -668,6 +668,10 @@ def main() -> None:
 
     if args.render_only and args.infer_only:
         raise SystemExit("--render-only와 --infer-only는 동시 지정 불가")
+    if not args.ssh_host:
+        raise SystemExit("TTSUM_REMOTE_HOST unset — --ssh-host로 지정하거나 TTSUM_REMOTE_HOST 환경변수를 설정하세요")
+    if not args.remote_ext_root:
+        raise SystemExit("TTSUM_REMOTE_EXT_ROOT unset — --remote-ext-root로 지정하거나 TTSUM_REMOTE_EXT_ROOT 환경변수를 설정하세요")
     with Tunnel(args.ssh_host):
         client = None if args.render_only else make_client(out)
         done: List[dict] = []

@@ -20,6 +20,7 @@ import json
 from pathlib import Path
 from typing import Dict, List, Optional, Set, Tuple
 
+from gist.netai.time_travel_summarization.automation.geom import center_distance_3d
 from gist.netai.time_travel_summarization.automation.perturb_eval import (
     CONDITIONS, apply_remap, load_pairs, positions_by_label, _pos_at,
 )
@@ -33,7 +34,8 @@ STEP_S = 0.1            # 거리 스캔 간격 (30Hz 데이터의 1/3 — 충분
 
 # 동결된 τ (기본값). 조건별 재튜닝은 oracle 누수이므로 --resweep 없이는 스윕하지 않는다.
 #
-# v2 규약(접촉거리 63.7) 기준 = 81.0 — 2026-08-07 재동결.
+# regime2 재현용 τ=81.0(현행 regime3 공표값은 69.0 — :45의 FROZEN_TAU). 세대가
+# 다른 τ를 섞어 인용하지 말 것. — 2026-08-07 재동결.
 #   측정: prod-20260806-v2 clean 200 에피소드 / GT 525 이벤트, τ 70~100을 1 단위 스윕.
 #   결과: 최적 81(det F1 0.9276), 최적−0.005 이내 평탄 구간 81~83,
 #         반분 표본 최적값 83(전반)·80(후반) → 잔여 불확실성 ±2, 그 구간 F1 변동 0.01 미만.
@@ -93,8 +95,7 @@ def rule_events(by: Dict[int, List], tau: float,
                 pa, pb = _pos_at(by[a], t), _pos_at(by[b], t)
                 if pa is None or pb is None:
                     continue
-                d = ((pa[0] - pb[0]) ** 2 + (pa[1] - pb[1]) ** 2
-                     + (pa[2] - pb[2]) ** 2) ** 0.5
+                d = center_distance_3d(pa, pb)
                 if armed.get((a, b), True):
                     if d < tau:
                         events.setdefault(int(t), set()).update((a, b))

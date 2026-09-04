@@ -1,3 +1,5 @@
+import threading
+
 import pytest
 
 from gist.netai.time_travel_summarization.storage import from_uri
@@ -73,3 +75,20 @@ def test_stat_missing_uri_raises_file_not_found(tmp_path):
 
     with pytest.raises(FileNotFoundError):
         adapter.stat(_uri(tmp_path / "missing.txt"))
+
+
+def test_concurrent_put_bytes_to_same_key_leaves_no_tmp_residue(tmp_path):
+    adapter = from_uri(_uri(tmp_path / "shared.bin"))
+    uri = _uri(tmp_path / "shared.bin")
+    contents = [f"writer-{i}".encode() for i in range(8)]
+
+    threads = [threading.Thread(target=adapter.put_bytes, args=(uri, data)) for data in contents]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    with adapter.open_read(uri) as stream:
+        final = stream.read()
+    assert final in contents
+    assert list(tmp_path.glob("*.tmp")) == []

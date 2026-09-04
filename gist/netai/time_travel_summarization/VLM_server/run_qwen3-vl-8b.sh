@@ -7,7 +7,7 @@ docker run -d \
   --network host \
   --ipc=host \
   --shm-size=16g \
-  -v /home/netai/wonjune/models/Qwen3-VL-8B-Instruct:/models/Qwen3-VL-8B-Instruct:ro \
+  -v "${TTSUM_HOME:-$HOME/ttsum}/models/Qwen3-VL-8B-Instruct:/models/Qwen3-VL-8B-Instruct:ro" \
   vllm/vllm-openai:latest \
   --model /models/Qwen3-VL-8B-Instruct \
   --served-model-name Qwen3-VL-8B-Instruct \
