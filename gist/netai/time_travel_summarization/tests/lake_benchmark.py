@@ -229,20 +229,30 @@ def transport_bench(uri: str, max_chunks: int = 0) -> dict:
 
     rest = get_ms[1:] if len(get_ms) > 1 else get_ms
     total_mb = sum(sizes) / 1e6
+    rows_measured = sum(int(ch.get("rows", 0)) for ch in chunks)
+    get_p50 = _percentile(rest, 0.50)
     return {
         "format": ext,
         "chunk_seconds": manifest.get("chunk_seconds"),
         "hz": manifest.get("hz"),
+        "n_objects": len(manifest.get("objids", [])) or None,   # 객체 수 스윕 축(설계 §3-1); 무-objids manifest는 None
         "n_chunks_measured": len(chunks),
+        "rows_measured": rows_measured,
         "total_mb": round(total_mb, 3),
         "manifest_load_ms": round(manifest_load_ms, 2),
         "first_get_ms": round(get_ms[0], 2) if get_ms else None,  # TLS 혼입
         "get_p50_ms": round(_percentile(rest, 0.50), 2),
         "get_p99_ms": round(_percentile(rest, 0.99), 2),
         "get_mean_ms": round(statistics.mean(rest), 2) if rest else 0.0,
+        "get_max_ms": round(max(rest), 2) if rest else 0.0,
+        # 꼬리 배율(max ÷ p50) — 안전계수 실용 한계 문턱의 세션별 근거(설계 §3-1·§4-3)
+        "get_tail_ratio": round(max(rest) / get_p50, 2) if rest and get_p50 > 0 else None,
         "decode_p50_ms": round(_percentile(decode_ms, 0.50), 2),
         "decode_ms_per_mb": round(sum(decode_ms) / max(total_mb, 1e-9), 2),
+        # 디코드는 바이트가 아니라 rows에 비례(리포트 §4) — 스윕은 rows당 μs로 읽는다
+        "decode_us_per_row": round(sum(decode_ms) * 1000 / rows_measured, 3) if rows_measured else None,
         "chunk_mean_mb": round(total_mb / max(len(sizes), 1), 3),
+        "chunk_mean_rows": round(rows_measured / max(len(chunks), 1)),
     }
 
 
@@ -276,9 +286,12 @@ def seek_bench(uri: str, max_chunks: int = 0, warm_queries: int = 2000) -> dict:
         lake.get_data_at_time(t)
         warm_us.append((time.perf_counter() - t0) * 1e6)
     lake.clear()
+    cold_p50 = _percentile(cold_ms, 0.50)
     return {
-        "cold_seek_p50_ms": round(_percentile(cold_ms, 0.50), 2),
+        "cold_seek_p50_ms": round(cold_p50, 2),
         "cold_seek_p99_ms": round(_percentile(cold_ms, 0.99), 2),
+        "cold_seek_max_ms": round(max(cold_ms), 2) if cold_ms else 0.0,
+        "cold_seek_tail_ratio": round(max(cold_ms) / cold_p50, 2) if cold_ms and cold_p50 > 0 else None,
         "cold_seek_n": len(cold_ms),
         "warm_seek_p50_us": round(_percentile(warm_us, 0.50), 1),
         "warm_seek_p99_us": round(_percentile(warm_us, 0.99), 1),
@@ -298,7 +311,8 @@ class _InstrumentedLake(LakeTrajectoryRepository):
     """
 
     def __init__(self, *args, **kwargs):
-        self.probe_load_done = {}   # idx -> (wall_ts, src, load_ms)
+        self.probe_load_done = {}   # idx -> (wall_ts, src, load_ms)  — 마지막 로드(lead 계산용)
+        self.probe_loads = []       # (src, load_ms) 전체 — 같은 idx 재로드도 각각 표본(프리페치 로드 시간용)
         self.probe_activate = {}    # idx -> 최초 활성화 wall_ts
         super().__init__(*args, **kwargs)
 
@@ -306,7 +320,9 @@ class _InstrumentedLake(LakeTrajectoryRepository):
         t0 = time.perf_counter()
         chunk = super()._load_chunk(idx)
         src = "prefetch" if threading.current_thread().name == "lake-prefetch" else "sync"
-        self.probe_load_done[idx] = (time.perf_counter(), src, (time.perf_counter() - t0) * 1000)
+        load_ms = (time.perf_counter() - t0) * 1000
+        self.probe_load_done[idx] = (time.perf_counter(), src, load_ms)
+        self.probe_loads.append((src, load_ms))
         return chunk
 
     def _activate(self, idx):
@@ -401,6 +417,9 @@ def run_scenario(
         if done and done[1] == "prefetch" and wall_act >= done[0]:
             leads.append(wall_act - done[0])
     stall_load_ms = [v[2] for v in lake.probe_load_done.values() if v[1] == "sync"]
+    # 프리페치 로드 시간 — 안전계수 분모 1순위(설계 §3-1): 분자(lead)와 같은 런·같은
+    # 조건에서 백그라운드가 실제로 청크를 받아 푼 시간. 표본 = 그 런에서 프리페치된 청크 수.
+    pf_load_ms = [ms for src, ms in lake.probe_loads if src == "prefetch"]
     lake.clear()
 
     out = {
@@ -417,6 +436,9 @@ def run_scenario(
         "prefetch_lead_min_s": round(min(leads), 2) if leads else None,
         "prefetch_lead_p50_s": round(_percentile(leads, 0.5), 2) if leads else None,
         "sync_load_p50_ms": round(_percentile(stall_load_ms, 0.5), 1) if stall_load_ms else None,
+        "prefetch_load_p50_ms": round(_percentile(pf_load_ms, 0.5), 1) if pf_load_ms else None,
+        "prefetch_load_max_ms": round(max(pf_load_ms), 1) if pf_load_ms else None,
+        "prefetch_load_n": len(pf_load_ms),
     }
     if seeks > 0:
         out.update({
@@ -481,6 +503,7 @@ def run_dataset_mode(args) -> dict:
 
     result = {
         "dataset_uri": uri,
+        "n_objects": transport.get("n_objects"),
         "measured_at": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         "machine": f"{platform.platform()} / {platform.processor()}",
         "note": args.note,
@@ -522,18 +545,22 @@ def format_dataset_report(res: dict) -> str:
         "| metric | value |",
         "|--------|-------|",
         f"| format / chunk_seconds / hz | {t['format']} / {t['chunk_seconds']} / {t['hz']} |",
-        f"| chunks measured / total MB | {t['n_chunks_measured']} / {t['total_mb']} |",
+        f"| objects / chunks measured / total MB | {t.get('n_objects', '-')} / {t['n_chunks_measured']} / {t['total_mb']} |",
+        f"| rows measured / mean rows per chunk | {t.get('rows_measured', '-')} / {t.get('chunk_mean_rows', '-')} |",
         f"| manifest_load_ms | {t['manifest_load_ms']} |",
         f"| first GET ms (TLS 혼입) | {t['first_get_ms']} |",
         f"| chunk GET p50 / p99 / mean ms | {t['get_p50_ms']} / {t['get_p99_ms']} / {t['get_mean_ms']} |",
+        f"| chunk GET max ms / tail ratio (max÷p50) | {t.get('get_max_ms', '-')} / {t.get('get_tail_ratio', '-')} |",
         f"| decode ms/MB (p50 chunk {t['decode_p50_ms']}ms) | {t['decode_ms_per_mb']} |",
+        f"| decode us/row | {t.get('decode_us_per_row', '-')} |",
         f"| cold seek p50 / p99 ms (n={sk['cold_seek_n']}) | {sk['cold_seek_p50_ms']} / {sk['cold_seek_p99_ms']} |",
+        f"| cold seek max ms / tail ratio | {sk.get('cold_seek_max_ms', '-')} / {sk.get('cold_seek_tail_ratio', '-')} |",
         f"| warm seek p50 / p99 us | {sk['warm_seek_p50_us']} / {sk['warm_seek_p99_us']} |",
         "",
         "## B. 연속 재생 (wall-clock 페이싱, 웜업 제외)",
         "",
-        "| scenario | speed | lookups | stalls | warmup | hit_rate | lead_min/p50 (s) | sync p50 (ms) | seek p50/p99 (ms) |",
-        "|----------|-------|---------|--------|--------|----------|------------------|----------------|--------------------|",
+        "| scenario | speed | lookups | stalls | warmup | hit_rate | lead_min/p50 (s) | sync p50 (ms) | prefetch load p50/max (ms, n) | seek p50/p99 (ms) |",
+        "|----------|-------|---------|--------|--------|----------|------------------|----------------|-------------------------------|--------------------|",
     ]
     for r in res["scenarios"]:
         seekcol = f"{r.get('seek_p50_ms', '-')} / {r.get('seek_p99_ms', '-')}" if "seek_p50_ms" in r else "-"
@@ -541,7 +568,9 @@ def format_dataset_report(res: dict) -> str:
         lines.append(
             f"| {r['scenario']} | {r['speed']} | {r['lookups']} | {r['stalls']} | {r['warmup_cold_loads']} | "
             f"{hit_txt} | {r['prefetch_lead_min_s']} / {r['prefetch_lead_p50_s']} | "
-            f"{r['sync_load_p50_ms']} | {seekcol} |"
+            f"{r['sync_load_p50_ms']} | "
+            f"{r.get('prefetch_load_p50_ms', '-')} / {r.get('prefetch_load_max_ms', '-')} ({r.get('prefetch_load_n', 0)}) | "
+            f"{seekcol} |"
         )
     lines += [
         "",

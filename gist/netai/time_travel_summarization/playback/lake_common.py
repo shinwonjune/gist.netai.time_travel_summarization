@@ -71,25 +71,45 @@ def generate_synthetic_rows(
     seed: int = 42,
     bounds: Tuple[float, float] = (0.0, 1000.0),
     step_units: float = 12.0,
+    bounds_xyz: Optional[Tuple[Tuple[float, float], Tuple[float, float], Tuple[float, float]]] = None,
+    y_series: Optional[List[List[float]]] = None,
 ) -> Iterable[dict]:
     """경계 박스 내 random-walk 궤적을 hz 간격으로 생성. 시간 오름차순 yield.
 
     성능 측정용. n_objects/duration_s로 규모를 조절한다(예: 100객체×12시간).
+
+    bounds_xyz: 축별 (lo, hi). 주면 bounds(3축 공통) 대신 쓴다 — 씬 프로파일의
+        아레나(x·z)에 맞출 때 사용. lo == hi인 축은 그 값에 고정된다.
+    y_series: y 시계열 목록. 주면 객체 k의 y는 random walk 대신 y_series[k % len]을
+        무작위 시작 위상으로 회전시킨 값이다(객체 수 스윕 — 실궤적의 y 분포·시간
+        상관을 그대로 재사용, 레이크성능_실험설계 §1-1). 둘 다 None이면 종전과 완전히
+        같은 난수열·값을 낸다.
     """
     rng = random.Random(seed)
     base = datetime.datetime.strptime(start, timefmt.TIMESTAMP_FMT)
     step = datetime.timedelta(seconds=1.0 / hz)
     n_steps = int(round(duration_s * hz))
-    lo, hi = bounds
+    axes = tuple(bounds_xyz) if bounds_xyz is not None else (tuple(bounds),) * 3
     objids = [f"obj{idx:03d}" for idx in range(1, n_objects + 1)]
-    pos = {oid: [rng.uniform(lo, hi), rng.uniform(lo, hi), rng.uniform(lo, hi)] for oid in objids}
+    pos = {oid: [rng.uniform(lo, hi) for lo, hi in axes] for oid in objids}
+    phase = {}
+    if y_series:
+        if any(not s for s in y_series):
+            raise ValueError("y_series에 빈 시계열이 있음")
+        phase = {oid: rng.randrange(len(y_series[k % len(y_series)]))
+                 for k, oid in enumerate(objids)}
     for i in range(n_steps):
         ts = timefmt.format_timestamp(base + step * i)
-        for oid in objids:
+        for k, oid in enumerate(objids):
             p = pos[oid]
             for a in range(3):
+                lo, hi = axes[a]
                 p[a] = min(hi, max(lo, p[a] + rng.uniform(-step_units, step_units)))
-            yield {"timestamp": ts, "objid": oid, "x": p[0], "y": p[1], "z": p[2]}
+            y = p[1]
+            if y_series:
+                ser = y_series[k % len(y_series)]
+                y = float(ser[(phase[oid] + i) % len(ser)])
+            yield {"timestamp": ts, "objid": oid, "x": p[0], "y": y, "z": p[2]}
 
 
 def _track_time_ranges(rows_sorted: List[dict]) -> dict:

@@ -13,7 +13,9 @@ import time
 import unittest
 from pathlib import Path
 
-from gist.netai.time_travel_summarization.app.lake_probe import LakeProbe, sanitize_scenario
+from gist.netai.time_travel_summarization.app.lake_probe import (
+    IDLE_BASELINE_LABEL, LakeProbe, sanitize_scenario,
+)
 from gist.netai.time_travel_summarization.playback.lake_common import ingest_synthetic
 from gist.netai.time_travel_summarization.tests.lake_benchmark import (
     run_scenario,
@@ -27,6 +29,7 @@ from gist.netai.time_travel_summarization.utils.build_lake_perf_dataset import (
 from gist.netai.time_travel_summarization.utils.gui_probe_report import (
     analyze,
     classify_regimes,
+    format_table,
 )
 
 _FMT = "%Y-%m-%d %H:%M:%S.%f"
@@ -50,10 +53,18 @@ class TransportSeekBenchTest(unittest.TestCase):
             self.assertIsNotNone(t["first_get_ms"])
             self.assertGreater(t["decode_ms_per_mb"], 0.0)
             self.assertGreater(t["total_mb"], 0.0)
+            # 객체 수 스윕 축(2026-09-16): 객체 수·rows당 디코드·꼬리 배율
+            self.assertEqual(t["n_objects"], 10)
+            self.assertEqual(t["rows_measured"], 10 * 900)
+            self.assertEqual(t["chunk_mean_rows"], 3000)
+            self.assertGreater(t["decode_us_per_row"], 0.0)
+            self.assertGreaterEqual(t["get_tail_ratio"], 1.0)
 
             s = seek_bench(uri, warm_queries=200)
             self.assertEqual(s["cold_seek_n"], 2)  # 청크0은 로드 시 활성
             self.assertGreaterEqual(s["cold_seek_p99_ms"], s["cold_seek_p50_ms"])
+            self.assertGreaterEqual(s["cold_seek_max_ms"], s["cold_seek_p99_ms"])
+            self.assertGreaterEqual(s["cold_seek_tail_ratio"], 1.0)
             self.assertGreater(s["warm_seek_p50_us"], 0.0)
 
     def test_max_chunks_cap(self):
@@ -74,6 +85,10 @@ class RunScenarioTest(unittest.TestCase):
             self.assertEqual(r["warmup_cold_loads"], 1)
             self.assertGreaterEqual(r["stalls"], 0)
             self.assertTrue(0.0 <= r["hit_rate"] <= 1.0)
+            # 프리페치 로드 시간(안전계수 분모 1순위) — 청크 1·2가 프리페치됐어야 한다
+            self.assertGreaterEqual(r["prefetch_load_n"], 1)
+            self.assertGreater(r["prefetch_load_p50_ms"], 0.0)
+            self.assertGreaterEqual(r["prefetch_load_max_ms"], r["prefetch_load_p50_ms"])
 
     def test_backward_warmup_two(self):
         """backward — 로드 시 청크0 + 끝점 진입 seek이 웜업으로 분리돼야 한다."""
@@ -95,9 +110,42 @@ class RunScenarioTest(unittest.TestCase):
 
 
 class LakeProbeTest(unittest.TestCase):
-    def _record(self, probe, playing, sync=0, hit=0, twin=None):
+    def _record(self, probe, playing, sync=0, hit=0, twin=None, apply_ms=0.0, n_objects=None):
         stats = {"sync_loads": sync, "cache_hits": hit}
-        probe.record(tick_ms=0.5, twin_time=twin, stats=stats, is_playing=playing)
+        probe.record(tick_ms=0.5, twin_time=twin, stats=stats, is_playing=playing,
+                     apply_ms=apply_ms, n_objects=n_objects)
+
+    def test_apply_ms_column_and_n_objects_header(self):
+        """객체 수 스윕(2026-09-16): apply_ms 열과 n_objects 헤더가 덤프에 남는다."""
+        with tempfile.TemporaryDirectory() as d:
+            probe = LakeProbe(out_dir=Path(d), max_frames=100)
+            twin = datetime.datetime(2026, 1, 1)
+            self._record(probe, True, twin=twin, apply_ms=0.0, n_objects=40)
+            self._record(probe, True, twin=twin, apply_ms=3.25, n_objects=40)
+            self._record(probe, False, twin=twin, n_objects=40)
+            payload = json.loads(next(Path(d).glob("gui_probe_*.json")).read_text(encoding="utf-8"))
+            self.assertEqual(payload["n_objects"], 40)
+            self.assertEqual(payload["frames"]["apply_ms"], [0.0, 3.25, 0.0])
+            rep = analyze(next(Path(d).glob("gui_probe_*.json")))
+            self.assertEqual(rep["n_objects"], 40)
+            play = rep["regimes"]["playback"]
+            self.assertEqual(play["apply_frames"], 1)
+            self.assertEqual(play["apply_p50_ms"], 3.25)
+
+    def test_idle_baseline_label_dumps_idle_only_buffer(self):
+        """렌더 바닥 측정용 라벨은 idle 전용 버퍼도 저장한다(설계 §2-C (a))."""
+        with tempfile.TemporaryDirectory() as d:
+            probe = LakeProbe(out_dir=Path(d), max_frames=100)
+            twin = datetime.datetime(2026, 1, 1)
+            for _ in range(5):
+                self._record(probe, False, twin=twin)
+            self.assertIsNone(probe.dump(reason="manual"))       # 일반 라벨: 억제
+            probe.set_scenario(IDLE_BASELINE_LABEL)
+            path = probe.dump(reason="manual")
+            self.assertIsNotNone(path)
+            self.assertTrue(path.name.endswith(f"_{IDLE_BASELINE_LABEL}.json"))
+            idle = analyze(path)["regimes"]["idle"]
+            self.assertEqual(idle["frames"], 5)
 
     def test_dump_on_stop_transition(self):
         with tempfile.TemporaryDirectory() as d:
@@ -198,6 +246,11 @@ class LakeProbeTest(unittest.TestCase):
             self.assertEqual(play["stall_frames_post_warmup"], 1)
             self.assertIn("hitch_rate_pct", play)
             self.assertIn("tick_p50_ms", play)
+            self.assertIn("apply_p50_ms", play)
+            # 표 렌더에 N 열과 apply 열이 있어야 한다
+            table = format_table([analyze(dump)])
+            self.assertIn("| N |", table.splitlines()[0])
+            self.assertIn("apply p50/p99", table.splitlines()[0])
 
 
 class IdleDumpSuppressionTest(unittest.TestCase):
@@ -301,6 +354,10 @@ class RegimeReportTest(unittest.TestCase):
             iv = [0.0, 100.0, 200.0, 300.0, 20.0, 16.0, 16.0]
             sync = [0, 1, 1, 1, 0, 0, 0]
             rep = analyze(_write_probe_dump(d, playing, twin, iv, sync))
+            # 구 포맷 덤프(apply_ms·n_objects 없음)도 표에 '-'로 나와야 한다
+            table = format_table([rep])
+            self.assertIn("| - |", table.splitlines()[2])
+            self.assertIsNone(rep["regimes"]["playback"]["apply_p50_ms"])
 
             seek = rep["regimes"]["seek"]
             self.assertEqual(seek["frames"], 4)          # i1~i4

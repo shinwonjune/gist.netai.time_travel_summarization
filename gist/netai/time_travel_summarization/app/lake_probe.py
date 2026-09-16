@@ -11,6 +11,10 @@ facade.update(dt)가 매 앱 프레임 record()를 호출한다. 기본(env 미�
   d_sync             repo stats.sync_loads 증분 = 이 프레임의 stall 여부
   d_hit              repo stats.cache_hits 증분
   playing            재생 중 플래그(후처리에서 재생/스크럽 구간 분리용)
+  apply_ms           이 프레임에서 프림 적용(update_stage_objects) 루프에 든 시간 —
+                     tick 경유든 슬라이더 콜백 경유든 합산(2026-09-16, 객체 수 스윕:
+                     lookup과 적용 경로를 분리해 귀속하기 위함, 설계 §2-C)
+덤프 헤더에는 n_objects(prim_map 크기)를 함께 남긴다.
 
 링버퍼 상한 36,000 프레임(10분@60fps). 덤프 트리거: 재생 정지(playing→not)
 전이, 상한 도달, 또는 GUI의 Dump 버튼(수동) → artifacts/benchmarks/
@@ -28,6 +32,9 @@ idle 전용 버퍼는 덤프하지 않는다(2026-08-13). 계측은 앱이 살�
 둘 다 없는 버퍼(= playing=False이고 twin_time도 그대로인 idle 프레임만 있는
 버퍼)는 성능 판정에 쓸 것이 없으므로 파일을 쓰지 않는다. 판정은 record()가
 세어 두는 러닝 카운터로 O(1)에 끝난다 — 덤프할 때마다 버퍼를 훑지 않는다.
+예외 하나: 시나리오 라벨이 IDLE_BASELINE_LABEL("idle-baseline")이면 idle 전용
+버퍼도 저장한다 — 객체 수 스윕에서 "프림 N개가 존재하는 것만으로 렌더가 얼마나
+드는가"(렌더 바닥)를 재는 용도라 idle 프레임 자체가 측정값이다(설계 §2-C (a)).
 
 후처리(지표 표)는 utils/gui_probe_report.py이며, 거기서도 같은 규칙으로
 재생/탐색/idle 세 구간을 나눠 따로 판정한다. 로그 문자열은 ASCII만 사용.
@@ -53,6 +60,7 @@ except ImportError:  # pragma: no cover - headless 테스트(Kit 밖)
 MAX_FRAMES = 36000  # 10분 @ 60fps
 FPS_WINDOW = 60     # 최근 fps 산출 창(프레임) — O(1) 인덱싱만 쓴다
 SCENARIO_MAX_LEN = 32
+IDLE_BASELINE_LABEL = "idle-baseline"  # idle 전용 버퍼도 저장하는 유일한 라벨(렌더 바닥 측정)
 
 
 def sanitize_scenario(name) -> str:
@@ -84,6 +92,7 @@ class LakeProbe:
         self._last_hit = 0
         self._was_playing = False
         self._scenario = sanitize_scenario(scenario)
+        self._n_objects = None  # 덤프 헤더용 — facade가 매 프레임 prim_map 크기를 넘긴다
         self._reset_buffer()
 
     def _reset_buffer(self):
@@ -95,6 +104,7 @@ class LakeProbe:
         self._d_sync = []
         self._d_hit = []
         self._playing = []
+        self._apply_ms = []
         self._stall_frames = 0  # 러닝 카운터 — live_stats가 버퍼를 훑지 않게
         # 아래 둘도 같은 이유의 러닝 카운터다. dump()가 "이 버퍼에 남길 것이 있나"를
         # 판정할 때 프레임 배열을 다시 훑지 않아도 되게 record()에서 미리 센다.
@@ -123,6 +133,7 @@ class LakeProbe:
         self._reset_buffer()
         self._was_playing = False
         self._last_wall = None
+        self._n_objects = None  # 다음 record()가 다시 채운다 — 데이터셋 교체 후 옛 N 방지
         return n
 
     def live_stats(self) -> dict:
@@ -137,9 +148,15 @@ class LakeProbe:
         return {"frames": n, "stalls": self._stall_frames, "fps": fps,
                 "scenario": self._scenario}
 
-    def record(self, tick_ms: float, twin_time, stats, is_playing: bool) -> None:
-        """매 앱 프레임 호출. stats = repository.stats dict(레이크 아니면 None)."""
+    def record(self, tick_ms: float, twin_time, stats, is_playing: bool,
+               apply_ms: float = 0.0, n_objects=None) -> None:
+        """매 앱 프레임 호출. stats = repository.stats dict(레이크 아니면 None).
+
+        apply_ms = 이 프레임의 프림 적용 루프 합산 소요, n_objects = prim_map 크기(헤더용).
+        """
         now = time.perf_counter()
+        if n_objects is not None:
+            self._n_objects = int(n_objects)
         interval_ms = (now - self._last_wall) * 1000 if self._last_wall is not None else 0.0
         self._last_wall = now
 
@@ -165,6 +182,7 @@ class LakeProbe:
         self._d_sync.append(d_sync)
         self._d_hit.append(d_hit)
         self._playing.append(bool(is_playing))
+        self._apply_ms.append(round(apply_ms, 3))
         if d_sync:
             self._stall_frames += 1
         if is_playing:
@@ -197,7 +215,7 @@ class LakeProbe:
         """
         if not self._wall_ts:
             return None
-        if not self.has_meaningful_frames():
+        if not self.has_meaningful_frames() and self._scenario != IDLE_BASELINE_LABEL:
             carb.log_warn(
                 f"[TimeTravel] lake probe dump skipped: idle-only buffer "
                 f"frames={len(self._wall_ts)} reason={reason}")
@@ -212,6 +230,7 @@ class LakeProbe:
             "version": 1,
             "reason": reason,
             "scenario": self._scenario,
+            "n_objects": self._n_objects,
             "n_frames": len(self._wall_ts),
             "frames": {
                 "wall_ts": self._wall_ts,
@@ -221,6 +240,7 @@ class LakeProbe:
                 "d_sync": self._d_sync,
                 "d_hit": self._d_hit,
                 "playing": self._playing,
+                "apply_ms": self._apply_ms,
             },
         }
         path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")

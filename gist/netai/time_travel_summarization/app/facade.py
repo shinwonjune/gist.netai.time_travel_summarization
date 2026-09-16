@@ -84,6 +84,7 @@ class TimeTravelCore:
         # GUI E2E 재생 계측(레이크성능_실험설계 §2-C) — env 미설정 시 None(무부하).
         # env는 초기 기본값일 뿐이고, GUI Probe 섹션이 런타임에 켜고 끌 수 있다.
         self._lake_probe = None
+        self._apply_ms_acc = 0.0  # 프레임 내 프림 적용 소요 합산(계측 중에만 쌓임)
         if os.environ.get("TTS_LAKE_PROBE", "0") == "1":
             self.set_lake_probe_enabled(True)
 
@@ -194,11 +195,17 @@ class TimeTravelCore:
         current_time = self._playback.get_current_time()
         if not current_time:
             return
-        self._stage_objects.update_stage_objects(
-            self._prim_map,
-            self.get_data_at_time(current_time),
-            self._object_visibility_at(current_time),
-        )
+        data = self.get_data_at_time(current_time)          # (c) 데이터 경로 — 캐시 미스면 여기서 동기 로드
+        visibility = self._object_visibility_at(current_time)
+        probe = getattr(self, "_lake_probe", None)
+        # 계측 중이면 **프림 적용 루프만**(GetPrimAtPath·가시성·translate 쓰기 — 설계 §2-C (b))
+        # 프레임 단위로 합산한다. lookup은 일부러 밖에 둔다 — stall 프레임의 GET+디코드가
+        # apply_ms에 섞이면 (b)와 (c)가 다시 뭉친다. tick 경유(_on_playback_tick)와 슬라이더
+        # 콜백 경유(set_progress) 모두 여기를 지나므로 update()가 프레임마다 읽고 0으로 되돌린다.
+        t0 = time.perf_counter() if probe is not None else None
+        self._stage_objects.update_stage_objects(self._prim_map, data, visibility)
+        if t0 is not None:
+            self._apply_ms_acc += (time.perf_counter() - t0) * 1000
 
     def _object_visibility_at(self, current_time: datetime.datetime) -> Optional[Dict[str, bool]]:
         """current_time에서 objid별 보임/숨김. 트랙 범위 정보가 없으면(physics/합성
@@ -287,6 +294,7 @@ class TimeTravelCore:
         끌 때는 남은 버퍼를 먼저 덤프해 측정분을 잃지 않는다. None인 동안
         update()는 기존과 완전히 같은 무부하 경로를 탄다.
         """
+        self._apply_ms_acc = 0.0  # 켜고 끌 때 누적분을 비워 첫 프레임에 옛 값이 섞이지 않게
         if enabled:
             if getattr(self, "_lake_probe", None) is None:
                 from .lake_probe import LakeProbe
@@ -311,11 +319,15 @@ class TimeTravelCore:
         else:
             t0 = time.perf_counter()
             self._playback.update(dt, self._parse_timestamp, self._on_playback_tick, self._on_event_requested)
+            apply_ms = self._apply_ms_acc
+            self._apply_ms_acc = 0.0
             probe.record(
                 tick_ms=(time.perf_counter() - t0) * 1000,
                 twin_time=self._playback.get_current_time(),
                 stats=getattr(self._repository, "stats", None),
                 is_playing=self._playback.is_playing(),
+                apply_ms=apply_ms,
+                n_objects=len(self._prim_map),
             )
         if self._trace and self._trace.active:
             try:

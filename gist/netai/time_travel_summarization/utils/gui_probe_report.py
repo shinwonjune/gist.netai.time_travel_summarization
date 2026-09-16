@@ -28,6 +28,10 @@ twin_time 문자열만 있으면 된다):
     탐색에서는 stall이 얼마나 자주 나느냐(빈도)가 아니라 한 번 났을 때 얼마나
     오래 기다리느냐(1회 응답 지연)가 사용자가 겪는 것이기 때문이다.
   - tick_ms p50/p99: controller.update 소요(게이트로 스킵된 프레임 ~0 포함).
+  - apply_ms p50/p99 (2026-09-16, 덤프에 apply_ms 열이 있을 때): 프림 적용 루프
+    소요 — 객체 수 스윕에서 적용 경로(b)를 lookup·렌더와 분리해 보는 값(설계 §2-C).
+    적용이 실제로 일어난 프레임(apply_ms>0)과 아닌 프레임의 hitch율을 따로 내서
+    "적용 프레임에 hitch가 몰리는가"(간접 비용)를 본다. 구 덤프(열 없음)는 '-'.
 
 사용:
   python -m gist.netai.time_travel_summarization.utils.gui_probe_report \
@@ -99,6 +103,7 @@ def _regime_stats(f: dict, idx: List[int]) -> dict:
     # frame_interval의 첫 프레임 값 0은 직전 프레임이 없어 못 잰 것이라 통계에서 뺀다.
     intervals = [f["frame_interval_ms"][i] for i in idx if f["frame_interval_ms"][i] > 0]
     ticks = [f["tick_ms"][i] for i in idx]
+    applies = f.get("apply_ms")  # 구 덤프에는 없다
     stall_idx = [i for i in idx if f["d_sync"][i] > 0]
     stall_intervals = [f["frame_interval_ms"][i] for i in stall_idx
                        if f["frame_interval_ms"][i] > 0]
@@ -107,7 +112,29 @@ def _regime_stats(f: dict, idx: List[int]) -> dict:
     hitches = sum(1 for v in intervals if med > 0 and v > 2 * med)
     warmup = 1 if stall_idx else 0  # 구간 첫 stall = 콜드스타트(불가피)
 
+    # 적용 경로 분리(설계 §2-C (b)): 적용 프레임 vs 비적용 프레임의 hitch율.
+    # 같은 구간 중앙값(med)을 문턱으로 쓴다 — 두 집단을 같은 자로 재야 비교가 된다.
+    apply_stats = {"apply_p50_ms": None, "apply_p99_ms": None, "apply_frames": 0,
+                   "hitch_rate_apply_pct": None, "hitch_rate_noapply_pct": None}
+    if applies is not None:
+        applied_all = [i for i in idx if applies[i] > 0]          # 수·백분위수의 모집단
+        applied = [i for i in applied_all if f["frame_interval_ms"][i] > 0]  # hitch 분리에만 간격 필요
+        not_applied = [i for i in idx if applies[i] <= 0 and f["frame_interval_ms"][i] > 0]
+        av = [applies[i] for i in applied_all]
+        def _hr(ids):
+            if not ids or med <= 0:
+                return None
+            return round(100.0 * sum(1 for i in ids if f["frame_interval_ms"][i] > 2 * med) / len(ids), 2)
+        apply_stats = {
+            "apply_p50_ms": round(_percentile(av, 0.50), 3) if av else 0.0,
+            "apply_p99_ms": round(_percentile(av, 0.99), 3) if av else 0.0,
+            "apply_frames": len(applied_all),
+            "hitch_rate_apply_pct": _hr(applied),
+            "hitch_rate_noapply_pct": _hr(not_applied),
+        }
+
     return {
+        **apply_stats,
         "frames": n,
         "span_s": round(f["wall_ts"][idx[-1]] - f["wall_ts"][idx[0]], 1) if n > 1 else 0.0,
         "interval_p50_ms": round(_percentile(intervals, 0.50), 2),
@@ -138,29 +165,40 @@ def analyze(path: Path) -> dict:
         "file": path.name,
         "reason": d.get("reason"),
         "scenario": d.get("scenario", ""),
+        "n_objects": d.get("n_objects"),
         "n_frames": len(f["wall_ts"]),
         "regimes": {r: _regime_stats(f, groups[r]) for r in REGIMES},
     }
 
 
-_HEAD = ["file", "regime", "frames", "span_s", "interval p50/p95/p99 (ms)", "hitch %",
+_HEAD = ["file", "N", "regime", "frames", "span_s", "interval p50/p95/p99 (ms)", "hitch %",
          "stalls (post-warmup)", "stall %", "stall interval p50/p95/max (ms)",
-         "tick p50/p99 (ms)"]
+         "tick p50/p99 (ms)", "apply p50/p99 (ms)", "hitch % apply/no-apply"]
 
 
-def _row(name: str, regime: str, s: dict) -> str:
+def _fmt(v):
+    return "-" if v is None else v
+
+
+def _row(name: str, regime: str, s: dict, n_objects=None) -> str:
+    n = _fmt(n_objects)
     if regime == "idle":
-        # idle은 판정 대상이 아니라서 프레임 수만 참고로 싣는다(지표는 빈칸).
-        return f"| {name} | idle | {s['frames']} | " + " | ".join("-" for _ in _HEAD[3:]) + " |"
+        # idle은 판정 대상이 아니라서 프레임 수·구간·프레임 간격만 싣는다(나머지 빈칸).
+        # 프레임 간격은 idle-baseline(렌더 바닥, 설계 §2-C (a))에서 그 자체가 측정값이다.
+        return (f"| {name} | {n} | idle | {s['frames']} | {s['span_s']} | "
+                f"{s['interval_p50_ms']} / {s['interval_p95_ms']} / {s['interval_p99_ms']} | "
+                + " | ".join("-" for _ in _HEAD[6:]) + " |")
     return (
-        f"| {name} | {regime} | {s['frames']} | {s['span_s']} | "
+        f"| {name} | {n} | {regime} | {s['frames']} | {s['span_s']} | "
         f"{s['interval_p50_ms']} / {s['interval_p95_ms']} / {s['interval_p99_ms']} | "
         f"{s['hitch_rate_pct']} | "
         f"{s['stall_frames']} ({s['stall_frames_post_warmup']}) | "
         f"{s['stall_frame_rate_pct']} | "
         f"{s['stall_interval_p50_ms']} / {s['stall_interval_p95_ms']} / "
         f"{s['stall_interval_max_ms']} | "
-        f"{s['tick_p50_ms']} / {s['tick_p99_ms']} |"
+        f"{s['tick_p50_ms']} / {s['tick_p99_ms']} | "
+        f"{_fmt(s.get('apply_p50_ms'))} / {_fmt(s.get('apply_p99_ms'))} | "
+        f"{_fmt(s.get('hitch_rate_apply_pct'))} / {_fmt(s.get('hitch_rate_noapply_pct'))} |"
     )
 
 
@@ -172,7 +210,7 @@ def format_table(reports: List[dict], regimes=REGIMES, show_empty: bool = False)
         for r in regimes:
             s = rep["regimes"][r]
             if s["frames"] or show_empty:
-                lines.append(_row(rep["file"], r, s))
+                lines.append(_row(rep["file"], r, s, rep.get("n_objects")))
     return "\n".join(lines)
 
 
