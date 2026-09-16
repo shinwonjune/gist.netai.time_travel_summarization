@@ -15,6 +15,6 @@ docker run -d \
   --max-model-len 8192 \
   --max-num-seqs 256 \
   --max-num-batched-tokens 8192 \
-  --media-io-kwargs '{"video": {"num_frames": -1}}' \
+  --media-io-kwargs '{"video": {"num_frames": 20}}' \
   --host 0.0.0.0 \
   --port 38011
