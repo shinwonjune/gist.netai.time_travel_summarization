@@ -152,7 +152,8 @@ class MinioAdapter(StorageAdapter):
         values = {}
         if not path.exists():
             return values
-        for line in path.read_text().splitlines():
+        # .env에 한글 주석이 있어 플랫폼 기본 인코딩(Windows cp949)으로는 못 읽는다 — utf-8 고정
+        for line in path.read_text(encoding="utf-8").splitlines():
             line = line.strip()
             if not line or line.startswith("#") or "=" not in line:
                 continue

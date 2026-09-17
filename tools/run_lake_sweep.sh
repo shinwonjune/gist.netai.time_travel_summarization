@@ -11,7 +11,8 @@
 #   OUT_DIR   결과 디렉터리(sweep.log / sweep.pid / sweep.done 마커 포함)
 #   N ...     객체 수 격자(기본 4 10 20 30 40 50)
 # 환경변수: SWEEP_NOTE(측정 위치·회선·사양 — 판정 규약상 필수), LAKE_ROOT(기본 s3://.../trajectory),
-#          SKIP_BUILD=1(데이터셋이 이미 있을 때), SKIP_REAL=1(이음매 실궤적 측정 생략)
+#          SKIP_BUILD=1(데이터셋이 이미 있을 때), SKIP_REAL=1(이음매 실궤적 측정 생략),
+#          BENCH_OUT(파이썬 쪽 --out-dir — WSL에서 Windows python.exe를 부를 때 Windows 경로로 지정, 기본 OUT_DIR)
 #
 # 측정 위생(설계 §4-3): 같은 머신에 GUI·학습 잡 등 다른 부하가 없는 quiet run으로 돌릴 것.
 # c300은 본 측정과 같은 분할 — 1x·backward는 벽시계 360s(경계 통과 보장), 5x·seek는 180s.
@@ -21,6 +22,7 @@ PY=${1:?python}; EXT_ROOT=${2:?ext root}; OUT=${3:?out dir}; shift 3
 NS=("$@"); [ ${#NS[@]} -eq 0 ] && NS=(4 10 20 30 40 50)
 ROOT=${LAKE_ROOT:-s3://time-travel-summarization/trajectory}
 NOTE=${SWEEP_NOTE:-"QUIET RUN object-count sweep (location/link/machine: FILL IN)"}
+BENCH_OUT=${BENCH_OUT:-$OUT}
 mkdir -p "$OUT"
 LOG="$OUT/sweep.log"
 echo $$ > "$OUT/sweep.pid"
@@ -40,7 +42,7 @@ bench() {  # <dataset name> <scenarios> <wall_s>
   log "bench: $1 scenarios=$2 wall=$3"
   "$PY" -m gist.netai.time_travel_summarization.tests.lake_benchmark \
       --dataset-uri "$ROOT/$1" --scenarios "$2" --play-wall-s "$3" \
-      --out-dir "$OUT" --note "$NOTE" 2>&1 | tee -a "$LOG"
+      --out-dir "$BENCH_OUT" --note "$NOTE" 2>&1 | tee -a "$LOG"
   log "bench exit=${PIPESTATUS[0]}: $1"
 }
 run_dataset() {  # <name prefix without _cNN>

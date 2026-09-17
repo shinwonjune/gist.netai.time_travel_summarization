@@ -111,9 +111,27 @@ class JudgeTest(unittest.TestCase):
         key = (4, 60, "synth_bev_4obj_10hz_30min_v1_c60")
         self.assertEqual(latest[key][1], 2)
         self.assertEqual(latest[key][0]["seek"]["cold_seek_p99_ms"], 21.0)
+        # 같은 시나리오(1x)가 두 파일에 있으면 최신 런의 값이 남는다
+        self.assertEqual(latest[key][0]["scenarios"][0]["prefetch_lead_p50_s"], 120.0)
         a, b = format_a_table(latest), format_b_table(latest)
         self.assertIn("| 4 | 60 | synth_bev_4obj_10hz_30min_v1_c60 | 2 |", a)
         self.assertIn("| 4 | 60 | synth_bev_4obj_10hz_30min_v1_c60 | 1x |", b)
+
+    def test_split_runs_merge_scenarios(self):
+        """c300은 1x·backward 런과 5x·seek 런이 파일 두 개 — 시나리오를 합쳐야 한다(실측 2026-09-16 누락 버그)."""
+        a = _res(4, 300, lead_p50=600.0, lead_min=300.0, pf_ms=40.0, cold_p50=38.0, cold_p99=41.0,
+                 measured="2026-09-16 18:20:00", scenario="1x")
+        a["scenarios"].append(dict(a["scenarios"][0], scenario="backward"))
+        b = _res(4, 300, lead_p50=120.0, lead_min=60.0, pf_ms=45.0, cold_p50=39.0, cold_p99=42.0,
+                 measured="2026-09-16 18:23:00", scenario="5x")
+        b["scenarios"].append({"scenario": "seek", "stalls": 0, "warmup_cold_loads": 1, "seek_p50_ms": 40.0, "seek_p99_ms": 55.0})
+        merged, n = pick_latest([a, b])[(4, 300, "synth_bev_4obj_10hz_30min_v1_c300")]
+        self.assertEqual(n, 2)
+        self.assertEqual([s["scenario"] for s in merged["scenarios"]], ["1x", "5x", "backward", "seek"])
+        self.assertEqual(merged["seek"]["cold_seek_p50_ms"], 39.0)   # transport/seek는 최신 파일
+        rows = {r["scenario"]: r for r in safety_factors(merged)}
+        self.assertEqual(rows["1x"]["lead_p50_s"], 600.0)
+        self.assertEqual(rows["backward"]["lead_p50_s"], 600.0)
 
     def test_session_tail_raises_threshold(self):
         """§4-4: 문턱 = max(고정, 세션 관측 꼬리 배율) — 꼬리가 25면 SF 20은 실용 한계에 걸린다."""

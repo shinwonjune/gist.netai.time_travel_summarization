@@ -22,8 +22,10 @@
       "artifacts/benchmarks/lake_bench_aigrad_bev_*.json" [--sf-threshold 10] [--seek-ms 100]
 
 키는 (N, chunk_seconds, 데이터셋 이름)이라 실궤적 N=4와 합성 N=4는 별개 행으로 나란히
-놓인다(§1-1 이음매 검사). 같은 키에 결과 파일이 여럿이면 measured_at이 가장 늦은 것을 쓰고
-개수를 표시한다. §4-4의 한계 판정은 합성(`{N}obj`) 행만으로 한다. 실용 한계 문턱은
+놓인다(§1-1 이음매 검사). 같은 키에 결과 파일이 여럿이면 **시나리오 단위로 합친다** —
+transport·seek는 measured_at이 가장 늦은 파일 것을, 시나리오는 이름별로 가장 늦은 런 것을
+쓴다(c300은 1x·backward 360s 런과 5x·seek 180s 런이 파일 두 개로 나뉘는 것이 정상 분할이다).
+runs 열은 합친 파일 수. §4-4의 한계 판정은 합성(`{N}obj`) 행만으로 한다. 실용 한계 문턱은
 `max(--sf-threshold, 이 세션의 관측 꼬리 배율)` — §3-1 "고정값 10과 세션별 관측 배율 병기".
 순수 stdlib.
 """
@@ -77,15 +79,29 @@ def dataset_key(res: dict) -> Tuple[Optional[int], Optional[int], str]:
     return (int(n) if n else None, res.get("transport", {}).get("chunk_seconds"), label)
 
 
+def _merge_runs(runs: List[dict]) -> dict:
+    """같은 데이터셋의 결과 파일 여러 개 → 하나. transport/seek는 최신 파일, 시나리오는 이름별 최신 런."""
+    ordered = sorted(runs, key=lambda r: r.get("measured_at", ""))
+    merged = dict(ordered[-1])
+    by_scn: Dict[str, dict] = {}
+    for r in ordered:  # 오래된 것부터 덮어써서 최신이 남는다
+        for sc in r.get("scenarios", []):
+            by_scn[sc.get("scenario")] = sc
+    merged["scenarios"] = [by_scn[k] for k in sorted(by_scn, key=lambda k: (
+        SCENARIO_ORDER.index(k) if k in SCENARIO_ORDER else len(SCENARIO_ORDER), k))]
+    merged["_files"] = [r.get("_file", "") for r in ordered]
+    return merged
+
+
 def pick_latest(results: List[dict]) -> Dict[Tuple[int, int, str], Tuple[dict, int]]:
-    """키별 최신 결과와 그 키의 파일 수."""
+    """키별로 파일들을 시나리오 단위로 합친 결과와 그 키의 파일 수."""
     by: Dict[Tuple[int, int, str], List[dict]] = {}
     for r in results:
         k = dataset_key(r)
         if k[0] is None or k[1] is None:
             continue
         by.setdefault(k, []).append(r)
-    return {k: (max(v, key=lambda r: r.get("measured_at", "")), len(v)) for k, v in by.items()}
+    return {k: (_merge_runs(v), len(v)) for k, v in by.items()}
 
 
 def session_tail_ratio(latest) -> Optional[float]:
