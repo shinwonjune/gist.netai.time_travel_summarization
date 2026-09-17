@@ -125,12 +125,23 @@ class LakeProbeTest(unittest.TestCase):
             self._record(probe, False, twin=twin, n_objects=40)
             payload = json.loads(next(Path(d).glob("gui_probe_*.json")).read_text(encoding="utf-8"))
             self.assertEqual(payload["n_objects"], 40)
+            self.assertIsNone(payload["tick_min_s"])  # 생성자에 안 주면 None
             self.assertEqual(payload["frames"]["apply_ms"], [0.0, 3.25, 0.0])
             rep = analyze(next(Path(d).glob("gui_probe_*.json")))
             self.assertEqual(rep["n_objects"], 40)
             play = rep["regimes"]["playback"]
             self.assertEqual(play["apply_frames"], 1)
             self.assertEqual(play["apply_p50_ms"], 3.25)
+
+    def test_tick_gate_in_header(self):
+        """덤프 헤더에 갱신 게이트 값이 남아야 한다(측정 조건 계보, 2026-09-17)."""
+        with tempfile.TemporaryDirectory() as d:
+            probe = LakeProbe(out_dir=Path(d), max_frames=100, tick_min_s=0.1)
+            self._record(probe, True)
+            path = probe.dump(reason="manual")
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            self.assertEqual(payload["tick_min_s"], 0.1)
+            self.assertEqual(analyze(path)["tick_min_s"], 0.1)
 
     def test_idle_baseline_label_dumps_idle_only_buffer(self):
         """렌더 바닥 측정용 라벨은 idle 전용 버퍼도 저장한다(설계 §2-C (a))."""

@@ -14,7 +14,8 @@ facade.update(dt)가 매 앱 프레임 record()를 호출한다. 기본(env 미�
   apply_ms           이 프레임에서 프림 적용(update_stage_objects) 루프에 든 시간 —
                      tick 경유든 슬라이더 콜백 경유든 합산(2026-09-16, 객체 수 스윕:
                      lookup과 적용 경로를 분리해 귀속하기 위함, 설계 §2-C)
-덤프 헤더에는 n_objects(prim_map 크기)를 함께 남긴다.
+덤프 헤더에는 n_objects(prim_map 크기)와 tick_min_s(갱신 게이트 TTS_TICK_MIN_S — "무슨
+게이트로 쟀나"를 파일만 보고 확인하기 위함, 2026-09-17)를 함께 남긴다.
 
 링버퍼 상한 36,000 프레임(10분@60fps). 덤프 트리거: 재생 정지(playing→not)
 전이, 상한 도달, 또는 GUI의 Dump 버튼(수동) → artifacts/benchmarks/
@@ -82,7 +83,7 @@ def sanitize_scenario(name) -> str:
 
 class LakeProbe:
     def __init__(self, out_dir: Optional[Path] = None, max_frames: int = MAX_FRAMES,
-                 scenario: str = ""):
+                 scenario: str = "", tick_min_s: Optional[float] = None):
         # EXT_ROOT/artifacts/benchmarks (app/ -> tts -> netai -> gist -> EXT_ROOT)
         self._out_dir = Path(out_dir) if out_dir else \
             Path(__file__).resolve().parents[4] / "artifacts" / "benchmarks"
@@ -93,6 +94,7 @@ class LakeProbe:
         self._was_playing = False
         self._scenario = sanitize_scenario(scenario)
         self._n_objects = None  # 덤프 헤더용 — facade가 매 프레임 prim_map 크기를 넘긴다
+        self._tick_min_s = tick_min_s  # 덤프 헤더용 — 계측 시작 시 컨트롤러의 게이트 값
         self._reset_buffer()
 
     def _reset_buffer(self):
@@ -231,6 +233,7 @@ class LakeProbe:
             "reason": reason,
             "scenario": self._scenario,
             "n_objects": self._n_objects,
+            "tick_min_s": self._tick_min_s,
             "n_frames": len(self._wall_ts),
             "frames": {
                 "wall_ts": self._wall_ts,

@@ -166,6 +166,7 @@ def analyze(path: Path) -> dict:
         "reason": d.get("reason"),
         "scenario": d.get("scenario", ""),
         "n_objects": d.get("n_objects"),
+        "tick_min_s": d.get("tick_min_s"),   # 갱신 게이트(구 덤프는 None)
         "n_frames": len(f["wall_ts"]),
         "regimes": {r: _regime_stats(f, groups[r]) for r in REGIMES},
     }
@@ -263,6 +264,11 @@ def main(argv=None):
     if not reports:
         raise SystemExit("no probe files")
 
+    # 측정 조건 계보: 파일마다 N과 갱신 게이트를 한 줄로 — 표를 읽기 전에 "무슨 조건이었나"
+    for rep in reports:
+        print(f"{rep['file']}: N={rep.get('n_objects')} tick_min_s={rep.get('tick_min_s')} "
+              f"scenario={rep.get('scenario') or '-'}")
+    print()
     regimes = REGIMES if args.regime == "all" else (args.regime,)
     # 구간을 하나로 콕 집어 물었을 때는 그 구간이 0프레임이라는 사실 자체가 답이므로
     # 빈 행도 보여 준다. all일 때는 표가 길어지기만 하므로 생략한다.

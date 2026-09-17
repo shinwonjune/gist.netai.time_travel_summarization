@@ -298,7 +298,8 @@ class TimeTravelCore:
         if enabled:
             if getattr(self, "_lake_probe", None) is None:
                 from .lake_probe import LakeProbe
-                self._lake_probe = LakeProbe()
+                self._lake_probe = LakeProbe(
+                    tick_min_s=getattr(self._playback, "_tick_min_s", None))
                 carb.log_warn("[TimeTravel] lake probe enabled")
         else:
             probe = getattr(self, "_lake_probe", None)
