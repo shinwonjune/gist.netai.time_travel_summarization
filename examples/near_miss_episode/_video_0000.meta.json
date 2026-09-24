@@ -1,0 +1,18 @@
+{
+  "capture_start": "2026-08-21T18:34:17",
+  "wall_clock": "2026-08-21T14:05:15.366724",
+  "duration_s": 30.0,
+  "fps": 30,
+  "width": 720,
+  "height": 480,
+  "mode": "physics",
+  "video": "_video_0000.mp4",
+  "collisions_csv": "/home/netai/wonjune/kit-app-template/source/extensions/gist.netai.time_travel_summarization/gist/netai/time_travel_summarization/artifacts/collisions/collisions_20260821T140515.csv",
+  "collision_distance": 59.99488649368286,
+  "objid_to_label": {
+    "obj001": "1",
+    "obj002": "2",
+    "obj003": "3",
+    "obj004": "4"
+  }
+}

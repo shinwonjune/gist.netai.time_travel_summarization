@@ -1,0 +1,20 @@
+{
+  "capture_start": "2026-08-17T07:44:36",
+  "wall_clock": "2026-08-23T06:22:24.834651",
+  "duration_s": 30.0,
+  "fps": 30,
+  "width": 720,
+  "height": 480,
+  "mode": "playback",
+  "video": "replay_20260817T074436_20260817T074506.mp4",
+  "collisions_csv": null,
+  "collision_distance": null,
+  "objid_to_label": {
+    "obj001": "1",
+    "obj002": "2",
+    "obj003": "3",
+    "obj004": "4"
+  },
+  "replay_start": "2026-08-17T07:44:36",
+  "replay_end": "2026-08-17T07:45:05.966000"
+}
