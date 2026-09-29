@@ -98,9 +98,11 @@ physics 패키지의 산출물과 대응하고, `perturb_eval/<run-tag>/` 아래
 `check_near_miss_diversity`로 좌표 불변식(접촉 없음, 실제 접근함, 조우 지점의
 공간적 다양성)을 자체 검증한다.
 
-핵심 게이트: 물리 에피소드를 거친 프림은 PhysX가 표준 xform op 스택을 바꿔
-놓아 `XformCommonAPI`의 `SetTranslate`가 조용히 무시된다. 그래서 `apply_positions`
-는 항상 translate op를 직접 찾거나 만들어(find-or-add) 설정한다.
+핵심 게이트: PhysX 시뮬레이션이 살아 있는 동안(타임라인 재생 중이나 일시정지,
+`stop()` 전 — 이 루프는 stop을 호출하지 않으므로 에피소드 사이가 항상 이 상태)
+PhysX가 프림 스택에 orient와 scale op를 덧붙여 `XformCommonAPI`가 비호환으로
+판정하고, `SetTranslate`는 예외 없이 False만 돌려주며 무시된다(Kit 실기 검증). 그래서
+`apply_positions`는 항상 translate op를 직접 찾거나 만들어(find-or-add) 설정한다.
 
 CLI(`python automation/generate_episodes.py -- --episodes N --out DIR ...`):
 

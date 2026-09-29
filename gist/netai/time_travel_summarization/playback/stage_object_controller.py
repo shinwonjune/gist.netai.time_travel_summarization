@@ -8,8 +8,11 @@ from pxr import Gf, UsdGeom
 def _get_or_add_translate_op(xformable: UsdGeom.Xformable) -> UsdGeom.XformOp:
     """ordered xform ops에서 translate op를 찾아 반환하고, 없으면 추가한다.
 
-    XformCommonAPI 대신 이 패턴을 쓰는 이유: physics를 거친 프림에서
-    XformCommonAPI는 예외 없이 조용히 실패한다(프로젝트 표준, physics일지 §39 (e-3)).
+    XformCommonAPI 대신 이 패턴을 쓰는 이유: PhysX 시뮬레이션이 살아 있는 동안
+    (타임라인 재생 중/일시정지, stop 전) PhysX가 프림 스택에 orient(quatf)·scale op를
+    덧붙여 XformCommonAPI 비호환이 되고, SetTranslate는 예외 없이 False만 돌려주고
+    무시된다. 이 패턴은 그 상태에서도 동작한다(2026-09-24 Kit 실기 검증, 프로젝트 표준,
+    physics일지 §39 (e-3)).
     """
     for op in xformable.GetOrderedXformOps():
         if op.GetOpType() == UsdGeom.XformOp.TypeTranslate:

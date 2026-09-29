@@ -533,12 +533,15 @@ def _get_core():
 def apply_positions(core, positions: Dict[str, Tuple[float, float, float]]) -> None:
     """프림 이동 — translate op를 찾아/만들어 직접 설정 (XformCommonAPI 금지).
 
-    XformCommonAPI는 표준 op 스택에서만 동작하고, physics 에피소드를 거친 프림은
-    PhysX가 스택을 바꿔 놓아 SetTranslate가 **조용히 무시**된다(2026-08-15 게이트
-    실측: ep0만 적용되고 ep1+는 전부 무시 → 매 에피소드 같은 자리에서 시작 + 즉시
-    충돌. run19의 "이동 명령 무시 정황"의 정체). 구경로에서는 set_to_earliest_time의
-    playback 갱신이 스택을 만져 우연히 가려졌던 결함이라, playback 컨트롤러가 쓰는
-    검증된 패턴(TypeTranslate op find-or-add)으로 통일한다.
+    XformCommonAPI는 표준 op 스택에서만 동작하는데, PhysX 시뮬이 살아 있는 동안
+    (timeline 재생 중/일시정지 — 이 루프는 stop()을 호출하지 않으므로 에피소드 사이가
+    항상 이 상태) PhysX가 스택에 orient(quatf)·scale op를 덧붙여 비호환이 되고,
+    SetTranslate는 예외 없이 **False를 반환하며 무시**된다(2026-08-15 게이트 실측:
+    ep0만 적용되고 ep1+는 전부 무시 → 매 에피소드 같은 자리에서 시작 + 즉시 충돌.
+    run19의 "이동 명령 무시 정황"의 정체. 2026-09-24 Kit 실기 검증으로 원인 확정,
+    timeline.stop() 후에는 스택·포즈가 원복되어 다시 동작함). 구경로에서는
+    set_to_earliest_time의 playback 갱신이 스택을 만져 우연히 가려졌던 결함이라,
+    playback 컨트롤러가 쓰는 검증된 패턴(TypeTranslate op find-or-add)으로 통일한다.
     """
     import omni.usd
     from pxr import UsdGeom, Gf
